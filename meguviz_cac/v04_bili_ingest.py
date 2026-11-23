@@ -194,17 +194,32 @@ def sanitize_record(raw: dict, fallback_meta: dict) -> dict | None:
     }
 
 
-def ingest_dir(
+def parse_pubdate_ts(val) -> int | None:
+    if isinstance(val, (int, float)) and val > 1_000_000_000:
+        return int(val / 1000.0 if val > 1e11 else val)
+    if isinstance(val, str):
+        m = re.search(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?", val)
+        if m:
+            yr, mo, dy = int(m[1]), int(m[2]), int(m[3])
+            hr, mn, sc = int(m[4] or 0), int(m[5] or 0), int(m[6] or 0)
+            return int(datetime(yr, mo, dy, hr, mn, sc, tzinfo=TZ_CN).timestamp())
+    return None
+
+
+def strip_ip_suffix(disp: str) -> str:
+    return re.split(r"IP\s*[属屬]地", str(disp or ""))[0].strip()
+
+
+def _ingest_files(
     db: sqlite3.Connection,
-    scan_dir: Path,
+    files: list[Path],
+    extract_fn,
     legacy_db: Path = DEFAULT_LEGACY_DB,
-    pattern: str = "bili_v04_*.jsonl*",
 ) -> dict:
     _, legacy_hashes = load_legacy_hashes(legacy_db)
     existing_hashes = {r[0] for r in db.execute("SELECT body_hash FROM comments")}
     seen_hashes = legacy_hashes | existing_hashes
 
-    files = sorted(scan_dir.glob(pattern))
     files_processed = 0
     total_submitted = 0
     total_added = 0
@@ -223,58 +238,44 @@ def ingest_dir(
         file_added = 0
         video_stats: dict[str, dict] = {}
         with db:
-            for item in iter_jsonl_lines(path):
-                if isinstance(item, dict) and isinstance(item.get("rows"), list):
-                    fallback = {
-                        "bvid": item.get("bvid"),
-                        "partition": item.get("partition") or item.get("sampled_from_channel"),
-                        "title": item.get("title"),
-                        "pubdate": item.get("pubdate"),
-                        "capture_date": item.get("capture_date"),
-                        "sort": item.get("sort"),
-                    }
-                    candidates = item["rows"]
-                elif isinstance(item, dict):
-                    fallback = {}
-                    candidates = [item]
-                else:
+            for item_result in extract_fn(path):
+                if item_result is None:
                     total_filtered += 1
                     continue
-
-                for raw in candidates:
-                    total_submitted += 1
-                    rec = sanitize_record(raw, fallback) if isinstance(raw, dict) else None
-                    if rec is None:
-                        total_filtered += 1
-                        continue
-                    if rec["body_hash"] in seen_hashes:
-                        total_dups += 1
-                        continue
-                    seen_hashes.add(rec["body_hash"])
-                    rc = db.execute(
-                        "INSERT OR IGNORE INTO comments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            rec["sample_id"],
-                            rec["body_hash"],
-                            rec["video_id"],
-                            rec["partition"],
-                            rec["era_bucket"],
-                            rec["comment_level"],
-                            rec["posted_ts"],
-                            rec["posted_time_display"],
-                            rec["metadata_json"],
-                        ),
-                    ).rowcount
-                    if rc:
-                        total_added += 1
-                        file_added += 1
-                        vs = video_stats.setdefault(
-                            rec["video_id"],
-                            {"partition": rec["partition"], "era": rec["era_bucket"], "title": rec["title"], "pubdate": rec["pubdate"], "n": 0},
-                        )
-                        vs["n"] += 1
-                    else:
-                        total_dups += 1
+                raw, fallback = item_result
+                total_submitted += 1
+                rec = sanitize_record(raw, fallback) if isinstance(raw, dict) else None
+                if rec is None:
+                    total_filtered += 1
+                    continue
+                if rec["body_hash"] in seen_hashes:
+                    total_dups += 1
+                    continue
+                seen_hashes.add(rec["body_hash"])
+                rc = db.execute(
+                    "INSERT OR IGNORE INTO comments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        rec["sample_id"],
+                        rec["body_hash"],
+                        rec["video_id"],
+                        rec["partition"],
+                        rec["era_bucket"],
+                        rec["comment_level"],
+                        rec["posted_ts"],
+                        rec["posted_time_display"],
+                        rec["metadata_json"],
+                    ),
+                ).rowcount
+                if rc:
+                    total_added += 1
+                    file_added += 1
+                    vs = video_stats.setdefault(
+                        rec["video_id"],
+                        {"partition": rec["partition"], "era": rec["era_bucket"], "title": rec["title"], "pubdate": rec["pubdate"], "n": 0},
+                    )
+                    vs["n"] += 1
+                else:
+                    total_dups += 1
 
             for bvid, vs in video_stats.items():
                 db.execute(
@@ -300,6 +301,74 @@ def ingest_dir(
         "filtered": total_filtered,
         **status_report(db, legacy_db=legacy_db),
     }
+
+
+def ingest_dir(
+    db: sqlite3.Connection,
+    scan_dir: Path,
+    legacy_db: Path = DEFAULT_LEGACY_DB,
+    pattern: str = "bili_v04_*.jsonl*",
+) -> dict:
+    def _extract_jsonl(path: Path):
+        for item in iter_jsonl_lines(path):
+            if isinstance(item, dict) and isinstance(item.get("rows"), list):
+                fallback = {
+                    "bvid": item.get("bvid"),
+                    "partition": item.get("partition") or item.get("sampled_from_channel"),
+                    "title": item.get("title"),
+                    "pubdate": item.get("pubdate"),
+                    "capture_date": item.get("capture_date"),
+                    "sort": item.get("sort"),
+                }
+                for raw in item["rows"]:
+                    yield raw, fallback
+            elif isinstance(item, dict):
+                yield item, {}
+            else:
+                yield None
+
+    return _ingest_files(db, sorted(scan_dir.glob(pattern)), _extract_jsonl, legacy_db=legacy_db)
+
+
+def ingest_browser_steps(
+    db: sqlite3.Connection,
+    steps_dir: Path,
+    legacy_db: Path = DEFAULT_LEGACY_DB,
+) -> dict:
+    def _extract_step(path: Path):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        val = payload.get("value")
+        batches = []
+        if isinstance(val, dict):
+            if val.get("kind") == "bili_v04_dom_batch":
+                batches = [val]
+            elif isinstance(val.get("batches"), list):
+                batches = [b for b in val["batches"] if isinstance(b, dict) and b.get("kind") == "bili_v04_dom_batch"]
+        for b in batches:
+            pub_ts = parse_pubdate_ts(b.get("video_pubdate"))
+            fallback = {
+                "bvid": b.get("bvid"),
+                "partition": b.get("partition"),
+                "title": b.get("title"),
+                "pubdate": pub_ts,
+                "capture_date": b.get("capture_date") or "",
+                "sort": "dom_scroll",
+            }
+            top_texts = b.get("top_texts") or []
+            top_times = b.get("top_times") or []
+            for i, txt in enumerate(top_texts):
+                disp = strip_ip_suffix(top_times[i] if i < len(top_times) else "")
+                yield {"text": txt, "displayed_time": disp, "comment_level": "top"}, fallback
+            reply_texts = b.get("reply_texts") or []
+            reply_times = b.get("reply_times") or []
+            for i, txt in enumerate(reply_texts):
+                disp = strip_ip_suffix(reply_times[i] if i < len(reply_times) else "")
+                yield {"text": txt, "displayed_time": disp, "comment_level": "reply"}, fallback
+
+    return _ingest_files(db, sorted(steps_dir.glob("step_*.json")), _extract_step, legacy_db=legacy_db)
 
 
 def status_report(db: sqlite3.Connection, legacy_db: Path = DEFAULT_LEGACY_DB, plan_path: Path = DEFAULT_PLAN) -> dict:
@@ -362,6 +431,7 @@ def main() -> None:
     parser.add_argument("--legacy-db", type=Path, default=DEFAULT_LEGACY_DB)
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--import-dir", type=Path)
+    action.add_argument("--import-browser-steps", type=Path)
     action.add_argument("--status", action="store_true")
     action.add_argument("--export", type=Path)
     args = parser.parse_args()
@@ -369,6 +439,8 @@ def main() -> None:
     with closing(connect(args.db)) as db:
         if args.import_dir is not None:
             print(json.dumps(ingest_dir(db, args.import_dir, legacy_db=args.legacy_db), ensure_ascii=False, indent=2))
+        elif args.import_browser_steps is not None:
+            print(json.dumps(ingest_browser_steps(db, args.import_browser_steps, legacy_db=args.legacy_db), ensure_ascii=False, indent=2))
         elif args.status:
             print(json.dumps(status_report(db, legacy_db=args.legacy_db), ensure_ascii=False, indent=2))
         else:
