@@ -97,6 +97,24 @@ def select_pool(data_path: Path, out_path: Path, total_cap: int = 15000, seed: i
     rng.shuffle(synth_train)
     add_rows(synth_train, 1500, "synth_style_verified")
 
+    groups = ("bili_persona_trap", "bili_dsh_train", "bili_nondsh_hard", "synth_style_verified")
+    weights = (2, 5, 2, 1)
+    by_group = {g: [r for r in pool if r["pool_group"] == g] for g in groups}
+    idx = {g: 0 for g in groups}
+    interleaved = []
+    while len(interleaved) < len(pool):
+        progressed = False
+        for g, w in zip(groups, weights):
+            bucket = by_group[g]
+            take = min(w, len(bucket) - idx[g])
+            if take > 0:
+                interleaved.extend(bucket[idx[g] : idx[g] + take])
+                idx[g] += take
+                progressed = True
+        if not progressed:
+            break
+    pool = interleaved
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="\n") as f:
         for row in pool:
@@ -173,7 +191,7 @@ class QwenRunner:
         elif self.vram_gb >= 38.0:
             candidates = ["Qwen/Qwen3.8-27B-FP8", "unsloth/Qwen3.8-27B-unsloth-bnb-4bit"]
         else:
-            candidates = ["unsloth/Qwen3.8-27B-unsloth-bnb-4bit", "greghavens/Qwen3.8-27B-bnb-4bit", "Qwen/Qwen3.8-27B"]
+            candidates = ["greghavens/Qwen3.8-27B-bnb-4bit", "unsloth/Qwen3.8-27B-unsloth-bnb-4bit", "Qwen/Qwen3.8-27B"]
 
         if backend_pref == "vllm" or (backend_pref == "auto" and self.vram_gb >= 38.0):
             try:
@@ -270,20 +288,40 @@ class QwenRunner:
 
         import torch
 
-        enc = self.tokenizer(formatted, return_tensors="pt", padding=True, truncation=True, max_length=2048).to(self.model.device)
-        prompt_len = enc["input_ids"].shape[1]
-        with torch.no_grad():
-            out = self.model.generate(
-                **enc,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
-        replies = []
-        for row in out:
-            txt = self.tokenizer.decode(row[prompt_len:], skip_special_tokens=True)
-            replies.append(re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip())
-        return replies
+        def _gen_hf_once(chunk: list[str]) -> list[str]:
+            enc = self.tokenizer(
+                chunk, return_tensors="pt", padding=True, truncation=True, max_length=2048
+            ).to(self.model.device)
+            prompt_len = enc["input_ids"].shape[1]
+            with torch.no_grad():
+                out = self.model.generate(
+                    **enc,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+            replies = []
+            for row in out:
+                txt = self.tokenizer.decode(row[prompt_len:], skip_special_tokens=True)
+                replies.append(re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip())
+            return replies
+
+        def _gen_hf(chunk: list[str]) -> list[str]:
+            oom = False
+            try:
+                return _gen_hf_once(chunk)
+            except torch.cuda.OutOfMemoryError:
+                if len(chunk) <= 1:
+                    raise
+                oom = True
+            if oom:
+                torch.cuda.empty_cache()
+                mid = len(chunk) // 2
+                print(f"[Qwen/HF] OOM on batch={len(chunk)}, splitting to {mid}+{len(chunk) - mid}", flush=True)
+                return _gen_hf(chunk[:mid]) + _gen_hf(chunk[mid:])
+            return []
+
+        return _gen_hf(formatted)
 
 
 def run_qwen_distill(args) -> None:
