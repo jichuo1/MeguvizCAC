@@ -175,7 +175,7 @@ class QwenRunner:
         else:
             candidates = ["unsloth/Qwen3.8-27B-unsloth-bnb-4bit", "greghavens/Qwen3.8-27B-bnb-4bit", "Qwen/Qwen3.8-27B"]
 
-        if backend_pref in ("auto", "vllm"):
+        if backend_pref == "vllm" or (backend_pref == "auto" and self.vram_gb >= 38.0):
             try:
                 from vllm import LLM
                 from transformers import AutoTokenizer
@@ -204,8 +204,15 @@ class QwenRunner:
                 if backend_pref == "vllm":
                     raise
 
-        # Transformers fallback (works on H100 BF16/FP8 or L4 4-bit)
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        # Transformers loader (supports native VLM AutoModelForImageTextToText / AutoModelForMultimodalLM + CausalLM fallback)
+        import transformers
+        from transformers import AutoTokenizer, BitsAndBytesConfig
+
+        model_classes = []
+        for cls_name in ("AutoModelForImageTextToText", "AutoModelForMultimodalLM", "AutoModelForVision2Seq", "AutoModelForCausalLM"):
+            cls = getattr(transformers, cls_name, None)
+            if cls is not None:
+                model_classes.append((cls_name, cls))
 
         last_err = None
         for mid in candidates:
@@ -225,13 +232,23 @@ class QwenRunner:
                     )
                 else:
                     kwargs["torch_dtype"] = torch.bfloat16
-                mdl = AutoModelForCausalLM.from_pretrained(mid, **kwargs)
+
+                mdl = None
+                for cls_name, cls in model_classes:
+                    try:
+                        mdl = cls.from_pretrained(mid, **kwargs)
+                        print(f"[Qwen/HF] 成功通过 {cls_name} 加载 {mid}", flush=True)
+                        break
+                    except Exception as cls_err:
+                        last_err = cls_err
+                        print(f"[Qwen/HF] {cls_name} 加载 {mid} 未匹配: {str(cls_err)[:180]}", flush=True)
+                if mdl is None:
+                    continue
                 mdl.eval()
                 self.backend = "transformers"
                 self.model_id = mid
                 self.tokenizer = tok
                 self.model = mdl
-                print(f"[Qwen/HF] 成功加载 {mid}", flush=True)
                 return
             except Exception as err:
                 last_err = err

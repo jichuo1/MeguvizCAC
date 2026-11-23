@@ -546,13 +546,16 @@ def train_and_export(args) -> None:
         "cpu_1thread_ms_per_comment": round(cpu_ms, 2),
     }
 
-    # Save tokenizer assets & manifest
+    # Save tokenizer assets & manifest (explicitly export vocab.txt even on transformers v5+)
     tok_dir = out_dir / "tok_tmp"
     tokenizer.save_pretrained(tok_dir)
-    for fn in ("vocab.txt", "tokenizer_config.json", "special_tokens_map.json"):
+    for fn in ("vocab.txt", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"):
         src = tok_dir / fn
         if src.is_file():
             shutil.copy2(src, out_dir / fn)
+    if not (out_dir / "vocab.txt").is_file():
+        vocab_items = sorted(tokenizer.get_vocab().items(), key=lambda kv: kv[1])
+        (out_dir / "vocab.txt").write_text("\n".join(tok for tok, _ in vocab_items) + "\n", encoding="utf-8")
     shutil.rmtree(tok_dir, ignore_errors=True)
 
     onnx_sha = sha256_file(int8_onnx)
@@ -598,7 +601,7 @@ def train_and_export(args) -> None:
 
     zip_path = out_dir / f"meguvizcac-{args.version}-int8.zip"
     with ZipFile(zip_path, "w", compression=ZIP_DEFLATED, compresslevel=5) as zf:
-        for fn in (int8_onnx.name, "manifest.json", "vocab.txt", "tokenizer_config.json", "special_tokens_map.json", metrics_file.name):
+        for fn in (int8_onnx.name, "manifest.json", "vocab.txt", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", metrics_file.name):
             fp = out_dir / fn
             if fp.is_file():
                 zf.write(fp, fn)

@@ -14,12 +14,15 @@
   - Export `bili-hydrogen-rescored-350387.jsonl.gz` verified bit-for-bit (SHA256 `e6714373e3968c4a21fd36e377e29bedccb52b937ed8c79c156e5bf3a413378c`).
 - Independent 60-sample flip audit (`hydrogen-final-audit.md`): **52/60 (86.7%)** strict pass rate (**93.3%** direct blind), identified `本鱼+空格/颜文字` & `uncertainty >= 15` border filters for Stage-2.
 
-## Phase 2 — `MeguvizCAC` Repo Init & `v0.1` INT8 ONNX Baseline [IN PROGRESS]
+## Phase 2 — `MeguvizCAC` Repo Init & `v0.1` INT8 ONNX Baseline [DONE]
 - [x] Initialize `jichuo1/MeguvizCAC` public repository & `v0.1-data` Release
-- [ ] Train `MeguvizCAC v0.1` (`BAAI/bge-small-zh-v1.5`) on Colab L4 GPU with zero val/test/probe leakage
-- [ ] Export `meguvizcac-v0.1-int8.onnx`, verify CPU parity & latency, publish Release `v0.1.0`
+- [x] Train `MeguvizCAC v0.1` (`BAAI/bge-small-zh-v1.5`) on Colab L4 GPU with zero val/test/probe leakage (`best_synth_cap=0`, `T=1.0223`)
+  - `test_bili_gold` (`n=263`): **AUROC `0.9552`**, **AP `0.9349`**, **Spearman `0.8537`**, **MAE `10.525`** (`@val_fpr05`: Precision `92.71%`, Recall `82.41%`, FPR `4.52%`, F0.5 `0.9045`)
+  - `test_dsh_gold` (`n=218`): **AUROC `0.9476`**, **Spearman `0.8377`**
+  - `probe_u001_u017` (`n=17`): **AUROC `0.8667`**, **AP `0.9516`**, `@0.70` Precision `100.0%` / Recall `75.0%`
+- [x] Export `meguvizcac-v0.1-int8.onnx` (`23,935,914` bytes), verify Windows CPU latency (`4.60 ms/row`) & parity (`MAE=0.0131`), publish Release `v0.1.0`
 
-## Phase 3 — `Qwen3.8-27B` Comment-Understanding Distillation [PENDING]
+## Phase 3 — `Qwen3.8-27B` Comment-Understanding Distillation [IN PROGRESS]
 - [ ] Select ~12k–15k `train`-only high-leverage pool (`meguviz_cac/qwen_distill.py`)
 - [ ] Run 100-row throughput pilot (`enable_thinking=False`) on Colab L4/A100
 - [ ] Extract continuous probabilities, 8 pragmatic tags, semantic intents & counterfactual twins

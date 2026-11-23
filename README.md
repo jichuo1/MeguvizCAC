@@ -30,8 +30,8 @@
 
 | Version | Backbone & Format | `test_bili_gold` AUROC | `test_bili_gold` Spearman | `probe_u001_u017` AUROC / Recall@70 | CPU Latency (ms/row) | Status |
 | :--- | :--- | ---: | ---: | ---: | ---: | :--- |
-| **`v0.1`** | `BAAI/bge-small-zh-v1.5` INT8 ONNX | *Pending* | *Pending* | *Pending* | *Pending* | In Progress |
-| **`v0.2`** | Dual-Teacher (`Qwen3.8-27B` + Gemini 4) INT8 ONNX | *Pending* | *Pending* | *Pending* | *Pending* | Planned |
+| **`v0.1`** | `BAAI/bge-small-zh-v1.5` INT8 ONNX (`23.9 MB`) | `0.9552` | `0.8537` | `0.8667` / `75.0%` (`P=1.00`) | `4.60 ms` (`1-thread Win`) / `9.73 ms` (`Colab`) | Released (`v0.1.0`) |
+| **`v0.2`** | Dual-Teacher (`Qwen3.8-27B` + Gemini 4) INT8 ONNX | *Pending* | *Pending* | *Pending* | *Pending* | In Progress |
 
 ---
 
@@ -46,4 +46,4 @@
 ## Colab Notebooks
 
 - **Stage-1 Relabeling (`MeguvizModel 06`)**: [Colab Link](https://colab.research.google.com/drive/1_YT29gFwdCKwFaF7gV_QnzdkFYAAVQWO)
-- **Stage-2 Student & Qwen3.8-27B (`MeguvizCAC 07`)**: *Link added once created*
+- **Stage-2 Student & Qwen3.8-27B (`MeguvizCAC 07`)**: [Colab Link](https://colab.research.google.com/drive/1lshjncyEzJ1yWw98kxoasEnvDFHwj-ru)

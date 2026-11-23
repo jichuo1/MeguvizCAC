@@ -41,18 +41,32 @@ def _is_cjk(ch: str) -> bool:
 
 
 class BasicWordPieceTokenizer:
-    """Minimal BertTokenizer compatible with BAAI/bge-small-zh-v1.5 vocab.txt."""
+    """Minimal BertTokenizer compatible with BAAI/bge-small-zh-v1.5 vocab.txt or tokenizer.json."""
 
-    def __init__(self, vocab_path: Path):
-        self.vocab = {}
-        for idx, line in enumerate(vocab_path.read_text(encoding="utf-8").splitlines()):
-            self.vocab[line] = idx
+    def __init__(self, vocab_path: Path, lowercase: bool = False):
+        self.lowercase = lowercase
+        tj_path = vocab_path.parent / "tokenizer.json"
+        if tj_path.is_file():
+            tj = json.loads(tj_path.read_text(encoding="utf-8"))
+            self.vocab = tj["model"]["vocab"]
+            norm = tj.get("normalizer") or {}
+            if "lowercase" in norm:
+                self.lowercase = bool(norm["lowercase"])
+        else:
+            self.vocab = {}
+            with vocab_path.open("r", encoding="utf-8", newline="\n") as f:
+                for idx, line in enumerate(f):
+                    tok = line.rstrip("\r\n")
+                    if tok == "" and idx >= 21128:
+                        continue
+                    self.vocab[tok] = idx
         self.cls_id = self.vocab["[CLS]"]
         self.sep_id = self.vocab["[SEP]"]
         self.unk_id = self.vocab["[UNK]"]
 
     def _basic_tokenize(self, text: str) -> list[str]:
-        text = text.lower()
+        if self.lowercase:
+            text = text.lower()
         spaced = []
         for ch in text:
             if _is_cjk(ch) or _is_punct(ch):
