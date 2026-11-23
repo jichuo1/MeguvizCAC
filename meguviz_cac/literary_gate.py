@@ -228,7 +228,7 @@ def build_stage2_bundle(qwen_path: Path, gate_gold_path: Path, twins_path: Path,
                 fused_score = float(g["hydrogen_score"])
                 code = g["hydrogen_code"]
                 # Reject Qwen false positives cleanly or reweight authoritative Hydrogen override
-                if r["qwen_score"] >= 65 and fused_score <= 35 and r["gate_reason"] == "qwen_literary_or_irony_risk":
+                if r["qwen_score"] >= 65 and fused_score <= 35 and g.get("gate_reason") == "qwen_literary_or_irony_risk":
                     counts["qwen_literary_fp_overridden"] += 1
                 qw = 2.5
                 counts["hydrogen_gate_override"] += 1
