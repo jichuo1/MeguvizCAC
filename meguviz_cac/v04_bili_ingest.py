@@ -26,6 +26,7 @@ DEFAULT_PLAN = Path(__file__).resolve().parent / "v04_bili_plan.json"
 DEFAULT_STATUS_OUT = REPO_ROOT / "v04-corpus" / "bili-live-1m-status.json"
 TZ_CN = timezone(timedelta(hours=8))
 YEAR_PREFIX_RE = re.compile(r"\b(20\d{2})[-/年]")
+VALID_INGEST_EXT_RE = re.compile(r"\.jsonl(\.gz)?(\s*\(\d+\))?$", re.IGNORECASE)
 
 
 def connect(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
@@ -121,7 +122,7 @@ def load_legacy_hashes(legacy_db: Path = DEFAULT_LEGACY_DB) -> tuple[int, set[st
 
 
 def iter_jsonl_lines(path: Path):
-    if path.name.endswith(".jsonl.gz"):
+    if ".jsonl.gz" in path.name.lower():
         with gzip.open(path, "rt", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
@@ -351,8 +352,62 @@ def ingest_dir(
             else:
                 yield None
 
-    files = sorted(p for p in scan_dir.glob(pattern) if p.name.endswith(".jsonl") or p.name.endswith(".jsonl.gz"))
+    files = sorted(p for p in scan_dir.glob(pattern) if VALID_INGEST_EXT_RE.search(p.name))
     return _ingest_files(db, files, _extract_jsonl, legacy_db=legacy_db, preloaded_legacy_hashes=preloaded_legacy_hashes)
+
+
+def audit_dir(db: sqlite3.Connection, scan_dir: Path, pattern: str = "bili_v04_*.jsonl*") -> dict:
+    """Audit matching ingest files in scan_dir against ingested_files, counting raw vs unique rows per stream."""
+    scan_resolved = scan_dir.resolve()
+    files = sorted(p for p in scan_resolved.glob(pattern) if p.is_file() and VALID_INGEST_EXT_RE.search(p.name))
+    rows = db.execute("SELECT file_path, mtime, size, rows_added FROM ingested_files").fetchall()
+    ing_map = {Path(fp).resolve(): (mt, sz, add) for fp, mt, sz, add in rows}
+
+    missed = []
+    groups: dict[str, dict] = {}
+    total_raw = 0
+    total_added = 0
+    for p in files:
+        res_p = p.resolve()
+        n_lines = 0
+        try:
+            opener = gzip.open if ".jsonl.gz" in p.name.lower() else open
+            with opener(res_p, "rt", encoding="utf-8", errors="ignore") as f:
+                n_lines = sum(1 for ln in f if ln.strip())
+        except OSError:
+            n_lines = 0
+        total_raw += n_lines
+        rec = ing_map.get(res_p)
+        if rec is None:
+            missed.append({"file": p.name, "bytes": p.stat().st_size, "raw_lines": n_lines})
+            added = 0
+        else:
+            added = int(rec[2])
+            total_added += added
+
+        m_dup = re.search(r"\((\d+)\)", p.name)
+        m_wave = re.match(r"^(bili_v04_[a-zA-Z0-9_-]+?)_chunk_", p.name)
+        stream_key = m_wave.group(1) if m_wave else "other"
+        if m_dup:
+            stream_key = f"{stream_key}_tab({m_dup.group(1)})"
+        g = groups.setdefault(stream_key, {"files": 0, "raw_lines": 0, "unique_added": 0})
+        g["files"] += 1
+        g["raw_lines"] += n_lines
+        g["unique_added"] += added
+
+    for g in groups.values():
+        g["unique_rate_pct"] = round(100.0 * g["unique_added"] / max(1, g["raw_lines"]), 1)
+
+    return {
+        "scan_dir": str(scan_resolved),
+        "matching_files": len(files),
+        "ingested_files_matched": len(files) - len(missed),
+        "missed_files": missed,
+        "total_raw_lines": total_raw,
+        "total_unique_added": total_added,
+        "overall_unique_rate_pct": round(100.0 * total_added / max(1, total_raw), 1),
+        "by_stream": groups,
+    }
 
 
 def ingest_browser_steps(
@@ -522,6 +577,7 @@ def main() -> None:
     parser.add_argument("--legacy-db", type=Path, default=DEFAULT_LEGACY_DB)
     parser.add_argument("--import-dir", type=Path)
     parser.add_argument("--import-browser-steps", type=Path)
+    parser.add_argument("--audit-dir", type=Path)
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--export", type=Path)
     parser.add_argument("--watch-dir", type=Path, action="append", default=[])
@@ -532,13 +588,20 @@ def main() -> None:
     args = parser.parse_args()
 
     oneshot = sum(
-        bool(x) for x in (args.import_dir is not None, args.import_browser_steps is not None, args.status, args.export is not None)
+        bool(x)
+        for x in (
+            args.import_dir is not None,
+            args.import_browser_steps is not None,
+            args.audit_dir is not None,
+            args.status,
+            args.export is not None,
+        )
     )
     has_watch = bool(args.watch_dir or args.watch_browser_steps)
     if oneshot and has_watch:
         parser.error("Cannot mix watcher flags with one-shot actions.")
     if not oneshot and not has_watch:
-        parser.error("Specify one action (--import-dir/--import-browser-steps/--status/--export) or --watch-dir/--watch-browser-steps.")
+        parser.error("Specify one action (--import-dir/--import-browser-steps/--audit-dir/--status/--export) or --watch-dir/--watch-browser-steps.")
     if oneshot > 1:
         parser.error("Only one one-shot action can be specified at a time.")
 
@@ -559,6 +622,8 @@ def main() -> None:
             print(json.dumps(ingest_dir(db, args.import_dir, legacy_db=args.legacy_db), ensure_ascii=False, indent=2))
         elif args.import_browser_steps is not None:
             print(json.dumps(ingest_browser_steps(db, args.import_browser_steps, legacy_db=args.legacy_db), ensure_ascii=False, indent=2))
+        elif args.audit_dir is not None:
+            print(json.dumps(audit_dir(db, args.audit_dir), ensure_ascii=False, indent=2))
         elif args.status:
             print(json.dumps(status_report(db, legacy_db=args.legacy_db), ensure_ascii=False, indent=2))
         else:
