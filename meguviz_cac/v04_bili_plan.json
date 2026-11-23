@@ -1,0 +1,147 @@
+{
+  "combined_target": 1000000,
+  "legacy_baseline_rows": 200370,
+  "new_collection_target": 800000,
+  "era_buckets": {
+    "pre_llm": {
+      "label": "<=2022",
+      "max_year": 2022,
+      "share": 0.15,
+      "target_new_rows": 120000
+    },
+    "early_llm": {
+      "label": "2023-2024",
+      "min_year": 2023,
+      "max_year": 2024,
+      "share": 0.20,
+      "target_new_rows": 160000
+    },
+    "mid_llm": {
+      "label": "2025",
+      "min_year": 2025,
+      "max_year": 2025,
+      "share": 0.25,
+      "target_new_rows": 200000
+    },
+    "current_2026": {
+      "label": "2026",
+      "min_year": 2026,
+      "share": 0.40,
+      "target_new_rows": 320000
+    }
+  },
+  "partitions": [
+    {
+      "name": "动画",
+      "channel_url": "https://www.bilibili.com/c/douga/",
+      "search_queries": ["动画解析 2020", "MAD 剪辑", "独立动画 短片", "动画分镜 教程"],
+      "legacy_rows_approx": 21551,
+      "target_new_rows": 35000
+    },
+    {
+      "name": "番剧国创",
+      "channel_url": "https://www.bilibili.com/c/anime/",
+      "search_queries": ["番剧 杂谈 2021", "国创 剧情 2024", "新番 吐槽 2026", "经典老番 漫评"],
+      "legacy_rows_approx": 0,
+      "target_new_rows": 50000
+    },
+    {
+      "name": "游戏",
+      "channel_url": "https://www.bilibili.com/c/game/",
+      "search_queries": ["单机攻略 2022", "独立游戏 测评 2025", "黑神话 速通", "怀旧老游戏 实况"],
+      "legacy_rows_approx": 22678,
+      "target_new_rows": 35000
+    },
+    {
+      "name": "知识",
+      "channel_url": "https://www.bilibili.com/c/knowledge/",
+      "search_queries": ["科普 公开课 2021", "历史 长视频 2024", "物理 数学 讲解", "社科 书评 2026"],
+      "legacy_rows_approx": 25560,
+      "target_new_rows": 35000
+    },
+    {
+      "name": "科技数码",
+      "channel_url": "https://www.bilibili.com/c/tech/",
+      "search_queries": ["显卡 装机 2022", "手机 续航 对比 2025", "开源AI 本地部署 2026", "NAS 软路由 教程"],
+      "legacy_rows_approx": 34964,
+      "target_new_rows": 40000
+    },
+    {
+      "name": "生活",
+      "channel_url": "https://www.bilibili.com/c/life/",
+      "search_queries": ["独居 Vlog 2021", "出租屋 改造", "日常 手工 DIY", "搞笑 整活 生活"],
+      "legacy_rows_approx": 10637,
+      "target_new_rows": 55000
+    },
+    {
+      "name": "美食",
+      "channel_url": "https://www.bilibili.com/c/food/",
+      "search_queries": ["家常菜 教程 2022", "街头 美食 探店", "甜品 烘焙 实操", "复刻 餐厅 名菜"],
+      "legacy_rows_approx": 0,
+      "target_new_rows": 55000
+    },
+    {
+      "name": "影视",
+      "channel_url": "https://www.bilibili.com/c/cinephile/",
+      "search_queries": ["电影 拉片 深度解析", "老剧 重温 影评 2021", "悬疑片 细节 拆解", "导演 风格 对比"],
+      "legacy_rows_approx": 0,
+      "target_new_rows": 60000
+    },
+    {
+      "name": "音乐",
+      "channel_url": "https://www.bilibili.com/c/music/",
+      "search_queries": ["编曲 扒带 教学", "现场 Live 乐评 2020", "吉他 弹唱 翻奏", "乐理 和弦 分析"],
+      "legacy_rows_approx": 0,
+      "target_new_rows": 55000
+    },
+    {
+      "name": "鬼畜",
+      "channel_url": "https://www.bilibili.com/c/kichiku/",
+      "search_queries": ["鬼畜 调教 全明星 2021", "人力Vocaloid 翻唱", "鬼畜剧场 整活", "音MAD 节奏"],
+      "legacy_rows_approx": 0,
+      "target_new_rows": 45000
+    },
+    {
+      "name": "娱乐",
+      "channel_url": "https://www.bilibili.com/c/ent/",
+      "search_queries": ["综艺 搞笑 剪辑", "采访 访谈 名场面 2022", "晚会 舞台 反应", "脱口秀 吐槽"],
+      "legacy_rows_approx": 0,
+      "target_new_rows": 55000
+    },
+    {
+      "name": "资讯",
+      "channel_url": "https://www.bilibili.com/c/information/",
+      "search_queries": ["热点 评论 深度解析", "行业 观察 财报 2025", "科技 动态 简报", "民生 政策 解读"],
+      "legacy_rows_approx": 0,
+      "target_new_rows": 55000
+    },
+    {
+      "name": "汽车",
+      "channel_url": "https://www.bilibili.com/c/car/",
+      "search_queries": ["新能源 实测 续航 2025", "二手车 整备 维修", "自驾 房车 路书", "底盘 操控 对比"],
+      "legacy_rows_approx": 0,
+      "target_new_rows": 55000
+    },
+    {
+      "name": "运动",
+      "channel_url": "https://www.bilibili.com/c/sports/",
+      "search_queries": ["骑行 路线 记录", "马拉松 跑步 装备", "羽毛球 教学 步法", "户外 徒步 露营"],
+      "legacy_rows_approx": 0,
+      "target_new_rows": 55000
+    },
+    {
+      "name": "动物",
+      "channel_url": "https://www.bilibili.com/c/animal/",
+      "search_queries": ["流浪猫 救助 日常", "野保 观察 动物", "水族 造景 开缸", "养狗 训练 护理"],
+      "legacy_rows_approx": 0,
+      "target_new_rows": 55000
+    },
+    {
+      "name": "时尚舞蹈",
+      "channel_url": "https://www.bilibili.com/c/fashion/",
+      "search_queries": ["街舞 编舞 翻跳", "国风 穿搭 改造", "宅舞 经典 2021", "球鞋 护理 测评"],
+      "legacy_rows_approx": 0,
+      "target_new_rows": 60000
+    }
+  ]
+}
