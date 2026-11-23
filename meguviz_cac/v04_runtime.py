@@ -455,15 +455,14 @@ class MeguvizV04Engine:
                 surv = surv * (1.0 - np.clip(halt_prob, 0.0, 1.0))
                 cum_halt = 1.0 - surv
 
-                if fixed_step is None and step < target_steps - 1:
+                if step == target_steps - 1:
+                    exit_mask = np.ones(len(active_pos), dtype=bool)
+                elif fixed_step is None:
                     exit_mask = (prob <= e_low) | (prob >= e_high) | (cum_halt >= h_thr)
                     if delta_conv >= 0.0 and prev_prob is not None and step >= min_conv_step:
                         exit_mask = exit_mask | (np.abs(prob - prev_prob) <= delta_conv)
                 else:
-                    exit_mask = np.ones(len(active_pos), dtype=bool)
-
-                if step == target_steps - 1:
-                    exit_mask[:] = True
+                    exit_mask = np.zeros(len(active_pos), dtype=bool)
 
                 for local_j in np.flatnonzero(exit_mask):
                     orig_idx = mb[int(active_pos[local_j])]
@@ -531,6 +530,10 @@ def run_verify_v04(
         ("H03_tech_human", "节点参考Blender材质节点这个思路挺对，接口丑不丑先不说，能白盒点开看子代理在干啥就很难得。"),
         ("H04_meme_banter", "大肥鱼在吗？我今天闲得发慌，想找条同类聊聊天，你平时都在干嘛呀？"),
         ("H05_emoji", "表情包已经出现了[妙啊][妙啊]"),
+        ("H06_scorecard", "观感评分：画面 9/10，配乐 8.5/10，节奏 7/10，整体算近期很稳的良心作了。"),
+        ("H07_bulleted_review", "两点真实感受：1. 前半段科普节奏很顺，没废话；2. 后面实操演示字体有点小，手机看费眼。"),
+        ("H08_dict_quote", "查了下《现代汉语词典》，“敷衍”本来就可以做形容词用，弹幕没必要抓着这个字眼吵半天。"),
+        ("H09_resource_link", "指路原版开源仓库 https://github.com/example/demo ，配环境卡住可以看置顶评论里的报错对照。"),
     ]
     ai_traps = [
         ("A01_persona_space", "回复 :本鱼看了 是不是那条说 让AI刷B站学人文关怀 本鱼承认 本鱼今天已经有点学坏了"),
@@ -582,6 +585,9 @@ def run_verify_v04(
 
     u004_item = next((x for x in probe_res if x["id"] == "U004"), None)
     h03_item = next((x for x in human_res if x["id"] == "H03_tech_human"), None)
+    struct_ids = {"H03_tech_human", "H06_scorecard", "H07_bulleted_review", "H08_dict_quote", "H09_resource_link"}
+    struct_probs = [x["prob"] for x in human_res if x["id"] in struct_ids]
+    struct_max = max(struct_probs) if struct_probs else None
     min_ai_trap = min(x["prob"] for x in ai_res)
 
     return {
@@ -608,6 +614,8 @@ def run_verify_v04(
             "ai_traps_ge_078": min_ai_trap >= 0.78,
             "h03_tech_human_prob": round(h03_item["prob"], 4) if h03_item else None,
             "h03_lt_035": (h03_item["prob"] < 0.35) if h03_item else None,
+            "structured_human_max_prob": round(struct_max, 4) if struct_max is not None else None,
+            "structured_human_lt_035": (struct_max < 0.35) if struct_max is not None else None,
             "u004_prob": round(u004_item["prob"], 4) if u004_item else None,
             "u004_ge_065": (u004_item["prob"] >= 0.65) if u004_item else None,
         },
@@ -675,7 +683,15 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.self_test or args.bundle is None:
-        res = {"self_test": _self_test()}
+        st_res = _self_test()
+        if args.bundle is not None:
+            eng_fs = MeguvizV04Engine(args.bundle.resolve(), threads=args.threads, mode=args.mode)
+            r0 = eng_fs.predict_one("测试", fixed_step=0)
+            r2 = eng_fs.predict_one("测试", fixed_step=2)
+            assert r0["steps_used"] == 1, f"Expected fixed_step=0 -> steps_used=1, got {r0}"
+            assert r2["steps_used"] == 3, f"Expected fixed_step=2 -> steps_used=3, got {r2}"
+            st_res["fixed_step_test"] = {"step0": r0["steps_used"], "step2": r2["steps_used"], "ok": True}
+        res = {"self_test": st_res}
         if args.bundle is not None:
             res["verify"] = run_verify_v04(
                 args.bundle.resolve(),

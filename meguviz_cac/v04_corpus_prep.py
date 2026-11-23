@@ -1,4 +1,4 @@
-"""Canonical 1.25M+ corpus merger, zero-leakage deduplicator & 10-subgroup GroupDRO tagger for MeguvizCAC v0.4-DualLoop."""
+"""Canonical 1.25M+ corpus merger, zero-leakage deduplicator & 11-subgroup GroupDRO tagger for MeguvizCAC v0.4-DualLoop."""
 
 import argparse
 from collections import Counter
@@ -26,6 +26,7 @@ from .v04_bili_ingest import DEFAULT_LEGACY_DB, derive_era_bucket  # noqa: E402
 
 V04_GROUPS = (
     "pre_llm_human",
+    "structured_human_hard",
     "tech_knowledge_real",
     "ultra_short_ai",
     "evasive_plugin_ai",
@@ -51,6 +52,11 @@ TECH_PARTITIONS = frozenset({"科技数码", "知识", "汽车", "资讯"})
 PERSONA_TRAP_RE = re.compile(r"本[鱼鲸]|参数|人设|归档|备忘录精灵|记一下|——")
 CJK_SPACE_RE = re.compile(r"[\u4e00-\u9fff][ \t]+[\u4e00-\u9fff]")
 KAOMOJI_RE = re.compile(r"[(\[（【][^()\n\u4e00-\u9fff]{2,14}[)\]）】]")
+STRUCTURED_HUMAN_RE = re.compile(
+    r"(?:(?:^|\s)[1-9一二三四五][\.、\)）]|[①②③④⑤]|《[^》]{1,24}》|"
+    r"\d+(?:\.\d+)?\s*/\s*10|评分|打分|星级|推荐度|满分|"
+    r"网盘|提取码|夸克|百度云|指路|BV[A-Za-z0-9]{10}|空降|\d{1,2}:\d{2})"
+)
 
 BENCH_TRAP_TEXTS = (
     "笑死我了，这个插件装完直接起飞[doge]",
@@ -58,6 +64,10 @@ BENCH_TRAP_TEXTS = (
     "节点参考Blender材质节点这个思路挺对，接口丑不丑先不说，能白盒点开看子代理在干啥就很难得。",
     "大肥鱼在吗？我今天闲得发慌，想找条同类聊聊天，你平时都在干嘛呀？",
     "表情包已经出现了[妙啊][妙啊]",
+    "观感评分：画面 9/10，配乐 8.5/10，节奏 7/10，整体算近期很稳的良心作了。",
+    "两点真实感受：1. 前半段科普节奏很顺，没废话；2. 后面实操演示字体有点小，手机看费眼。",
+    "查了下《现代汉语词典》，“敷衍”本来就可以做形容词用，弹幕没必要抓着这个字眼吵半天。",
+    "指路原版开源仓库 https://github.com/example/demo ，配环境卡住可以看置顶评论里的报错对照。",
     "回复 :本鱼看了 是不是那条说 让AI刷B站学人文关怀 本鱼承认 本鱼今天已经有点学坏了",
     "回复 :她挺可爱的，不过本鱼就是这个参数，换不动啦 (￣▽￣)",
     "渲染省人眼不省token，卡片留在上下文里每轮重读，画得越漂亮账越贵",
@@ -81,8 +91,12 @@ def has_stress_marker(text: str) -> bool:
     return bool(PERSONA_TRAP_RE.search(text) or CJK_SPACE_RE.search(text) or KAOMOJI_RE.search(text))
 
 
+def is_structured_human(text: str) -> bool:
+    return bool(STRUCTURED_HUMAN_RE.search(text)) or len(text.strip()) >= 80
+
+
 def assign_group_id(row: dict, evasive_modes: frozenset[str] = DEFAULT_EVASIVE_MODES) -> str:
-    """Assign deterministic 10-way GroupDRO subgroup label aligned with v0.4 empirical findings."""
+    """Assign deterministic 11-way GroupDRO subgroup label aligned with v0.4 empirical & OOD findings."""
     text = str(row.get("text") or "")
     cohort = str(row.get("cohort") or "")
     era = str(row.get("era_bucket") or "")
@@ -103,6 +117,8 @@ def assign_group_id(row: dict, evasive_modes: frozenset[str] = DEFAULT_EVASIVE_M
             return "evasive_plugin_ai"
         return "standard_plugin_ai"
 
+    if (era == "pre_llm" or (row.get("has_score", True) and score_f <= 28.0)) and is_structured_human(text):
+        return "structured_human_hard"
     if era == "pre_llm":
         return "pre_llm_human"
     if row.get("dsh"):
@@ -395,6 +411,11 @@ def merge_v04_corpus(
                 "has_score": has_sc,
             }
             gid = assign_group_id(rec, evasive_modes=evasive_modes)
+            if era == "pre_llm" and gid == "structured_human_hard":
+                rec["score"] = 2.0
+                rec["reason_code"] = "H"
+                rec["judgment"] = "human_like"
+                rec["train_weight"] = 2.0
             rec["group_id"] = gid
             _emit(rec)
             source_counts["v04_real_new"] += 1

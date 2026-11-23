@@ -103,8 +103,55 @@ class GroupDROTracker:
         return eff
 
 
+def compute_high_precision_metrics(y_true_score: np.ndarray, y_prob: np.ndarray, pos_cutoff: float = 70.0) -> dict:
+    """Compute threshold-free PR-AUC, Best F0.5, Recall@P95% and Recall@P99% strictly in NumPy."""
+    scores = np.asarray(y_true_score, dtype=np.float64).reshape(-1)
+    p = np.asarray(y_prob, dtype=np.float64).reshape(-1)
+    y_bin = scores >= float(pos_cutoff)
+    n_pos = int(y_bin.sum())
+    if len(p) == 0 or n_pos == 0 or n_pos == len(p):
+        return {"pr_auc": 0.0, "best_f05": 0.0, "recall_at_p95": 0.0, "recall_at_p99": 0.0, "t_p95": 0.95, "t_p99": 0.99}
+
+    order = np.argsort(-p, kind="mergesort")
+    p_s = p[order]
+    y_s = y_bin[order].astype(np.float64)
+    tp_cum = np.cumsum(y_s)
+    fp_cum = np.cumsum(1.0 - y_s)
+
+    # Evaluate at distinct score boundaries so ties never artificially inflate precision
+    distinct = np.r_[np.flatnonzero(p_s[:-1] > p_s[1:]), len(p_s) - 1]
+    tp = tp_cum[distinct]
+    fp = fp_cum[distinct]
+    thrs = p_s[distinct]
+    prec = tp / np.maximum(tp + fp, 1.0)
+    rec = tp / float(n_pos)
+
+    rec_prev = np.r_[0.0, rec[:-1]]
+    pr_auc = float(np.sum((rec - rec_prev) * prec))
+    f05_arr = (1.25 * prec * rec) / np.maximum(0.25 * prec + rec, 1e-12)
+    best_f05 = float(np.max(f05_arr))
+
+    def _recall_at_prec(target_p: float) -> tuple[float, float]:
+        hits = np.flatnonzero((prec >= target_p) & (tp >= 1.0))
+        if len(hits) == 0:
+            return 0.0, 0.99
+        best_i = int(hits[np.argmax(rec[hits])])
+        return float(rec[best_i]), float(thrs[best_i])
+
+    r_p95, t_p95 = _recall_at_prec(0.95)
+    r_p99, t_p99 = _recall_at_prec(0.99)
+    return {
+        "pr_auc": round(pr_auc, 4),
+        "best_f05": round(best_f05, 4),
+        "recall_at_p95": round(r_p95, 4),
+        "recall_at_p99": round(r_p99, 4),
+        "t_p95": round(t_p95, 4),
+        "t_p99": round(t_p99, 4),
+    }
+
+
 def check_release_gates(metrics: dict) -> dict:
-    """Evaluate all quantitative §2.4 release gates for MeguvizCAC v0.4-DualLoop."""
+    """Evaluate all quantitative §2.4 + OOD precision release gates for MeguvizCAC v0.4-DualLoop."""
     ox = metrics.get("onnx_int8") or {}
     tb = metrics.get("test_bili_gold") or {}
     traps = (metrics.get("onnx_verify") or {}).get("hard_trap_gates") or {}
@@ -118,6 +165,7 @@ def check_release_gates(metrics: dict) -> dict:
         "qat_parity_mae_le_0010": {"value": ox.get("mae_vs_pytorch"), "target": "<= 0.010", "pass": (ox.get("mae_vs_pytorch") or 999.0) <= 0.010},
         "ai_traps_ge_078": {"value": traps.get("ai_traps_min_prob"), "target": ">= 0.78", "pass": bool(traps.get("ai_traps_ge_078"))},
         "h03_tech_human_lt_035": {"value": traps.get("h03_tech_human_prob"), "target": "< 0.35", "pass": bool(traps.get("h03_lt_035"))},
+        "structured_human_lt_035": {"value": traps.get("structured_human_max_prob"), "target": "< 0.35", "pass": bool(traps.get("structured_human_lt_035"))},
         "u004_ge_065": {"value": traps.get("u004_prob"), "target": ">= 0.65", "pass": bool(traps.get("u004_ge_065"))},
         "edge_w4_w8_ok": {"value": edge.get("ok"), "target": "True", "pass": bool(edge.get("ok"))},
         "zero_unk": {"value": unk, "target": "== 0", "pass": unk == 0},
@@ -215,7 +263,7 @@ def _load_training_bundle(
                         r.get("score_source") == "hydrogen_xhigh_direct"
                         or sid in qwen_map
                         or r.get("hard_human_neg")
-                        or gid_str in ("ultra_short_ai", "evasive_plugin_ai", "pre_llm_human", "literary_boundary", "dsh_hard_slice")
+                        or gid_str in ("ultra_short_ai", "evasive_plugin_ai", "pre_llm_human", "structured_human_hard", "literary_boundary", "dsh_hard_slice")
                     ),
                 }
             )
@@ -258,12 +306,26 @@ def run_dry(args) -> None:
     kl_same = float(np.mean(compute_skewed_kl_np(np.array([0.2, 0.8]), np.array([0.2, 0.8]))))
     assert kl_same < 1e-6
 
-    # 4. Release gate evaluator sanity check
+    # 4. Release gate & high-precision metric evaluator sanity check
+    hp_test = compute_high_precision_metrics(np.array([10.0, 20.0, 80.0, 90.0]), np.array([0.1, 0.2, 0.8, 0.9]))
+    assert hp_test["pr_auc"] == 1.0 and hp_test["recall_at_p95"] == 1.0 and hp_test["recall_at_p99"] == 1.0
     sample_gate_out = check_release_gates(
         {
             "onnx_int8": {"compact_batch32_1thread_ms": 2.4, "mae_vs_pytorch": 0.008},
             "test_bili_gold": {"spearman": 0.875, "mae": 9.1},
-            "onnx_verify": {"unk_tokens_total": 0, "hard_trap_gates": {"ai_traps_min_prob": 0.81, "ai_traps_ge_078": True, "h03_tech_human_prob": 0.29, "h03_lt_035": True, "u004_prob": 0.68, "u004_ge_065": True}},
+            "onnx_verify": {
+                "unk_tokens_total": 0,
+                "hard_trap_gates": {
+                    "ai_traps_min_prob": 0.81,
+                    "ai_traps_ge_078": True,
+                    "h03_tech_human_prob": 0.29,
+                    "h03_lt_035": True,
+                    "structured_human_max_prob": 0.29,
+                    "structured_human_lt_035": True,
+                    "u004_prob": 0.68,
+                    "u004_ge_065": True,
+                },
+            },
             "edge_w4_w8": {"ok": True},
         }
     )
@@ -532,11 +594,12 @@ def train_and_export(args) -> None:
             return x * inv_rms * self.weight
 
     class StepIndexedLoRALinear(nn.Module):
-        def __init__(self, in_features: int, out_features: int, num_steps: int, lora_rank: int):
+        def __init__(self, in_features: int, out_features: int, num_steps: int, lora_rank: int, lora_drop: float = 0.15):
             super().__init__()
             self.base = QATLinear(in_features, out_features)
             self.lora_A = nn.Parameter(torch.zeros(num_steps, in_features, lora_rank))
             self.lora_B = nn.Parameter(torch.zeros(num_steps, lora_rank, out_features))
+            self.lora_drop = nn.Dropout(lora_drop)
 
         def load_base_from(self, src: nn.Linear) -> None:
             copy_linear_(self.base, src)
@@ -557,7 +620,8 @@ def train_and_export(args) -> None:
 
         def forward(self, x, step_id):
             out = self.base(x)
-            return out + torch.matmul(torch.matmul(x, self.lora_A[step_id]), self.lora_B[step_id])
+            h_lora = self.lora_drop(torch.matmul(x, self.lora_A[step_id]))
+            return out + torch.matmul(h_lora, self.lora_B[step_id])
 
     class StepIndexedPlainLinear(nn.Module):
         """Quantized QATLinear ignoring step_id for selective Step-LoRA pruning."""
@@ -724,6 +788,7 @@ def train_and_export(args) -> None:
             use_char_stem: bool = True,
             lora_targets: str = "qvo_down",
             use_diff_attn: bool = False,
+            emb_drop_p: float = 0.15,
         ):
             super().__init__()
             self.hidden_size = hidden_size
@@ -735,7 +800,7 @@ def train_and_export(args) -> None:
             self.mhc_baked = False
 
             self.embeddings = WeightedSVDEmbedding(vocab_size, embed_dim, hidden_size, MAX_LEN, eps)
-            self.emb_drop = nn.Dropout(0.1)
+            self.emb_drop = nn.Dropout(emb_drop_p)
             self.char_stem = CharRhythmStem(hidden_size) if self.use_char_stem else None
             if self.num_latents > 0:
                 self.latent_tokens = nn.Parameter(torch.randn(1, self.num_latents, hidden_size) * 0.02)
@@ -763,10 +828,15 @@ def train_and_export(args) -> None:
             )
 
             # DeepSeek mHC doubly-stochastic stream mixing (baked for zero-loop ONNX export)
+            # Progressively damp deeper step residuals so late loops cannot drift off-manifold.
+            damps = [0.0, -0.7, -1.5, -2.0, -2.0]
             if self.mhc_streams > 1:
                 n_s = self.mhc_streams
                 self.h_pre_logits = nn.Parameter(torch.zeros(num_loops, n_s))
-                self.h_post_logits = nn.Parameter(torch.zeros(num_loops, n_s))
+                post_init = torch.zeros(num_loops, n_s)
+                for s_i in range(num_loops):
+                    post_init[s_i].fill_(damps[min(s_i, len(damps) - 1)])
+                self.h_post_logits = nn.Parameter(post_init)
                 self.h_out_logits = nn.Parameter(torch.zeros(num_loops, n_s))
                 res_init = torch.full((num_loops, n_s, n_s), -3.0)
                 for s_i in range(num_loops):
@@ -778,6 +848,10 @@ def train_and_export(args) -> None:
                 self.register_buffer("h_post_baked", torch.ones(num_loops, n_s))
                 self.register_buffer("h_out_baked", torch.full((num_loops, n_s), 1.0 / n_s))
                 self.register_buffer("h_res_baked", torch.eye(n_s).unsqueeze(0).repeat(num_loops, 1, 1))
+            else:
+                sg_vals = [2.0, 0.0, -1.5, -2.0, -2.0]
+                sg_init = [sg_vals[min(s_i, len(sg_vals) - 1)] for s_i in range(num_loops)]
+                self.step_delta_gate = nn.Parameter(torch.tensor(sg_init, dtype=torch.float32))
 
             # Coda inference readout
             self.coda_proj = QATLinear(hidden_size * 2, 256)
@@ -882,8 +956,9 @@ def train_and_export(args) -> None:
                 z_next = z_res + h_post.view(1, self.mhc_streams, 1, 1) * delta.unsqueeze(1)
                 z_coda = torch.matmul(z_next.permute(0, 2, 3, 1), h_out.unsqueeze(-1)).squeeze(-1)
             else:
-                z_next = z_blk
-                z_coda = z_blk
+                d_gate = torch.sigmoid(self.step_delta_gate[step_id]).to(z_blk.dtype)
+                z_next = x_in + d_gate * (z_blk - x_in)
+                z_coda = z_next
 
             mask_f = core_mask.to(z_coda.dtype).unsqueeze(-1)
             mean_pool = (z_coda * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1.0)
@@ -943,6 +1018,26 @@ def train_and_export(args) -> None:
         train_items_raw = rng_s.sample(train_items_raw, min(480, len(train_items_raw)))
         pairs = pairs[:32]
 
+    # Zero-PII domain-coverage augmentation (~3% reply prefixes + ~3% benign URLs on definite humans)
+    if not args.no_domain_aug and not args.smoke_test:
+        rng_aug = random.Random(20261128)
+        benign_urls = (
+            " https://pan.quark.cn/s/demo1234",
+            " https://github.com/example/repo",
+            " https://b23.tv/BV1demo0001",
+        )
+        human_grp_set = {GROUP_TO_IDX["pre_llm_human"], GROUP_TO_IDX["structured_human_hard"]}
+        for item in train_items_raw:
+            txt = item["text"]
+            if rng_aug.random() < 0.03 and not txt.startswith(("回复", "回覆")):
+                prefix = "回复 @用户 : " if rng_aug.random() < 0.65 else "回复 :"
+                txt = prepare_text(prefix + txt)
+            if (item["group_idx"] in human_grp_set or item["y_score"] <= 0.12) and rng_aug.random() < 0.03 and "http" not in txt:
+                txt = prepare_text(txt + rng_aug.choice(benign_urls))
+            item["text"] = txt
+
+    eff_emb_drop = float(args.emb_drop) if float(args.emb_drop) >= 0.0 else (0.15 if args.embed_dim >= 192 else 0.10)
+
     train_counts = np.zeros(BASE_VOCAB_SIZE, dtype=np.float64)
     for item in train_items_raw:
         ids = tokenizer.encode_ids(item["text"], max_len=MAX_LEN)
@@ -980,6 +1075,7 @@ def train_and_export(args) -> None:
             use_char_stem=not args.no_char_stem,
             lora_targets=args.lora_targets,
             use_diff_attn=args.diff_attn,
+            emb_drop_p=eff_emb_drop,
         )
         mdl.embeddings.load_from_bert(bert_src.embeddings, a_full, p_mat)
         mdl.prelude.load_from_bert_layer(bert_src.encoder.layer[0])
@@ -1299,7 +1395,7 @@ def train_and_export(args) -> None:
                         per_sample = (0.75 * l_skl + 0.25 * l_hub) * w
                         step_losses.append(per_sample)
 
-                        loss_cd_total = loss_cd_total + ce_code(cd_logit, y_cd) * (0.7 if s == 0 else 1.1)
+                        loss_cd_total = loss_cd_total + ce_code(cd_logit, y_cd) * (0.85 if s == 0 else 1.0)
                         if prag_mask.any():
                             pr_mat = bce_none(pr_logit, prag.clamp(min=0.0)) * prag_step_weights[s].unsqueeze(0)
                             loss_pr_total = loss_pr_total + pr_mat[prag_mask].mean()
@@ -1337,19 +1433,46 @@ def train_and_export(args) -> None:
                         loss_oracle_exit = loss_oracle_exit + F.binary_cross_entropy(step_halts[s].float().clamp(1e-4, 1.0 - 1e-4), oracle_sufficient)
                     loss_oracle_exit = loss_oracle_exit / max(1, args.num_loops - 1)
 
-                    # Cross-step logit consistency for smooth Spearman rank
+                    # Cross-step logit consistency + monotonic anti-regression step penalty
                     loss_consist = 0.0
+                    loss_anti_reg = 0.0
                     for s in range(1, args.num_loops):
                         loss_consist = loss_consist + F.mse_loss(step_logits[s].float(), step_logits[s - 1].detach().float())
+                        loss_anti_reg = loss_anti_reg + F.relu(step_losses[s] - step_losses[s - 1].detach()).mean()
                     loss_consist = loss_consist / max(1, args.num_loops - 1)
+                    loss_anti_reg = loss_anti_reg / max(1, args.num_loops - 1)
+
+                    # Late-step LoRA weight L2 regularizer (prevents step >= 2 OOD drift)
+                    loss_lora_reg = 0.0
+                    if args.num_loops > 2:
+                        for blk in mdl.core_blocks:
+                            for proj in (blk.q_proj, blk.k_proj, blk.v_proj, blk.o_proj, blk.ffn_up, blk.ffn_down):
+                                if hasattr(proj, "lora_A"):
+                                    loss_lora_reg = loss_lora_reg + proj.lora_A[2:].float().pow(2).mean() + proj.lora_B[2:].float().pow(2).mean()
 
                     prior = 1.0 / args.num_loops
                     kl_prior = (q_mat * (torch.log(q_mat.clamp(min=1e-6)) - math.log(prior))).sum(dim=-1).mean()
 
-                    loss = 0.45 * loss_ouro + 0.55 * loss_uniform + 0.04 * kl_prior + 0.18 * loss_oracle_exit + 0.05 * loss_consist
+                    loss = 0.45 * loss_ouro + 0.55 * loss_uniform + 0.04 * kl_prior + 0.18 * loss_oracle_exit + 0.05 * loss_consist + 0.15 * loss_anti_reg + 1e-4 * loss_lora_reg
                     loss = loss + 0.14 * (loss_cd_total / args.num_loops) + (loss_lat_total / args.num_loops)
                     if prag_mask.any():
                         loss = loss + 0.22 * (loss_pr_total / args.num_loops)
+
+                    # Asymmetric high-precision tail-push loss (maximizes R@P95%/P99% & suppresses structured human FPs)
+                    ai_def_mask = (y_sc >= 0.85) & (w > 0.0)
+                    struct_grp_idx = GROUP_TO_IDX["structured_human_hard"]
+                    pre_grp_idx = GROUP_TO_IDX["pre_llm_human"]
+                    hu_def_mask = ((y_sc <= 0.15) | (((grp == struct_grp_idx) | (grp == pre_grp_idx)) & (y_sc <= 0.22))) & (w > 0.0)
+                    if ai_def_mask.any() and hu_def_mask.any():
+                        l_last_fp = step_logits[-1].float()
+                        p_last_fp = step_probs[-1].float()
+                        l_ai_m = l_last_fp[ai_def_mask].mean()
+                        hu_l = l_last_fp[hu_def_mask]
+                        k_top = max(1, hu_l.numel() // 4)
+                        l_hu_hard = torch.topk(hu_l, k_top).values.mean()
+                        loss_tail_margin = F.softplus(2.4 - (l_ai_m - l_hu_hard))
+                        loss_tail_fp = F.relu(p_last_fp[hu_def_mask] - 0.12).pow(2).mean()
+                        loss = loss + 0.12 * loss_tail_margin + 0.20 * loss_tail_fp
 
                     # QAT exit-boundary & probability parity stabilizer
                     if qat and ema_last_p is not None and ema_halts is not None:
@@ -1384,7 +1507,7 @@ def train_and_export(args) -> None:
                         for s in range(args.num_loops):
                             z_ai, _, l_ai, _, _, _, _ = mdl.forward_core_step(z_ai, h0_ai, cm_ai, mdl.step_idxs[s], apply_aux=True)
                             z_hu, _, l_hu, _, _, _, _ = mdl.forward_core_step(z_hu, h0_hu, cm_hu, mdl.step_idxs[s], apply_aux=True)
-                            sw = 0.35 if s == 0 else 1.0
+                            sw = 0.60 if s == 0 else 1.0
                             simpo_m = F.softplus(1.6 - (l_ai.float() - l_hu.float())).mean()
                             pair_acc = pair_acc + sw * simpo_m
                             pair_w += sw
@@ -1540,19 +1663,24 @@ def train_and_export(args) -> None:
         isotonic_knots = None
     val_dsh_cal_p = apply_isotonic_knots(val_dsh_raw_p, isotonic_knots)
     t_f05, t_fpr05 = find_val_thresholds(val_dsh_scores, val_dsh_cal_p)
+    hp_val = compute_high_precision_metrics(val_dsh_scores, val_dsh_cal_p)
     conformal_cal = fit_split_conformal_3way(val_dsh_scores, val_dsh_cal_p, alphas=(0.03, 0.05))
 
     def summarize_split(enc: list[list[int]], txts: list[str], scores: np.ndarray) -> tuple[dict, dict, dict, np.ndarray]:
         l_steps, h_steps = predict_all_steps_pt(mdl, enc, txts)
         p_steps = expit(l_steps)
-        per_step = {
-            f"step_{s}": compute_eval_metrics(scores, apply_isotonic_knots(p_steps[s], isotonic_knots), t_f05, t_fpr05)
-            for s in range(args.num_loops)
-        }
+        per_step = {}
+        for s in range(args.num_loops):
+            ps_cal = apply_isotonic_knots(p_steps[s], isotonic_knots)
+            per_step[f"step_{s}"] = {
+                **compute_eval_metrics(scores, ps_cal, t_f05, t_fpr05),
+                **compute_high_precision_metrics(scores, ps_cal),
+            }
         p_norm_raw, st_norm = apply_exit_policy_v04(p_steps, h_steps, normal_max, best_policy)
         p_norm = apply_isotonic_knots(p_norm_raw, isotonic_knots)
         m_norm = {
             **compute_eval_metrics(scores, p_norm, t_f05, t_fpr05),
+            **compute_high_precision_metrics(scores, p_norm),
             "avg_steps": round(float(st_norm.mean()), 3),
             "exit_hist": dict(sorted((str(k), int(v)) for k, v in Counter(st_norm.tolist()).items())),
         }
@@ -1560,6 +1688,7 @@ def train_and_export(args) -> None:
         p_aud = apply_isotonic_knots(p_aud_raw, isotonic_knots)
         m_aud = {
             **compute_eval_metrics(scores, p_aud, t_f05, t_fpr05),
+            **compute_high_precision_metrics(scores, p_aud),
             "avg_steps": round(float(st_aud.mean()), 3),
             "exit_hist": dict(sorted((str(k), int(v)) for k, v in Counter(st_aud.tolist()).items())),
         }
@@ -1568,7 +1697,7 @@ def train_and_export(args) -> None:
     _, val_norm_m, _, _ = summarize_split(val_enc, val_txts, val_scores)
     _, val_dsh_norm_m, _, _ = summarize_split(val_dsh_enc, val_dsh_txts, val_dsh_scores)
     test_step_m, test_norm_m, test_aud_m, _ = summarize_split(test_enc, test_txts, test_scores)
-    _, test_dsh_norm_m, test_dsh_aud_m, _ = summarize_split(test_dsh_enc, test_dsh_txts, test_dsh_scores)
+    test_dsh_step_m, test_dsh_norm_m, test_dsh_aud_m, _ = summarize_split(test_dsh_enc, test_dsh_txts, test_dsh_scores)
     _, test_all_norm_m, _, _ = summarize_split(test_all_enc, test_all_txts, test_all_scores)
     _, test_dsh_all_norm_m, _, _ = summarize_split(test_dsh_all_enc, test_dsh_all_txts, test_dsh_all_scores)
     probe_step_m, probe_norm_m, probe_aud_m, probe_norm_p = summarize_split(probe_enc, probe_txts, probe_scores)
@@ -1695,7 +1824,13 @@ def train_and_export(args) -> None:
         "exit_policy": best_policy,
         "isotonic_knots": isotonic_knots,
         "conformal": conformal_cal,
-        "thresholds": {"f05": round(t_f05, 4), "fpr05": round(t_fpr05, 4), "score70": 0.70},
+        "thresholds": {
+            "f05": round(t_f05, 4),
+            "p95": hp_val["t_p95"],
+            "p99": hp_val["t_p99"],
+            "fpr05": round(t_fpr05, 4),
+            "score70": 0.70,
+        },
         "prelude_file": prelude_onnx.name,
         "core_file": core_onnx.name,
         "prelude_bytes": int(prelude_onnx.stat().st_size),
@@ -1730,6 +1865,16 @@ def train_and_export(args) -> None:
     probe_file = Path("round01/bili-round01-user-confirmed.jsonl")
     verify_res = run_verify_v04(out_dir, probe_file.resolve(), mode="normal", threads=1) if probe_file.is_file() else {}
 
+    last_norm_k = f"step_{normal_max - 1}"
+    s0_pr = (test_step_m.get("step_0") or {}).get("pr_auc", 0.0)
+    sn_pr = (test_step_m.get(last_norm_k) or {}).get("pr_auc", 0.0)
+    loop_monotonicity = {
+        "test_bili_gold_pr_auc_by_step": {k: v.get("pr_auc") for k, v in test_step_m.items()},
+        "test_bili_gold_rp95_by_step": {k: v.get("recall_at_p95") for k, v in test_step_m.items()},
+        "test_dsh_gold_pr_auc_by_step": {k: v.get("pr_auc") for k, v in test_dsh_step_m.items()},
+        "non_regressive_normal_last_ge_step0": sn_pr >= s0_pr - 0.003,
+    }
+
     metrics_file = out_dir / f"metrics-{args.version}.json"
     metrics = {
         "version": args.version,
@@ -1747,6 +1892,8 @@ def train_and_export(args) -> None:
             "diff_attn": args.diff_attn,
             "lora_rank": args.lora_rank,
             "lora_targets": args.lora_targets,
+            "emb_drop": eff_emb_drop,
+            "domain_aug": not args.no_domain_aug,
             "normal_max_loops": normal_max,
             "audit_max_loops": audit_max,
             "vocab_size": tokenizer.vocab_size,
@@ -1754,7 +1901,13 @@ def train_and_export(args) -> None:
         "step_temperatures": fitted_temps,
         "exit_policy": best_policy,
         "conformal": conformal_cal,
-        "thresholds": {"val_f05": round(t_f05, 4), "val_fpr05": round(t_fpr05, 4)},
+        "thresholds": {
+            "val_f05": round(t_f05, 4),
+            "val_p95": hp_val["t_p95"],
+            "val_p99": hp_val["t_p99"],
+            "val_fpr05": round(t_fpr05, 4),
+        },
+        "loop_monotonicity": loop_monotonicity,
         "val_bili_gold": val_norm_m,
         "val_dsh_gold": val_dsh_norm_m,
         "test_bili_gold": test_norm_m,
@@ -1762,6 +1915,7 @@ def train_and_export(args) -> None:
         "test_bili_gold_by_step": test_step_m,
         "test_dsh_gold": test_dsh_norm_m,
         "test_dsh_gold_audit": test_dsh_aud_m,
+        "test_dsh_gold_by_step": test_dsh_step_m,
         "test_all_bili_distilled": test_all_norm_m,
         "test_all_dsh_distilled": test_dsh_all_norm_m,
         "probe_u001_u017": probe_norm_m,
@@ -1834,6 +1988,8 @@ def main() -> None:
     parser.add_argument("--lora-targets", choices=("qvo_down", "all"), default="qvo_down")
     parser.add_argument("--diff-attn", action="store_true")
     parser.add_argument("--no-char-stem", action="store_true")
+    parser.add_argument("--emb-drop", type=float, default=-1.0, help="-1 = auto (0.15 for E>=192 else 0.10)")
+    parser.add_argument("--no-domain-aug", action="store_true")
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--refine-epochs", type=int, default=1)
     parser.add_argument("--qat-epochs", type=int, default=2)

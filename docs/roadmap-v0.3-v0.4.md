@@ -99,3 +99,16 @@ Directly addresses the 6 empirical issues logged in Section 1.4:
    - Lock `E=192` SVD embeddings (`+256` UTF-8 Byte-Fallback) for primary `v0.4-DualLoop`; leverage the new `29,328` ultra-short (`4–20` char) confirmed-AI samples + technical human Subgroup slices inside `GroupDRO` so concise casual AI and technical human discussions stop colliding.
 6. **Wave-2 Era-Balanced Real Bilibili Harvest (`1,000,000` Total Real Corpus)**:
    - Launch `v04_bili_wave2_era.js` explicitly targeting `pre_llm` (`<=2022 >= 80k–100k`), `early_llm` (`2023–2024 >= 100k`), `current_2026` (`>= 150k`), and `资讯` (`>= 20k`) over the remaining `498k` real-corpus budget.
+
+### 2.5 OOD Cross-Benchmark Triage (`OjinjinBench-v1` Findings & Principled Boundary)
+External private OOD review of `v0.3.0` (`1,310` full / `777` hard-only) surfaced high-signal engineering bugs and generalization blind spots alongside one rubric difference we deliberately keep unchanged:
+- **Adopted into `v0.3` & `v0.4` Engineering**:
+  1. **`fixed_step > 0` Early-Exit Bug Fix**: fixed `v03_runtime.py` & `v04_runtime.py` where `fixed_step is not None` took the `else: exit_mask = np.ones(...)` branch at `step=0` and always returned 1 Core step.
+  2. **Deep-Loop OOD Anti-Regression**: added progressive residual damping (`h_post_logits` / `step_delta_gate`), LoRA dropout (`0.15`), late-step LoRA L2 regularization, balanced step-0 weights, and explicit monotonic step-loss penalty (`relu(loss_t - loss_{t-1})`) plus `loop_monotonicity` telemetry so steps `2–4` never regress below step `0`.
+  3. **11th `GroupDRO` Slice (`structured_human_hard`) & `H06..H09` Stress Traps**: structured human formats (rating tables `9/10`, numbered/bulleted reviews `1. ... 2. ...`, `《词典/书目》` citations, `指路`/resource notes) previously triggered `0.52–0.79` FPs; added dedicated `structured_human_hard` protection (`>15k` pre-ChatGPT + low-score human anchors) and expanded verification traps.
+  4. **Zero-PII Reply/URL Domain Coverage**: added `3%` synthetic `"回复 @用户 : "` prefix augmentation and `3%` benign public URL suffixes on definite human training rows so `@`/URL-containing comments stay in-distribution (replacing earlier filter gaps without collecting real handles/links).
+  5. **High-Precision Tail Metrics & Objective**: added `PR-AUC`, `Recall@P95%`, `Recall@P99%`, `Best F0.5`, multi-point `manifest["thresholds"]` (`f05`, `p95`, `p99`, `fpr05`), and asymmetric tail-push loss pushing structured definite humans below `0.12`.
+  6. **`E=128` OOD Capacity Ablation**: `v0.3 2x4-e128` outperformed `2x4-e192` on OOD hard generalization, so `MeguvizCAC_09_v04_DualLoop.ipynb` evaluates BOTH `2x4-e192` (`emb_drop=0.15`) and `2x4-e128` (`emb_drop=0.10`) apples-to-apples.
+- **Preserved Principles (Not Adopted)**:
+  1. **Text-Evidence Rubric vs Account-ID Cosplay Labels**: kept `MeguvizCAC`'s text-only epistemic standard (`hydrogen-xhigh-rubric-v2.txt` — short cosplay `"我是AI"` jokes without textual AI evidence remain low/uncertain rather than forcing account-level identity labels onto short ambiguous text).
+  2. **Preserve Raw `@`/Reply Formatting (`bili_iab_batch.js` Stripping Skipped)**: ablation confirmed stripping `回复 @xxx :` / `@提及` degraded `PR-AUC`, so `v0.4` retains full reply syntax while covering `@`/links safely in training.

@@ -187,17 +187,16 @@ class MeguvizV03Engine:
                 surv = surv * (1.0 - np.clip(halt_prob, 0.0, 1.0))
                 cum_halt = 1.0 - surv
 
-                if fixed_step is None and step < target_steps - 1:
+                if step == target_steps - 1:
+                    exit_mask = np.ones(len(active_pos), dtype=bool)
+                elif fixed_step is None:
                     exit_mask = (
                         (prob <= self.exit_low)
                         | (prob >= self.exit_high)
                         | (cum_halt >= self.halt_threshold)
                     )
                 else:
-                    exit_mask = np.ones(len(active_pos), dtype=bool)
-
-                if step == target_steps - 1:
-                    exit_mask[:] = True
+                    exit_mask = np.zeros(len(active_pos), dtype=bool)
 
                 for local_j in np.flatnonzero(exit_mask):
                     orig_idx = mb[int(active_pos[local_j])]
