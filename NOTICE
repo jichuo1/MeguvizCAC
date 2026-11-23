@@ -1,0 +1,20 @@
+MeguvizCAC
+Copyright 2026 jichuo1
+
+This product includes software and fine-tuned / distilled derivative model weights
+built upon or distilled from the following open-source models:
+
+1. BAAI/bge-small-zh-v1.5
+   Copyright (c) Beijing Academy of Artificial Intelligence (BAAI)
+   Licensed under the MIT License.
+   https://huggingface.co/BAAI/bge-small-zh-v1.5
+
+2. Chinese MacBERT (hfl/chinese-macbert-base) & RoBERTa-wwm-ext (hfl/chinese-roberta-wwm-ext)
+   Copyright (c) Joint Laboratory of HIT and iFLYTEK Research (HFL)
+   Licensed under the Apache License, Version 2.0.
+   https://github.com/ymcui/MacBERT
+
+3. Qwen3.8-27B (Qwen/Qwen3.8-27B)
+   Copyright (c) Alibaba Cloud / Qwen Team
+   Licensed under the Apache License, Version 2.0.
+   https://huggingface.co/Qwen/Qwen3.8-27B

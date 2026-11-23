@@ -1,0 +1,121 @@
+{
+  "ensemble_all_gold_oof": {
+    "n": 1450,
+    "positives_ge70": 598,
+    "mae": 10.095,
+    "rmse": 14.65,
+    "spearman": 0.8622,
+    "pearson": 0.8812,
+    "auroc": 0.9661,
+    "ap": 0.959
+  },
+  "ensemble_bili_gold_oof": {
+    "n": 1193,
+    "positives_ge70": 541,
+    "mae": 10.362,
+    "rmse": 15.158,
+    "spearman": 0.8527,
+    "pearson": 0.8847,
+    "auroc": 0.9703,
+    "ap": 0.9683
+  },
+  "model_b_bili_gold_oof": {
+    "n": 1193,
+    "positives_ge70": 541,
+    "mae": 10.369,
+    "rmse": 15.834,
+    "spearman": 0.852,
+    "pearson": 0.8753,
+    "auroc": 0.9657,
+    "ap": 0.962
+  },
+  "model_a_bili_gold_oof": {
+    "n": 1193,
+    "positives_ge70": 541,
+    "mae": 13.419,
+    "rmse": 18.632,
+    "spearman": 0.7869,
+    "pearson": 0.8197,
+    "auroc": 0.9456,
+    "ap": 0.9478
+  },
+  "model_b2_bili_gold_oof": {
+    "n": 1193,
+    "positives_ge70": 541,
+    "mae": 10.46,
+    "rmse": 15.657,
+    "spearman": 0.8526,
+    "pearson": 0.8791,
+    "auroc": 0.9689,
+    "ap": 0.9643
+  },
+  "user_confirmed_oof": {
+    "n": 17,
+    "positives_ge70": 12,
+    "mae": 7.889,
+    "rmse": 10.991,
+    "spearman": 0.8471,
+    "pearson": 0.8965,
+    "auroc": 0.9,
+    "ap": 0.9629
+  },
+  "model_b_best_synth_weight": 0.0,
+  "model_b_ablation": {
+    "synth_weight_0.0": {
+      "n": 1193,
+      "positives_ge70": 541,
+      "mae": 10.369,
+      "rmse": 15.834,
+      "spearman": 0.852,
+      "pearson": 0.8753,
+      "auroc": 0.9657,
+      "ap": 0.962,
+      "seconds": 131.9
+    },
+    "synth_weight_0.08": {
+      "n": 1193,
+      "positives_ge70": 541,
+      "mae": 10.7,
+      "rmse": 16.439,
+      "spearman": 0.8537,
+      "pearson": 0.8689,
+      "auroc": 0.9639,
+      "ap": 0.9595,
+      "seconds": 266.7
+    }
+  },
+  "strict_train_holdout": {
+    "strict_validation": {
+      "n": 208,
+      "positives_ge70": 79,
+      "mae": 15.24,
+      "rmse": 21.4,
+      "spearman": 0.7333,
+      "pearson": 0.7404,
+      "auroc": 0.894,
+      "ap": 0.8785
+    },
+    "strict_test": {
+      "n": 263,
+      "positives_ge70": 108,
+      "mae": 15.421,
+      "rmse": 21.774,
+      "spearman": 0.7537,
+      "pearson": 0.7314,
+      "auroc": 0.8973,
+      "ap": 0.8966
+    },
+    "probe_u001_u017": {
+      "n": 17,
+      "true_mean": 72.41,
+      "pred_mean": 65.58,
+      "pred_median": 74.0,
+      "ge_60": 10,
+      "ge_70": 9
+    }
+  },
+  "second_backbone": "hfl/chinese-roberta-wwm-ext",
+  "gpu_name": "NVIDIA L4",
+  "gold_rows": 1450,
+  "elapsed_seconds": 1481.6
+}

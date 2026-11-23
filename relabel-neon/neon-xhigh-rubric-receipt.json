@@ -1,0 +1,19 @@
+{
+  "model": "gemini-4-neon-xhigh",
+  "status": "SUCCESS",
+  "elapsed": 190.5118192,
+  "usage": {
+    "input_tokens": 16785,
+    "output_tokens": 21333,
+    "thinking_tokens": 20872,
+    "cache_read_tokens": 0,
+    "total_tokens": 38118
+  },
+  "output_sha256": "c6053c16bb4585c4b8dae5550819ae3fa5db0a48bdf6881301c45515646a7952",
+  "examples": {
+    "deepseek": 64,
+    "other_models": 80,
+    "bili": 40
+  },
+  "rubric_sha256": "c6053c16bb4585c4b8dae5550819ae3fa5db0a48bdf6881301c45515646a7952"
+}

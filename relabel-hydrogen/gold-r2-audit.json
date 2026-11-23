@@ -1,0 +1,988 @@
+{
+  "total_gold": 1450,
+  "pilot_only": false,
+  "by_cohort": {
+    "bili": {
+      "count": 1193,
+      "mean": 53.21,
+      "median": 56,
+      "p25": 18,
+      "p75": 85,
+      "ge_70": 541,
+      "ge_60": 567,
+      "le_30": 421,
+      "judgments": {
+        "human_like": 421,
+        "ai_like": 541,
+        "uncertain": 231
+      },
+      "codes": {
+        "H": 421,
+        "E": 330,
+        "P": 88,
+        "A": 113,
+        "S": 85,
+        "R": 92,
+        "T": 6,
+        "Q": 58
+      }
+    },
+    "deepseek": {
+      "count": 149,
+      "mean": 45.6,
+      "median": 44,
+      "p25": 26,
+      "p75": 58,
+      "ge_70": 31,
+      "ge_60": 34,
+      "le_30": 40,
+      "judgments": {
+        "uncertain": 78,
+        "ai_like": 31,
+        "human_like": 40
+      },
+      "codes": {
+        "S": 37,
+        "R": 23,
+        "P": 38,
+        "H": 40,
+        "A": 5,
+        "E": 1,
+        "T": 2,
+        "Q": 3
+      }
+    },
+    "other_models": {
+      "count": 91,
+      "mean": 42.81,
+      "median": 44,
+      "p25": 24,
+      "p75": 50,
+      "ge_70": 14,
+      "ge_60": 16,
+      "le_30": 28,
+      "judgments": {
+        "ai_like": 14,
+        "uncertain": 49,
+        "human_like": 28
+      },
+      "codes": {
+        "R": 7,
+        "S": 28,
+        "P": 21,
+        "E": 4,
+        "T": 1,
+        "A": 2,
+        "H": 28
+      }
+    },
+    "user_confirmed": {
+      "count": 17,
+      "mean": 72.41,
+      "median": 81,
+      "p25": 56,
+      "p75": 88,
+      "ge_70": 12,
+      "ge_60": 12,
+      "le_30": 2,
+      "judgments": {
+        "ai_like": 12,
+        "uncertain": 3,
+        "human_like": 2
+      },
+      "codes": {
+        "E": 10,
+        "P": 2,
+        "A": 1,
+        "Q": 1,
+        "H": 2,
+        "R": 1
+      }
+    }
+  },
+  "by_stratum": {
+    "pilot_bili_casual_human": {
+      "count": 5,
+      "mean": 14.2,
+      "median": 14,
+      "p25": 10,
+      "p75": 15,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 5,
+      "judgments": {
+        "human_like": 5
+      },
+      "codes": {
+        "H": 5
+      }
+    },
+    "pilot_bili_serious_human_trap": {
+      "count": 5,
+      "mean": 12.2,
+      "median": 12,
+      "p25": 6,
+      "p75": 18,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 5,
+      "judgments": {
+        "human_like": 5
+      },
+      "codes": {
+        "H": 5
+      }
+    },
+    "pilot_synth:deepseek:disagreement": {
+      "count": 1,
+      "mean": 45.0,
+      "median": 45,
+      "p25": 45,
+      "p75": 45,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 0,
+      "judgments": {
+        "uncertain": 1
+      },
+      "codes": {
+        "P": 1
+      }
+    },
+    "pilot_synth:deepseek:long_digest": {
+      "count": 1,
+      "mean": 78.0,
+      "median": 78,
+      "p25": 78,
+      "p75": 78,
+      "ge_70": 1,
+      "ge_60": 1,
+      "le_30": 0,
+      "judgments": {
+        "ai_like": 1
+      },
+      "codes": {
+        "R": 1
+      }
+    },
+    "pilot_synth:deepseek:memory": {
+      "count": 1,
+      "mean": 42.0,
+      "median": 42,
+      "p25": 42,
+      "p75": 42,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 0,
+      "judgments": {
+        "uncertain": 1
+      },
+      "codes": {
+        "S": 1
+      }
+    },
+    "pilot_synth:deepseek:recap": {
+      "count": 2,
+      "mean": 45.5,
+      "median": 46,
+      "p25": 45,
+      "p75": 46,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 0,
+      "judgments": {
+        "uncertain": 2
+      },
+      "codes": {
+        "P": 2
+      }
+    },
+    "pilot_synth:other_models:brief": {
+      "count": 1,
+      "mean": 45.0,
+      "median": 45,
+      "p25": 45,
+      "p75": 45,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 0,
+      "judgments": {
+        "uncertain": 1
+      },
+      "codes": {
+        "S": 1
+      }
+    },
+    "pilot_synth:other_models:long_digest": {
+      "count": 1,
+      "mean": 85.0,
+      "median": 85,
+      "p25": 85,
+      "p75": 85,
+      "ge_70": 1,
+      "ge_60": 1,
+      "le_30": 0,
+      "judgments": {
+        "ai_like": 1
+      },
+      "codes": {
+        "R": 1
+      }
+    },
+    "pilot_synth:other_models:recap": {
+      "count": 1,
+      "mean": 74.0,
+      "median": 74,
+      "p25": 74,
+      "p75": 74,
+      "ge_70": 1,
+      "ge_60": 1,
+      "le_30": 0,
+      "judgments": {
+        "ai_like": 1
+      },
+      "codes": {
+        "R": 1
+      }
+    },
+    "pilot_synth:other_models:reply_second": {
+      "count": 1,
+      "mean": 39.0,
+      "median": 39,
+      "p25": 39,
+      "p75": 39,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 0,
+      "judgments": {
+        "uncertain": 1
+      },
+      "codes": {
+        "P": 1
+      }
+    },
+    "r1_bili:dsh_old_ai_flash": {
+      "count": 70,
+      "mean": 82.19,
+      "median": 86,
+      "p25": 78,
+      "p75": 92,
+      "ge_70": 59,
+      "ge_60": 64,
+      "le_30": 1,
+      "judgments": {
+        "ai_like": 59,
+        "uncertain": 10,
+        "human_like": 1
+      },
+      "codes": {
+        "E": 24,
+        "A": 21,
+        "T": 5,
+        "S": 1,
+        "Q": 4,
+        "R": 9,
+        "H": 1,
+        "P": 5
+      }
+    },
+    "r1_bili:dsh_old_ai_nick": {
+      "count": 70,
+      "mean": 56.91,
+      "median": 63,
+      "p25": 24,
+      "p75": 85,
+      "ge_70": 34,
+      "ge_60": 37,
+      "le_30": 23,
+      "judgments": {
+        "human_like": 23,
+        "ai_like": 34,
+        "uncertain": 13
+      },
+      "codes": {
+        "H": 23,
+        "E": 21,
+        "A": 4,
+        "R": 9,
+        "P": 10,
+        "Q": 3
+      }
+    },
+    "r1_bili:dsh_old_human_cues": {
+      "count": 90,
+      "mean": 73.9,
+      "median": 83,
+      "p25": 74,
+      "p75": 88,
+      "ge_70": 68,
+      "ge_60": 72,
+      "le_30": 8,
+      "judgments": {
+        "ai_like": 68,
+        "uncertain": 14,
+        "human_like": 8
+      },
+      "codes": {
+        "E": 53,
+        "P": 5,
+        "R": 10,
+        "A": 5,
+        "H": 8,
+        "Q": 6,
+        "S": 3
+      }
+    },
+    "r1_bili:dsh_old_human_plain": {
+      "count": 90,
+      "mean": 24.69,
+      "median": 16,
+      "p25": 12,
+      "p75": 38,
+      "ge_70": 5,
+      "ge_60": 7,
+      "le_30": 65,
+      "judgments": {
+        "human_like": 65,
+        "uncertain": 20,
+        "ai_like": 5
+      },
+      "codes": {
+        "H": 65,
+        "P": 9,
+        "S": 7,
+        "R": 1,
+        "E": 3,
+        "Q": 4,
+        "A": 1
+      }
+    },
+    "r1_bili:dsh_old_review_flash": {
+      "count": 45,
+      "mean": 37.76,
+      "median": 36,
+      "p25": 18,
+      "p75": 50,
+      "ge_70": 6,
+      "ge_60": 6,
+      "le_30": 22,
+      "judgments": {
+        "human_like": 22,
+        "uncertain": 17,
+        "ai_like": 6
+      },
+      "codes": {
+        "H": 22,
+        "S": 11,
+        "E": 3,
+        "R": 1,
+        "A": 2,
+        "P": 4,
+        "Q": 2
+      }
+    },
+    "r1_bili:dsh_old_review_short": {
+      "count": 45,
+      "mean": 37.71,
+      "median": 40,
+      "p25": 36,
+      "p75": 44,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 6,
+      "judgments": {
+        "uncertain": 39,
+        "human_like": 6
+      },
+      "codes": {
+        "S": 39,
+        "H": 6
+      }
+    },
+    "r1_bili:nondsh_hard_human": {
+      "count": 60,
+      "mean": 16.33,
+      "median": 10,
+      "p25": 8,
+      "p75": 18,
+      "ge_70": 2,
+      "ge_60": 2,
+      "le_30": 54,
+      "judgments": {
+        "human_like": 54,
+        "uncertain": 4,
+        "ai_like": 2
+      },
+      "codes": {
+        "H": 54,
+        "P": 3,
+        "E": 1,
+        "Q": 1,
+        "R": 1
+      }
+    },
+    "r1_bili:nondsh_old_ai": {
+      "count": 80,
+      "mean": 61.44,
+      "median": 78,
+      "p25": 25,
+      "p75": 88,
+      "ge_70": 43,
+      "ge_60": 45,
+      "le_30": 21,
+      "judgments": {
+        "human_like": 21,
+        "ai_like": 43,
+        "uncertain": 16
+      },
+      "codes": {
+        "H": 21,
+        "E": 19,
+        "P": 10,
+        "Q": 5,
+        "A": 15,
+        "R": 9,
+        "S": 1
+      }
+    },
+    "r1_bili:nondsh_random_human_rev": {
+      "count": 63,
+      "mean": 21.48,
+      "median": 14,
+      "p25": 10,
+      "p75": 36,
+      "ge_70": 0,
+      "ge_60": 1,
+      "le_30": 44,
+      "judgments": {
+        "human_like": 44,
+        "uncertain": 19
+      },
+      "codes": {
+        "H": 44,
+        "S": 16,
+        "P": 2,
+        "Q": 1
+      }
+    },
+    "r1_synth:deepseek": {
+      "count": 95,
+      "mean": 52.47,
+      "median": 46,
+      "p25": 40,
+      "p75": 74,
+      "ge_70": 29,
+      "ge_60": 32,
+      "le_30": 11,
+      "judgments": {
+        "ai_like": 29,
+        "uncertain": 55,
+        "human_like": 11
+      },
+      "codes": {
+        "R": 22,
+        "S": 35,
+        "H": 11,
+        "P": 20,
+        "A": 5,
+        "E": 1,
+        "T": 1
+      }
+    },
+    "r1_synth:other_models": {
+      "count": 56,
+      "mean": 51.84,
+      "median": 48,
+      "p25": 42,
+      "p75": 60,
+      "ge_70": 12,
+      "ge_60": 14,
+      "le_30": 4,
+      "judgments": {
+        "uncertain": 40,
+        "ai_like": 12,
+        "human_like": 4
+      },
+      "codes": {
+        "S": 27,
+        "R": 5,
+        "E": 4,
+        "T": 1,
+        "A": 2,
+        "P": 13,
+        "H": 4
+      }
+    },
+    "r2_dsh_high_uncertainty_boundary": {
+      "count": 200,
+      "mean": 42.73,
+      "median": 42,
+      "p25": 18,
+      "p75": 63,
+      "ge_70": 49,
+      "ge_60": 57,
+      "le_30": 84,
+      "judgments": {
+        "uncertain": 67,
+        "ai_like": 49,
+        "human_like": 84
+      },
+      "codes": {
+        "Q": 24,
+        "A": 14,
+        "H": 84,
+        "E": 23,
+        "R": 11,
+        "P": 39,
+        "T": 1,
+        "S": 4
+      }
+    },
+    "r2_dsh_old_ai_low_score": {
+      "count": 100,
+      "mean": 21.73,
+      "median": 16,
+      "p25": 10,
+      "p75": 22,
+      "ge_70": 5,
+      "ge_60": 6,
+      "le_30": 83,
+      "judgments": {
+        "human_like": 83,
+        "uncertain": 12,
+        "ai_like": 5
+      },
+      "codes": {
+        "H": 83,
+        "S": 3,
+        "Q": 8,
+        "A": 4,
+        "E": 1,
+        "P": 1
+      }
+    },
+    "r2_dsh_old_human_high_ai": {
+      "count": 150,
+      "mean": 86.09,
+      "median": 86,
+      "p25": 83,
+      "p75": 90,
+      "ge_70": 150,
+      "ge_60": 150,
+      "le_30": 0,
+      "judgments": {
+        "ai_like": 150
+      },
+      "codes": {
+        "E": 107,
+        "R": 24,
+        "A": 19
+      }
+    },
+    "r2_nondsh_high_score": {
+      "count": 120,
+      "mean": 87.15,
+      "median": 87,
+      "p25": 83,
+      "p75": 92,
+      "ge_70": 120,
+      "ge_60": 120,
+      "le_30": 0,
+      "judgments": {
+        "ai_like": 120
+      },
+      "codes": {
+        "E": 75,
+        "A": 28,
+        "R": 17
+      }
+    },
+    "r2_synth_surprise": {
+      "count": 80,
+      "mean": 28.79,
+      "median": 24,
+      "p25": 18,
+      "p75": 38,
+      "ge_70": 1,
+      "ge_60": 1,
+      "le_30": 53,
+      "judgments": {
+        "uncertain": 26,
+        "human_like": 53,
+        "ai_like": 1
+      },
+      "codes": {
+        "Q": 3,
+        "H": 53,
+        "T": 1,
+        "P": 22,
+        "S": 1
+      }
+    },
+    "user_confirmed": {
+      "count": 17,
+      "mean": 72.41,
+      "median": 81,
+      "p25": 56,
+      "p75": 88,
+      "ge_70": 12,
+      "ge_60": 12,
+      "le_30": 2,
+      "judgments": {
+        "ai_like": 12,
+        "uncertain": 3,
+        "human_like": 2
+      },
+      "codes": {
+        "E": 10,
+        "P": 2,
+        "A": 1,
+        "Q": 1,
+        "H": 2,
+        "R": 1
+      }
+    }
+  },
+  "by_bili_previous": {
+    "dsh=False|prev=ai|flash": {
+      "count": 50,
+      "mean": 81.88,
+      "median": 88,
+      "p25": 81,
+      "p75": 94,
+      "ge_70": 40,
+      "ge_60": 42,
+      "le_30": 2,
+      "judgments": {
+        "uncertain": 8,
+        "human_like": 2,
+        "ai_like": 40
+      },
+      "codes": {
+        "P": 6,
+        "Q": 2,
+        "H": 2,
+        "A": 19,
+        "R": 5,
+        "E": 16
+      }
+    },
+    "dsh=False|prev=ai|nickname": {
+      "count": 83,
+      "mean": 66.52,
+      "median": 82,
+      "p25": 42,
+      "p75": 88,
+      "ge_70": 56,
+      "ge_60": 56,
+      "le_30": 19,
+      "judgments": {
+        "human_like": 19,
+        "ai_like": 56,
+        "uncertain": 8
+      },
+      "codes": {
+        "H": 19,
+        "E": 32,
+        "R": 8,
+        "P": 4,
+        "Q": 3,
+        "A": 16,
+        "S": 1
+      }
+    },
+    "dsh=False|prev=human|flash": {
+      "count": 179,
+      "mean": 39.17,
+      "median": 18,
+      "p25": 10,
+      "p75": 82,
+      "ge_70": 60,
+      "ge_60": 60,
+      "le_30": 105,
+      "judgments": {
+        "human_like": 105,
+        "uncertain": 14,
+        "ai_like": 60
+      },
+      "codes": {
+        "H": 105,
+        "S": 8,
+        "P": 5,
+        "E": 41,
+        "Q": 1,
+        "R": 13,
+        "A": 6
+      }
+    },
+    "dsh=False|prev=review|flash": {
+      "count": 10,
+      "mean": 84.7,
+      "median": 87,
+      "p25": 80,
+      "p75": 92,
+      "ge_70": 9,
+      "ge_60": 10,
+      "le_30": 0,
+      "judgments": {
+        "uncertain": 1,
+        "ai_like": 9
+      },
+      "codes": {
+        "Q": 1,
+        "A": 2,
+        "E": 6,
+        "R": 1
+      }
+    },
+    "dsh=False|prev=review|short_text": {
+      "count": 11,
+      "mean": 33.09,
+      "median": 38,
+      "p25": 16,
+      "p75": 45,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 3,
+      "judgments": {
+        "uncertain": 8,
+        "human_like": 3
+      },
+      "codes": {
+        "S": 8,
+        "H": 3
+      }
+    },
+    "dsh=True|prev=ai|flash": {
+      "count": 83,
+      "mean": 79.29,
+      "median": 85,
+      "p25": 77,
+      "p75": 92,
+      "ge_70": 66,
+      "ge_60": 72,
+      "le_30": 3,
+      "judgments": {
+        "ai_like": 66,
+        "uncertain": 14,
+        "human_like": 3
+      },
+      "codes": {
+        "E": 24,
+        "A": 27,
+        "T": 5,
+        "S": 1,
+        "Q": 7,
+        "R": 10,
+        "H": 3,
+        "P": 6
+      }
+    },
+    "dsh=True|prev=ai|nickname": {
+      "count": 192,
+      "mean": 39.01,
+      "median": 22,
+      "p25": 14,
+      "p75": 74,
+      "ge_70": 52,
+      "ge_60": 56,
+      "le_30": 110,
+      "judgments": {
+        "human_like": 110,
+        "ai_like": 52,
+        "uncertain": 30
+      },
+      "codes": {
+        "H": 110,
+        "E": 27,
+        "A": 11,
+        "R": 14,
+        "P": 15,
+        "Q": 12,
+        "S": 3
+      }
+    },
+    "dsh=True|prev=human|flash": {
+      "count": 484,
+      "mean": 56.88,
+      "median": 74,
+      "p25": 22,
+      "p75": 85,
+      "ge_70": 248,
+      "ge_60": 261,
+      "le_30": 149,
+      "judgments": {
+        "human_like": 149,
+        "ai_like": 248,
+        "uncertain": 87
+      },
+      "codes": {
+        "H": 149,
+        "E": 179,
+        "P": 45,
+        "S": 13,
+        "R": 39,
+        "A": 29,
+        "Q": 29,
+        "T": 1
+      }
+    },
+    "dsh=True|prev=review|flash": {
+      "count": 56,
+      "mean": 41.75,
+      "median": 42,
+      "p25": 20,
+      "p75": 56,
+      "ge_70": 10,
+      "ge_60": 10,
+      "le_30": 24,
+      "judgments": {
+        "human_like": 24,
+        "uncertain": 22,
+        "ai_like": 10
+      },
+      "codes": {
+        "H": 24,
+        "S": 12,
+        "E": 5,
+        "R": 2,
+        "A": 3,
+        "P": 7,
+        "Q": 3
+      }
+    },
+    "dsh=True|prev=review|short_text": {
+      "count": 45,
+      "mean": 37.71,
+      "median": 40,
+      "p25": 36,
+      "p75": 44,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 6,
+      "judgments": {
+        "uncertain": 39,
+        "human_like": 6
+      },
+      "codes": {
+        "S": 39,
+        "H": 6
+      }
+    }
+  },
+  "bili_transitions": {
+    "human->human_like": 254,
+    "ai->human_like": 134,
+    "ai->ai_like": 214,
+    "human->ai_like": 308,
+    "human->uncertain": 101,
+    "review->uncertain": 70,
+    "review->human_like": 33,
+    "ai->uncertain": 60,
+    "review->ai_like": 19
+  },
+  "user_confirmed_details": [
+    {
+      "id": "U001",
+      "score": 23,
+      "code": "H",
+      "judgment": "human_like"
+    },
+    {
+      "id": "U002",
+      "score": 92,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U003",
+      "score": 52,
+      "code": "P",
+      "judgment": "uncertain"
+    },
+    {
+      "id": "U004",
+      "score": 73,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U005",
+      "score": 85,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U006",
+      "score": 86,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U007",
+      "score": 91,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U008",
+      "score": 88,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U009",
+      "score": 56,
+      "code": "P",
+      "judgment": "uncertain"
+    },
+    {
+      "id": "U010",
+      "score": 78,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U011",
+      "score": 24,
+      "code": "H",
+      "judgment": "human_like"
+    },
+    {
+      "id": "U012",
+      "score": 74,
+      "code": "R",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U013",
+      "score": 99,
+      "code": "A",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U014",
+      "score": 82,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U015",
+      "score": 55,
+      "code": "Q",
+      "judgment": "uncertain"
+    },
+    {
+      "id": "U016",
+      "score": 81,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U017",
+      "score": 92,
+      "code": "E",
+      "judgment": "ai_like"
+    }
+  ]
+}

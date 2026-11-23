@@ -1,0 +1,17 @@
+{
+  "model": "gemini-4-neon-xhigh",
+  "size": 6,
+  "scored": 0,
+  "elapsed": 110.65,
+  "status": "ERROR",
+  "tool_names": [],
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "thinking_tokens": 0,
+    "cache_read_tokens": 0,
+    "total_tokens": 0
+  },
+  "error": "print timeout after 1m45s with the turn still in progress; the response is partial",
+  "results": []
+}

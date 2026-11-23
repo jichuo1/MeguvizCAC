@@ -1,0 +1,393 @@
+{
+  "total_gold": 36,
+  "pilot_only": true,
+  "by_cohort": {
+    "bili": {
+      "count": 10,
+      "mean": 13.2,
+      "median": 14,
+      "p25": 8,
+      "p75": 18,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 10,
+      "judgments": {
+        "human_like": 10
+      },
+      "codes": {
+        "H": 10
+      }
+    },
+    "deepseek": {
+      "count": 5,
+      "mean": 51.2,
+      "median": 45,
+      "p25": 45,
+      "p75": 46,
+      "ge_70": 1,
+      "ge_60": 1,
+      "le_30": 0,
+      "judgments": {
+        "uncertain": 4,
+        "ai_like": 1
+      },
+      "codes": {
+        "S": 1,
+        "R": 1,
+        "P": 3
+      }
+    },
+    "other_models": {
+      "count": 4,
+      "mean": 60.75,
+      "median": 74,
+      "p25": 45,
+      "p75": 85,
+      "ge_70": 2,
+      "ge_60": 2,
+      "le_30": 0,
+      "judgments": {
+        "ai_like": 2,
+        "uncertain": 2
+      },
+      "codes": {
+        "R": 2,
+        "S": 1,
+        "P": 1
+      }
+    },
+    "user_confirmed": {
+      "count": 17,
+      "mean": 72.41,
+      "median": 81,
+      "p25": 56,
+      "p75": 88,
+      "ge_70": 12,
+      "ge_60": 12,
+      "le_30": 2,
+      "judgments": {
+        "ai_like": 12,
+        "uncertain": 3,
+        "human_like": 2
+      },
+      "codes": {
+        "E": 10,
+        "P": 2,
+        "A": 1,
+        "Q": 1,
+        "H": 2,
+        "R": 1
+      }
+    }
+  },
+  "by_stratum": {
+    "pilot_bili_casual_human": {
+      "count": 5,
+      "mean": 14.2,
+      "median": 14,
+      "p25": 10,
+      "p75": 15,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 5,
+      "judgments": {
+        "human_like": 5
+      },
+      "codes": {
+        "H": 5
+      }
+    },
+    "pilot_bili_serious_human_trap": {
+      "count": 5,
+      "mean": 12.2,
+      "median": 12,
+      "p25": 6,
+      "p75": 18,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 5,
+      "judgments": {
+        "human_like": 5
+      },
+      "codes": {
+        "H": 5
+      }
+    },
+    "pilot_synth:deepseek:disagreement": {
+      "count": 1,
+      "mean": 45.0,
+      "median": 45,
+      "p25": 45,
+      "p75": 45,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 0,
+      "judgments": {
+        "uncertain": 1
+      },
+      "codes": {
+        "P": 1
+      }
+    },
+    "pilot_synth:deepseek:long_digest": {
+      "count": 1,
+      "mean": 78.0,
+      "median": 78,
+      "p25": 78,
+      "p75": 78,
+      "ge_70": 1,
+      "ge_60": 1,
+      "le_30": 0,
+      "judgments": {
+        "ai_like": 1
+      },
+      "codes": {
+        "R": 1
+      }
+    },
+    "pilot_synth:deepseek:memory": {
+      "count": 1,
+      "mean": 42.0,
+      "median": 42,
+      "p25": 42,
+      "p75": 42,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 0,
+      "judgments": {
+        "uncertain": 1
+      },
+      "codes": {
+        "S": 1
+      }
+    },
+    "pilot_synth:deepseek:recap": {
+      "count": 2,
+      "mean": 45.5,
+      "median": 46,
+      "p25": 45,
+      "p75": 46,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 0,
+      "judgments": {
+        "uncertain": 2
+      },
+      "codes": {
+        "P": 2
+      }
+    },
+    "pilot_synth:other_models:brief": {
+      "count": 1,
+      "mean": 45.0,
+      "median": 45,
+      "p25": 45,
+      "p75": 45,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 0,
+      "judgments": {
+        "uncertain": 1
+      },
+      "codes": {
+        "S": 1
+      }
+    },
+    "pilot_synth:other_models:long_digest": {
+      "count": 1,
+      "mean": 85.0,
+      "median": 85,
+      "p25": 85,
+      "p75": 85,
+      "ge_70": 1,
+      "ge_60": 1,
+      "le_30": 0,
+      "judgments": {
+        "ai_like": 1
+      },
+      "codes": {
+        "R": 1
+      }
+    },
+    "pilot_synth:other_models:recap": {
+      "count": 1,
+      "mean": 74.0,
+      "median": 74,
+      "p25": 74,
+      "p75": 74,
+      "ge_70": 1,
+      "ge_60": 1,
+      "le_30": 0,
+      "judgments": {
+        "ai_like": 1
+      },
+      "codes": {
+        "R": 1
+      }
+    },
+    "pilot_synth:other_models:reply_second": {
+      "count": 1,
+      "mean": 39.0,
+      "median": 39,
+      "p25": 39,
+      "p75": 39,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 0,
+      "judgments": {
+        "uncertain": 1
+      },
+      "codes": {
+        "P": 1
+      }
+    },
+    "user_confirmed": {
+      "count": 17,
+      "mean": 72.41,
+      "median": 81,
+      "p25": 56,
+      "p75": 88,
+      "ge_70": 12,
+      "ge_60": 12,
+      "le_30": 2,
+      "judgments": {
+        "ai_like": 12,
+        "uncertain": 3,
+        "human_like": 2
+      },
+      "codes": {
+        "E": 10,
+        "P": 2,
+        "A": 1,
+        "Q": 1,
+        "H": 2,
+        "R": 1
+      }
+    }
+  },
+  "by_bili_previous": {
+    "dsh=False|prev=human|flash": {
+      "count": 10,
+      "mean": 13.2,
+      "median": 14,
+      "p25": 8,
+      "p75": 18,
+      "ge_70": 0,
+      "ge_60": 0,
+      "le_30": 10,
+      "judgments": {
+        "human_like": 10
+      },
+      "codes": {
+        "H": 10
+      }
+    }
+  },
+  "bili_transitions": {
+    "human->human_like": 10
+  },
+  "user_confirmed_details": [
+    {
+      "id": "U001",
+      "score": 23,
+      "code": "H",
+      "judgment": "human_like"
+    },
+    {
+      "id": "U002",
+      "score": 92,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U003",
+      "score": 52,
+      "code": "P",
+      "judgment": "uncertain"
+    },
+    {
+      "id": "U004",
+      "score": 73,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U005",
+      "score": 85,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U006",
+      "score": 86,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U007",
+      "score": 91,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U008",
+      "score": 88,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U009",
+      "score": 56,
+      "code": "P",
+      "judgment": "uncertain"
+    },
+    {
+      "id": "U010",
+      "score": 78,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U011",
+      "score": 24,
+      "code": "H",
+      "judgment": "human_like"
+    },
+    {
+      "id": "U012",
+      "score": 74,
+      "code": "R",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U013",
+      "score": 99,
+      "code": "A",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U014",
+      "score": 82,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U015",
+      "score": 55,
+      "code": "Q",
+      "judgment": "uncertain"
+    },
+    {
+      "id": "U016",
+      "score": 81,
+      "code": "E",
+      "judgment": "ai_like"
+    },
+    {
+      "id": "U017",
+      "score": 92,
+      "code": "E",
+      "judgment": "ai_like"
+    }
+  ]
+}

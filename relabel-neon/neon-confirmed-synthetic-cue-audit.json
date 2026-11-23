@@ -1,0 +1,45 @@
+{
+  "meaning": "纯文本可见特征计数，独立于 Neon 逐条评分",
+  "cohorts": {
+    "dsh_bili_unverified": {
+      "rows": 20324,
+      "length_le_8": 3648,
+      "length_le_20": 9362,
+      "length_gt_80": 2081,
+      "contains_digit": 2521,
+      "old_memory_phrase": 53,
+      "memory_with_recap_or_followup": 4,
+      "at_least_3_recognized_facts": 47
+    },
+    "deepseek": {
+      "rows": 100000,
+      "length_le_8": 1587,
+      "length_le_20": 56499,
+      "length_gt_80": 187,
+      "contains_digit": 46038,
+      "old_memory_phrase": 851,
+      "memory_with_recap_or_followup": 17,
+      "at_least_3_recognized_facts": 18
+    },
+    "all_confirmed_synthetic": {
+      "rows": 150000,
+      "length_le_8": 4644,
+      "length_le_20": 80193,
+      "length_gt_80": 1528,
+      "contains_digit": 67659,
+      "old_memory_phrase": 943,
+      "memory_with_recap_or_followup": 20,
+      "at_least_3_recognized_facts": 36
+    },
+    "other_models": {
+      "rows": 50000,
+      "length_le_8": 3057,
+      "length_le_20": 23694,
+      "length_gt_80": 1341,
+      "contains_digit": 21621,
+      "old_memory_phrase": 92,
+      "memory_with_recap_or_followup": 3,
+      "at_least_3_recognized_facts": 18
+    }
+  }
+}

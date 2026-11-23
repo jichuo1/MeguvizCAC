@@ -1,0 +1,39 @@
+{
+  "rows_verified": 350387,
+  "input_order_sha256": "63b0b036b2dee7ded4a2bfedabd0bc5f82589fd40e426ef8e223cb0a2a5a6f66",
+  "export_sha256": "e6714373e3968c4a21fd36e377e29bedccb52b937ed8c79c156e5bf3a413378c",
+  "gold_direct_rows_matched": 1450,
+  "cohorts": {
+    "bili": {
+      "human_like": 140943,
+      "uncertain": 55332,
+      "ai_like": 4095
+    },
+    "deepseek": {
+      "ai_like": 13620,
+      "uncertain": 79594,
+      "human_like": 6786
+    },
+    "other_models": {
+      "uncertain": 39215,
+      "ai_like": 7825,
+      "human_like": 2960
+    },
+    "user_confirmed": {
+      "human_like": 2,
+      "ai_like": 12,
+      "uncertain": 3
+    }
+  },
+  "dsh_label_transitions": {
+    "human->human_like": 9505,
+    "ai->uncertain": 656,
+    "ai->ai_like": 1276,
+    "human->ai_like": 1125,
+    "review->uncertain": 3063,
+    "human->uncertain": 3014,
+    "review->human_like": 1159,
+    "ai->human_like": 391,
+    "review->ai_like": 135
+  }
+}

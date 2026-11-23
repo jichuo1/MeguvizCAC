@@ -1,0 +1,52 @@
+# Large binaries, model weights, and archives (hosted in GitHub Releases)
+*.sqlite3
+*.sqlite3-*
+*.exe
+*.zip
+*.gz
+*.gpkt
+*.joblib
+*.onnx
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Raw scraped dumps & queue manifests
+bili-ai-comments-*.jsonl
+bili-ai-comment-queue.json
+bili-live-20261122-*
+
+# Runtime scratch, tools, and intermediate generation dirs
+round01/zcode-runtime/
+round01/synthetic-scale/
+round01/bili-round01-deepseek-*.jsonl
+relabel-neon/tools/
+relabel-neon/neon-text-requests/
+relabel-hydrogen/tmp-requests/
+relabel-hydrogen/gold-r2-*.txt
+relabel-hydrogen/final-flip-spotcheck.jsonl
+relabel-hydrogen/rubric-discovery-pack.json
+relabel-hydrogen/active-learning-r2-candidates.json
+relabel-hydrogen/hydrogen-xhigh-gold.jsonl
+relabel-hydrogen/pilot-queue.json
+relabel-hydrogen/gold-r1-queue.json
+relabel-hydrogen/hydrogen-xhigh-batches.jsonl
+
+# Stage-2 large data / caches
+stage2-qwen/*.jsonl
+stage2-qwen/*.jsonl.gz
+artifacts/
+
+# Python / OS / Editor / Media artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.log
+*.jpg
+*.jpeg
+*.png
+.DS_Store
+Thumbs.db

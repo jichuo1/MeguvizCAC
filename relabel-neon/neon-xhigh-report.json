@@ -1,0 +1,52 @@
+{
+  "format": "megi-bili-neon-v1",
+  "model": "gemini-4-neon-xhigh",
+  "record_count": 350387,
+  "input_order_sha256": "63b0b036b2dee7ded4a2bfedabd0bc5f82589fd40e426ef8e223cb0a2a5a6f66",
+  "rubric_sha256": "c6053c16bb4585c4b8dae5550819ae3fa5db0a48bdf6881301c45515646a7952",
+  "scored": 1,
+  "batch_metrics": {
+    "calls": 9,
+    "errors": 8,
+    "model_responses": 1
+  },
+  "cohorts": {
+    "bili": {
+      "pending": 200370
+    },
+    "deepseek": {
+      "pending": 100000
+    },
+    "other_models": {
+      "pending": 49999,
+      "uncertain": 1
+    },
+    "user_confirmed": {
+      "pending": 17
+    }
+  },
+  "dsh": {
+    "pending": 20324
+  },
+  "bili_label_transitions": {
+    "human→pending": 151134,
+    "review→pending": 45082,
+    "ai→pending": 4154
+  },
+  "verified_ai_by_length": {
+    "26字及以上": {
+      "pending": 47163
+    },
+    "9–25字": {
+      "pending": 98210
+    },
+    "1–8字": {
+      "pending": 4643,
+      "uncertain": 1
+    }
+  },
+  "rows": 1,
+  "remaining": 350386,
+  "bulk_export": "bili-neon-xhigh-partial.jsonl.gz",
+  "bulk_sha256": "d1c677ba2e60c6db4090f55f2566ef25e4c575f9d3bc5d134309cdd8332541f8"
+}

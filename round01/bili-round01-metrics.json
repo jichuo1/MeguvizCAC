@@ -1,0 +1,904 @@
+{
+  "raw_rows": 200370,
+  "split_counts": {
+    "train": {
+      "all": 160893,
+      "dsh_all": 16111,
+      "human": 119276,
+      "uncertain": 36405,
+      "dsh_review": 3562,
+      "ai": 3270,
+      "duplicate_body": 1895,
+      "conflicting_suggestions": 47,
+      "dsh_human": 10561,
+      "dsh_gemini_ai": 474,
+      "dsh_ai": 1809,
+      "videos": 1795
+    },
+    "validation": {
+      "all": 19684,
+      "dsh_all": 2111,
+      "human": 14653,
+      "uncertain": 4443,
+      "dsh_review": 408,
+      "duplicate_body": 168,
+      "ai": 416,
+      "conflicting_suggestions": 4,
+      "dsh_human": 1428,
+      "dsh_gemini_ai": 69,
+      "dsh_ai": 242,
+      "videos": 228
+    },
+    "test": {
+      "all": 19793,
+      "dsh_all": 2102,
+      "uncertain": 4234,
+      "dsh_review": 399,
+      "human": 15022,
+      "ai": 442,
+      "duplicate_body": 83,
+      "conflicting_suggestions": 12,
+      "dsh_human": 1440,
+      "dsh_gemini_ai": 84,
+      "dsh_ai": 259,
+      "videos": 216
+    }
+  },
+  "split_seed": 20261248,
+  "corpus_sha256": "e64762a497309612d88a299e12b58a89c6406429de379b8811a0866ae438197c",
+  "review_rows": 45145,
+  "synthetic": {
+    "admitted": 3105,
+    "excluded_duplicate": 0,
+    "model_counts": {
+      "deepseek/deepseek-v4.1-flash-ultrafast": 3105
+    },
+    "format_counts": {
+      "recap": 1035,
+      "memory": 516,
+      "reply": 1035,
+      "reaction": 519
+    }
+  },
+  "synthetic_weight": 0.35,
+  "sklearn": "1.6.1",
+  "feature_count": 110010,
+  "preferred_by_validation_dsh_gemini_ap": "bili_only",
+  "models": {
+    "bili_only": {
+      "train_rows": 122546,
+      "train_positives": 3270,
+      "validation": {
+        "overall": {
+          "rows": 15069,
+          "videos": 227,
+          "positives": 416,
+          "reference_ai_rate": 0.02760634415024222,
+          "average_precision": 0.5224496834635352,
+          "points": {
+            "f05": {
+              "tp": 190,
+              "fp": 136,
+              "fn": 226,
+              "tn": 14517,
+              "precision": 0.5828220858895705,
+              "recall": 0.4567307692307692,
+              "false_positive_rate": 0.009281375827475602,
+              "f1": 0.5121293800539084,
+              "f05": 0.5523255813953488,
+              "accuracy": 0.9759771716769526
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh": {
+          "rows": 1670,
+          "videos": 25,
+          "positives": 242,
+          "reference_ai_rate": 0.14491017964071856,
+          "average_precision": 0.5713716718850346,
+          "points": {
+            "f05": {
+              "tp": 130,
+              "fp": 97,
+              "fn": 112,
+              "tn": 1331,
+              "precision": 0.5726872246696035,
+              "recall": 0.5371900826446281,
+              "false_positive_rate": 0.06792717086834733,
+              "f1": 0.5543710021321961,
+              "f05": 0.5652173913043478,
+              "accuracy": 0.8748502994011976
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "non_dsh": {
+          "rows": 13399,
+          "videos": 202,
+          "positives": 174,
+          "reference_ai_rate": 0.01298604373460706,
+          "average_precision": 0.45747462109081016,
+          "points": {
+            "f05": {
+              "tp": 60,
+              "fp": 39,
+              "fn": 114,
+              "tn": 13186,
+              "precision": 0.6060606060606061,
+              "recall": 0.3448275862068966,
+              "false_positive_rate": 0.002948960302457467,
+              "f1": 0.43956043956043955,
+              "f05": 0.5263157894736842,
+              "accuracy": 0.9885812374057765
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_gemini_only": {
+          "rows": 1497,
+          "videos": 25,
+          "positives": 69,
+          "reference_ai_rate": 0.04609218436873747,
+          "average_precision": 0.4329711679715632,
+          "points": {
+            "f05": {
+              "tp": 47,
+              "fp": 97,
+              "fn": 22,
+              "tn": 1331,
+              "precision": 0.3263888888888889,
+              "recall": 0.6811594202898551,
+              "false_positive_rate": 0.06792717086834733,
+              "f1": 0.4413145539906103,
+              "f05": 0.3643410852713178,
+              "accuracy": 0.9205076820307281
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_top": {
+          "rows": 1314,
+          "videos": 25,
+          "positives": 239,
+          "reference_ai_rate": 0.18188736681887366,
+          "average_precision": 0.5872366386831525,
+          "points": {
+            "f05": {
+              "tp": 130,
+              "fp": 94,
+              "fn": 109,
+              "tn": 981,
+              "precision": 0.5803571428571429,
+              "recall": 0.5439330543933054,
+              "false_positive_rate": 0.08744186046511628,
+              "f1": 0.5615550755939525,
+              "f05": 0.5726872246696035,
+              "accuracy": 0.845509893455099
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_reply": {
+          "rows": 356,
+          "videos": 24,
+          "positives": 3,
+          "reference_ai_rate": 0.008426966292134831,
+          "average_precision": 0.021391301135277038,
+          "points": {
+            "f05": {
+              "tp": 0,
+              "fp": 3,
+              "fn": 3,
+              "tn": 350,
+              "precision": 0,
+              "recall": 0,
+              "false_positive_rate": 0.0084985835694051,
+              "f1": 0,
+              "f05": 0,
+              "accuracy": 0.9831460674157303
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_hard_human_like": {
+          "rows": 116,
+          "videos": 22,
+          "positives": 0,
+          "reference_ai_rate": 0,
+          "average_precision": null,
+          "points": {
+            "f05": {
+              "tp": 0,
+              "fp": 21,
+              "fn": 0,
+              "tn": 95,
+              "precision": 0,
+              "recall": null,
+              "false_positive_rate": 0.1810344827586207,
+              "f1": 0,
+              "f05": 0,
+              "accuracy": 0.8189655172413793
+            },
+            "p95": null,
+            "p99": null
+          }
+        }
+      },
+      "thresholds": {
+        "f05": 0.6191626540810881,
+        "p95": null,
+        "p99": null
+      },
+      "fit_seconds": 13.59,
+      "test": {
+        "overall": {
+          "rows": 15464,
+          "videos": 213,
+          "positives": 442,
+          "reference_ai_rate": 0.02858251422659079,
+          "average_precision": 0.5284769340345329,
+          "points": {
+            "f05": {
+              "tp": 224,
+              "fp": 180,
+              "fn": 218,
+              "tn": 14842,
+              "precision": 0.5544554455445545,
+              "recall": 0.5067873303167421,
+              "false_positive_rate": 0.011982425775529224,
+              "f1": 0.5295508274231678,
+              "f05": 0.54421768707483,
+              "accuracy": 0.9742628039317124
+            },
+            "p95": null,
+            "p99": null
+          },
+          "f05_video_bootstrap_95ci": {
+            "precision": [
+              0.4770449160659374,
+              0.6255381528451484
+            ],
+            "recall": [
+              0.38918410725964686,
+              0.5917523809523809
+            ],
+            "false_positive_rate": [
+              0.0068205209617955105,
+              0.01898868746257281
+            ]
+          }
+        },
+        "dsh": {
+          "rows": 1699,
+          "videos": 24,
+          "positives": 259,
+          "reference_ai_rate": 0.1524426133019423,
+          "average_precision": 0.5994680930539307,
+          "points": {
+            "f05": {
+              "tp": 156,
+              "fp": 125,
+              "fn": 103,
+              "tn": 1315,
+              "precision": 0.5551601423487544,
+              "recall": 0.6023166023166023,
+              "false_positive_rate": 0.08680555555555555,
+              "f1": 0.5777777777777777,
+              "f05": 0.5639913232104121,
+              "accuracy": 0.8658034137728076
+            },
+            "p95": null,
+            "p99": null
+          },
+          "f05_video_bootstrap_95ci": {
+            "precision": [
+              0.4429664033117096,
+              0.6530675153292456
+            ],
+            "recall": [
+              0.48874186871673564,
+              0.6672785547785547
+            ],
+            "false_positive_rate": [
+              0.052805027552928055,
+              0.13915004748338078
+            ]
+          }
+        },
+        "non_dsh": {
+          "rows": 13765,
+          "videos": 189,
+          "positives": 183,
+          "reference_ai_rate": 0.013294587722484562,
+          "average_precision": 0.4341658642262521,
+          "points": {
+            "f05": {
+              "tp": 68,
+              "fp": 55,
+              "fn": 115,
+              "tn": 13527,
+              "precision": 0.5528455284552846,
+              "recall": 0.37158469945355194,
+              "false_positive_rate": 0.004049477249300545,
+              "f1": 0.4444444444444444,
+              "f05": 0.5037037037037037,
+              "accuracy": 0.9876498365419543
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_gemini_only": {
+          "rows": 1524,
+          "videos": 23,
+          "positives": 84,
+          "reference_ai_rate": 0.05511811023622047,
+          "average_precision": 0.49426416159791786,
+          "points": {
+            "f05": {
+              "tp": 63,
+              "fp": 125,
+              "fn": 21,
+              "tn": 1315,
+              "precision": 0.3351063829787234,
+              "recall": 0.75,
+              "false_positive_rate": 0.08680555555555555,
+              "f1": 0.4632352941176471,
+              "f05": 0.37679425837320574,
+              "accuracy": 0.9041994750656168
+            },
+            "p95": null,
+            "p99": null
+          },
+          "f05_video_bootstrap_95ci": {
+            "precision": [
+              0.23395247083047357,
+              0.44845431554024956
+            ],
+            "recall": [
+              0.6381052824651504,
+              0.8138333333333333
+            ],
+            "false_positive_rate": [
+              0.05162726035882887,
+              0.1434100583765229
+            ]
+          }
+        },
+        "dsh_top": {
+          "rows": 1239,
+          "videos": 24,
+          "positives": 226,
+          "reference_ai_rate": 0.1824051654560129,
+          "average_precision": 0.6156768852179969,
+          "points": {
+            "f05": {
+              "tp": 136,
+              "fp": 100,
+              "fn": 90,
+              "tn": 913,
+              "precision": 0.576271186440678,
+              "recall": 0.6017699115044248,
+              "false_positive_rate": 0.09871668311944719,
+              "f1": 0.5887445887445888,
+              "f05": 0.5811965811965812,
+              "accuracy": 0.8466505246166263
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_reply": {
+          "rows": 460,
+          "videos": 14,
+          "positives": 33,
+          "reference_ai_rate": 0.07173913043478261,
+          "average_precision": 0.48587692156913487,
+          "points": {
+            "f05": {
+              "tp": 20,
+              "fp": 25,
+              "fn": 13,
+              "tn": 402,
+              "precision": 0.4444444444444444,
+              "recall": 0.6060606060606061,
+              "false_positive_rate": 0.0585480093676815,
+              "f1": 0.5128205128205128,
+              "f05": 0.4694835680751174,
+              "accuracy": 0.9173913043478261
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_hard_human_like": {
+          "rows": 210,
+          "videos": 20,
+          "positives": 0,
+          "reference_ai_rate": 0,
+          "average_precision": null,
+          "points": {
+            "f05": {
+              "tp": 0,
+              "fp": 57,
+              "fn": 0,
+              "tn": 153,
+              "precision": 0,
+              "recall": null,
+              "false_positive_rate": 0.2714285714285714,
+              "f1": 0,
+              "f05": 0,
+              "accuracy": 0.7285714285714285
+            },
+            "p95": null,
+            "p99": null
+          }
+        }
+      },
+      "user_confirmed_probe": {
+        "rows": 17,
+        "positives": 17,
+        "points": {
+          "f05": {
+            "tp": 4,
+            "fp": 0,
+            "fn": 13,
+            "tn": 0,
+            "precision": 1,
+            "recall": 0.23529411764705882,
+            "false_positive_rate": null,
+            "f1": 0.38095238095238093,
+            "f05": 0.6060606060606061,
+            "accuracy": 0.23529411764705882
+          },
+          "p95": null,
+          "p99": null
+        },
+        "scores": {
+          "U001": 0.3756408209610897,
+          "U002": 0.1564013571586737,
+          "U003": 0.15322557868942907,
+          "U004": 0.3659701549797248,
+          "U005": 0.8603379222028349,
+          "U006": 0.11582416590761847,
+          "U007": 0.6132273266156159,
+          "U008": 0.5468490314258942,
+          "U009": 0.11948301901240391,
+          "U010": 0.04705122615008475,
+          "U011": 0.15306906444435742,
+          "U012": 0.06667364065257927,
+          "U013": 0.7206150604538448,
+          "U014": 0.8618204519521121,
+          "U015": 0.4447605663420763,
+          "U016": 0.051477477830841056,
+          "U017": 0.7576397677682112
+        }
+      }
+    },
+    "bili_plus_deepseek": {
+      "train_rows": 125651,
+      "train_positives": 6375,
+      "validation": {
+        "overall": {
+          "rows": 15069,
+          "videos": 227,
+          "positives": 416,
+          "reference_ai_rate": 0.02760634415024222,
+          "average_precision": 0.5107420152977206,
+          "points": {
+            "f05": {
+              "tp": 202,
+              "fp": 168,
+              "fn": 214,
+              "tn": 14485,
+              "precision": 0.5459459459459459,
+              "recall": 0.4855769230769231,
+              "false_positive_rate": 0.011465228963352215,
+              "f1": 0.5139949109414759,
+              "f05": 0.5327004219409283,
+              "accuracy": 0.9746499435928064
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh": {
+          "rows": 1670,
+          "videos": 25,
+          "positives": 242,
+          "reference_ai_rate": 0.14491017964071856,
+          "average_precision": 0.5661135288477172,
+          "points": {
+            "f05": {
+              "tp": 140,
+              "fp": 113,
+              "fn": 102,
+              "tn": 1315,
+              "precision": 0.5533596837944664,
+              "recall": 0.5785123966942148,
+              "false_positive_rate": 0.07913165266106442,
+              "f1": 0.5656565656565656,
+              "f05": 0.5582137161084529,
+              "accuracy": 0.8712574850299402
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "non_dsh": {
+          "rows": 13399,
+          "videos": 202,
+          "positives": 174,
+          "reference_ai_rate": 0.01298604373460706,
+          "average_precision": 0.43100033352713285,
+          "points": {
+            "f05": {
+              "tp": 62,
+              "fp": 55,
+              "fn": 112,
+              "tn": 13170,
+              "precision": 0.5299145299145299,
+              "recall": 0.3563218390804598,
+              "false_positive_rate": 0.004158790170132325,
+              "f1": 0.4261168384879725,
+              "f05": 0.48286604361370716,
+              "accuracy": 0.9875363833121875
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_gemini_only": {
+          "rows": 1497,
+          "videos": 25,
+          "positives": 69,
+          "reference_ai_rate": 0.04609218436873747,
+          "average_precision": 0.4210286473223848,
+          "points": {
+            "f05": {
+              "tp": 48,
+              "fp": 113,
+              "fn": 21,
+              "tn": 1315,
+              "precision": 0.2981366459627329,
+              "recall": 0.6956521739130435,
+              "false_positive_rate": 0.07913165266106442,
+              "f1": 0.41739130434782606,
+              "f05": 0.33660589060308554,
+              "accuracy": 0.9104876419505677
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_top": {
+          "rows": 1314,
+          "videos": 25,
+          "positives": 239,
+          "reference_ai_rate": 0.18188736681887366,
+          "average_precision": 0.5807436243816464,
+          "points": {
+            "f05": {
+              "tp": 140,
+              "fp": 110,
+              "fn": 99,
+              "tn": 965,
+              "precision": 0.56,
+              "recall": 0.5857740585774058,
+              "false_positive_rate": 0.10232558139534884,
+              "f1": 0.5725971370143149,
+              "f05": 0.5649717514124294,
+              "accuracy": 0.8409436834094368
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_reply": {
+          "rows": 356,
+          "videos": 24,
+          "positives": 3,
+          "reference_ai_rate": 0.008426966292134831,
+          "average_precision": 0.023933430183430183,
+          "points": {
+            "f05": {
+              "tp": 0,
+              "fp": 3,
+              "fn": 3,
+              "tn": 350,
+              "precision": 0,
+              "recall": 0,
+              "false_positive_rate": 0.0084985835694051,
+              "f1": 0,
+              "f05": 0,
+              "accuracy": 0.9831460674157303
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_hard_human_like": {
+          "rows": 116,
+          "videos": 22,
+          "positives": 0,
+          "reference_ai_rate": 0,
+          "average_precision": null,
+          "points": {
+            "f05": {
+              "tp": 0,
+              "fp": 25,
+              "fn": 0,
+              "tn": 91,
+              "precision": 0,
+              "recall": null,
+              "false_positive_rate": 0.21551724137931033,
+              "f1": 0,
+              "f05": 0,
+              "accuracy": 0.7844827586206896
+            },
+            "p95": null,
+            "p99": null
+          }
+        }
+      },
+      "thresholds": {
+        "f05": 0.5958138651300284,
+        "p95": null,
+        "p99": null
+      },
+      "fit_seconds": 14.91,
+      "test": {
+        "overall": {
+          "rows": 15464,
+          "videos": 213,
+          "positives": 442,
+          "reference_ai_rate": 0.02858251422659079,
+          "average_precision": 0.5177420711362264,
+          "points": {
+            "f05": {
+              "tp": 225,
+              "fp": 213,
+              "fn": 217,
+              "tn": 14809,
+              "precision": 0.5136986301369864,
+              "recall": 0.5090497737556561,
+              "false_positive_rate": 0.014179203834376248,
+              "f1": 0.5113636363636364,
+              "f05": 0.5127620783956244,
+              "accuracy": 0.9721934816347646
+            },
+            "p95": null,
+            "p99": null
+          },
+          "f05_video_bootstrap_95ci": {
+            "precision": [
+              0.4374193796068796,
+              0.5740429502279053
+            ],
+            "recall": [
+              0.3952155655095185,
+              0.5926708366962604
+            ],
+            "false_positive_rate": [
+              0.008554603614889049,
+              0.021657706903950653
+            ]
+          }
+        },
+        "dsh": {
+          "rows": 1699,
+          "videos": 24,
+          "positives": 259,
+          "reference_ai_rate": 0.1524426133019423,
+          "average_precision": 0.5870353110444095,
+          "points": {
+            "f05": {
+              "tp": 154,
+              "fp": 141,
+              "fn": 105,
+              "tn": 1299,
+              "precision": 0.5220338983050847,
+              "recall": 0.5945945945945946,
+              "false_positive_rate": 0.09791666666666667,
+              "f1": 0.555956678700361,
+              "f05": 0.5350938151494093,
+              "accuracy": 0.8552089464390819
+            },
+            "p95": null,
+            "p99": null
+          },
+          "f05_video_bootstrap_95ci": {
+            "precision": [
+              0.4230819966230477,
+              0.6100837202757844
+            ],
+            "recall": [
+              0.489383830455259,
+              0.6611217948717948
+            ],
+            "false_positive_rate": [
+              0.0609024554636386,
+              0.15294396961063625
+            ]
+          }
+        },
+        "non_dsh": {
+          "rows": 13765,
+          "videos": 189,
+          "positives": 183,
+          "reference_ai_rate": 0.013294587722484562,
+          "average_precision": 0.428163071577899,
+          "points": {
+            "f05": {
+              "tp": 71,
+              "fp": 72,
+              "fn": 112,
+              "tn": 13510,
+              "precision": 0.4965034965034965,
+              "recall": 0.3879781420765027,
+              "false_positive_rate": 0.005301133853629804,
+              "f1": 0.43558282208588955,
+              "f05": 0.47019867549668876,
+              "accuracy": 0.9866327642571739
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_gemini_only": {
+          "rows": 1524,
+          "videos": 23,
+          "positives": 84,
+          "reference_ai_rate": 0.05511811023622047,
+          "average_precision": 0.46017478699262315,
+          "points": {
+            "f05": {
+              "tp": 63,
+              "fp": 141,
+              "fn": 21,
+              "tn": 1299,
+              "precision": 0.3088235294117647,
+              "recall": 0.75,
+              "false_positive_rate": 0.09791666666666667,
+              "f1": 0.4375,
+              "f05": 0.35,
+              "accuracy": 0.8937007874015748
+            },
+            "p95": null,
+            "p99": null
+          },
+          "f05_video_bootstrap_95ci": {
+            "precision": [
+              0.21345631067961165,
+              0.40620596826851474
+            ],
+            "recall": [
+              0.6381052824651504,
+              0.8138333333333333
+            ],
+            "false_positive_rate": [
+              0.05926502818420145,
+              0.15699021119120474
+            ]
+          }
+        },
+        "dsh_top": {
+          "rows": 1239,
+          "videos": 24,
+          "positives": 226,
+          "reference_ai_rate": 0.1824051654560129,
+          "average_precision": 0.6064254992193006,
+          "points": {
+            "f05": {
+              "tp": 133,
+              "fp": 115,
+              "fn": 93,
+              "tn": 898,
+              "precision": 0.5362903225806451,
+              "recall": 0.588495575221239,
+              "false_positive_rate": 0.11352418558736427,
+              "f1": 0.5611814345991561,
+              "f05": 0.5459770114942529,
+              "accuracy": 0.8321226795803067
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_reply": {
+          "rows": 460,
+          "videos": 14,
+          "positives": 33,
+          "reference_ai_rate": 0.07173913043478261,
+          "average_precision": 0.4885952589747009,
+          "points": {
+            "f05": {
+              "tp": 21,
+              "fp": 26,
+              "fn": 12,
+              "tn": 401,
+              "precision": 0.44680851063829785,
+              "recall": 0.6363636363636364,
+              "false_positive_rate": 0.06088992974238876,
+              "f1": 0.525,
+              "f05": 0.4751131221719457,
+              "accuracy": 0.9173913043478261
+            },
+            "p95": null,
+            "p99": null
+          }
+        },
+        "dsh_hard_human_like": {
+          "rows": 210,
+          "videos": 20,
+          "positives": 0,
+          "reference_ai_rate": 0,
+          "average_precision": null,
+          "points": {
+            "f05": {
+              "tp": 0,
+              "fp": 60,
+              "fn": 0,
+              "tn": 150,
+              "precision": 0,
+              "recall": null,
+              "false_positive_rate": 0.2857142857142857,
+              "f1": 0,
+              "f05": 0,
+              "accuracy": 0.7142857142857143
+            },
+            "p95": null,
+            "p99": null
+          }
+        }
+      },
+      "user_confirmed_probe": {
+        "rows": 17,
+        "positives": 17,
+        "points": {
+          "f05": {
+            "tp": 5,
+            "fp": 0,
+            "fn": 12,
+            "tn": 0,
+            "precision": 1,
+            "recall": 0.29411764705882354,
+            "false_positive_rate": null,
+            "f1": 0.45454545454545453,
+            "f05": 0.6756756756756757,
+            "accuracy": 0.29411764705882354
+          },
+          "p95": null,
+          "p99": null
+        },
+        "scores": {
+          "U001": 0.31739275931169225,
+          "U002": 0.12436436250740249,
+          "U003": 0.14153038304415372,
+          "U004": 0.38161400439577997,
+          "U005": 0.8742797580765886,
+          "U006": 0.14003138399216325,
+          "U007": 0.5684170862291901,
+          "U008": 0.5925717510799707,
+          "U009": 0.1544028456801494,
+          "U010": 0.12597512665110489,
+          "U011": 0.18394175911031996,
+          "U012": 0.07239720653505163,
+          "U013": 0.6584224224201519,
+          "U014": 0.8995598405420555,
+          "U015": 0.6025126951135534,
+          "U016": 0.0934161889478561,
+          "U017": 0.8090708314088825
+        }
+      }
+    }
+  },
+  "elapsed_seconds": 127.36
+}

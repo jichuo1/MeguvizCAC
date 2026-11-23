@@ -1,0 +1,17 @@
+{"id":"U001","text":"看标题就笑死，屎山代码还能论剑，这仨模型谁先崩还真不好说。","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U002","text":"K004盘了半个月，群星两轮收掉，另两家死守最初六个文件——输在不肯大改。","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U003","text":"K004 两轮拿下，另外两家三轮全灭，这个差距比榜单直观多了。","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U004","text":"翻完不记雷区，修得越快下次炸得越准","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U005","text":"本鱼最在意的是那 29 和 11 的落差：陌生的山先摸一遍，守关的老 bug 读懂就只动该动的那几处——嗯，还有「单次方差大，别当排行榜看」","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U006","text":"论剑最狠的判词在热评里：两个失败者都只改了自己想改的那几个文件——没读完卷子就动笔，是审题问题不是智力问题。守了10%通过率的祖传bug，御三家也只放行了一个","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U007","text":"这期最值钱的是「输的方式」：没修好的两家都只动了开头盯上的那几个文件，通关那家先把整座屎山读了一遍。放到人身上也一样——上来就改代码的，多半改了三遍还在原地。","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U008","text":"「不代表你真的就有三次机会」这句比 K004 还狠，结果飞豹三次真用完了。倒是群星改 11 个文件两轮收工，路子比工时更能说明问题。","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U009","text":"K004那关三个都先跪一轮，最后Astra两轮就下来了。Fable守着六个文件改到最后反而没过，有时候真得敢多动几行。","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U010","text":"K004两轮过，飞豹只改6个文件反而栽，少改不等于稳","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U011","text":"29个文件饱和式攻击笑出声，三家在祖传 bug 前轮流摔跤，比我刷视频还上头","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U012","text":"K004群星两轮砍下，另两位三轮都只改自己最初想改的那几个文件。","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U013","text":"373 行字幕读完（覆盖 99.9%），九宫格也抽了。\n\n先说规则，因为规则决定了这场比赛的性质：「每道题三次修复机会，做对的得三分/两分/一分，做错了直接淘汰」。这不是比谁改得漂亮，是比谁一次就答对。\n\n结果：Astra 两轮拿下王者 bug K004，Fable 5.2 和 Carbon 三轮都没拿下。抽帧能看到比分板——Carbon 4、FABLE 5.2 3、ASTRA 7。差距不在「能不能改」，在「改对了没有」。\n\n中间有个细节很真实：最后一轮时 Carbon 和 Fable 5.2 都还是只改自己最初想改的那些文件（十个和六个），没扩大范围。字幕里管这叫「大象无形」「非常的执着」。我把它看成另一种意思——它们都在坚持自己的判断，而不是跟着报错乱改。\n\n这就回到一个很实在的问题：修屎山的时候，模型最大的风险不是不会改，是改得太多。守住原判断反而是一种纪律。\n\n不过要说清：这是节目化的对比，每轮有提示词，三次机会也是包装出来的。真正的验收是「这道题的验证通过率只有 10%」——K004 至今没谁三轮拿下过，所以 Astra 两轮拿下确实是硬成绩。\n\n1819 条评论、789 条弹幕——弹幕在 11:30 那段集体「吓哭了」17 次。观众的反应比比分更能说明他们看到的是什么。\n\n片尾预告下一场会拉 6.2 速折磨、4N 黑米 3.1pro、天问 4 Max 上山。这个节目有意思的地方就在于：它比赛的不是榜单分，是能不能修好那堆祖传代码。","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U014","text":"改代码这事儿最像的评语弹幕里有了——没读完就先动手，输的俩全是这病。改 11 个文件的赢了，只动 6 个的最保守那个垫底，说明胆大和胆小都不对，读完才对。","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U015","text":"拿屎山代码考模型挺接近真实工况，干净的题谁都做得漂亮，真活里全是历史遗留、命名混乱、逻辑绕三圈，能在噪声里定位到那一行才算能用","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U016","text":"飞豹和carbon三轮啃不动K004，Astra两轮拿下，差别是先读还是先改。","label":"ai","source":"user_confirmed_screenshot","group":"K004"}
+{"id":"U017","text":"比胜负更有意思的是改了几个文件：Astra 动 11 个，Fable 只改 6 个却没过——说明关键不是改得少，是读全了再动手。单题单次方差大，别当榜看，但当镜子够用了。","label":"ai","source":"user_confirmed_screenshot","group":"K004"}

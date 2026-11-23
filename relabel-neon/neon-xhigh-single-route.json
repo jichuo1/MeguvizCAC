@@ -1,0 +1,21 @@
+{
+  "model": "gemini-4-neon-xhigh",
+  "requested": 12,
+  "scored": 0,
+  "elapsed_seconds": 225.37,
+  "exit_code": 3,
+  "status": "ERROR",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "thinking_tokens": 0,
+    "cache_read_tokens": 0,
+    "total_tokens": 0
+  },
+  "diagnostic": "print timeout after 3m40s with the turn still in progress; the response is partial",
+  "step_types": {
+    "user_input": 1
+  },
+  "input_sha256": "09d84e609106883435a6d467c3e79060ab9a9fa2a026a953b3667c568b92afde",
+  "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
