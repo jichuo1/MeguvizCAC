@@ -38,6 +38,9 @@ stage2-qwen/*.jsonl
 stage2-qwen/*.jsonl.gz
 artifacts/
 
+# v0.4 large corpus expansion
+v04-corpus/
+
 # Python / OS / Editor / Media artifacts
 __pycache__/
 *.py[cod]
