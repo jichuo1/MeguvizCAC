@@ -52,5 +52,7 @@
 
 ## Phase 7 — `MeguvizCAC v0.4-DualLoop` & `1.25M` Corpus Expansion [IN PROGRESS — Issue #6]
 - [x] Locked 16-partition × 4-era real Bilibili (`200k -> 1,000,000`) + virtual video-summary/reply plugin (`+250,000` confirmed AI) schema and collectors (`v04_synth_250k.py`, `v04_bili_ingest.py`, `v04_bili_wave1.js`)
-- [ ] Complete `1,000,000` real Bilibili comment ingestion into `v04-corpus/bili-live-1m.sqlite3` & `+250,000` local ZCode CLI confirmed-AI generation
-- [ ] Distill `v0.4-DualLoop` over the expanded `1.25M` corpus
+- [x] Completed & verified `+250,000` local ZCode confirmed-AI corpus (`v04-corpus/synthetic-250k/bili-v04-synthetic-250k.jsonl.gz`, `33.65 MB`, SHA256 `b4a0437f5f5a4db415f15ea3f0b35f3b47384943d0fd39cd31fc9e0075dad8c4`: `140,000` DeepSeek + `110,000` multi-model, `0` duplicates, `0` held-out leaks)
+- [x] Reached halfway milestone on real Bilibili ingestion (`501,888 / 1,000,000` combined rows across `579` videos & all `16` partitions) and folded `6` `v0.3.0` empirical post-mortem upgrades into `docs/roadmap-v0.3-v0.4.md` (§1.4 & §2.4)
+- [ ] Add Wave-2 era-targeted collector (`<=2022` `pre_llm`, `2026`, `资讯`) and complete `1,000,000` real Bilibili ingestion into `v04-corpus/bili-live-1m.sqlite3`
+- [ ] Distill `v0.4-DualLoop` over the `1.25M` corpus meeting §2.4 latency, calibration, QAT, and subgroup gates
