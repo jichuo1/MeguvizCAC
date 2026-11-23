@@ -374,7 +374,7 @@ def train_and_export(args) -> None:
     val_texts = [prepare_text(r["text"]) for r in val_gold]
     val_scores = np.array([float(r["score"]) for r in val_gold], dtype=np.float32)
 
-    def predict_logits(mdl, texts_list: list[str], bs: int = 256) -> np.ndarray:
+    def predict_logits(mdl, texts_list: list[str], bs: int = 512) -> np.ndarray:
         mdl.eval()
         logits = []
         with torch.no_grad():
@@ -497,6 +497,16 @@ def train_and_export(args) -> None:
         ],
     }
 
+    # Evaluate all splits on GPU BEFORE moving encoder to CPU for ONNX export
+    eval_val_gold = eval_group(val_gold)
+    eval_val_dsh_gold = eval_group(val_dsh_gold)
+    eval_test_gold = eval_group(test_gold)
+    eval_test_dsh_gold = eval_group(test_dsh_gold)
+    eval_test_bili_all = eval_group(test_bili_all)
+    eval_test_dsh_all = eval_group(test_dsh_all)
+    sample_texts = [prepare_text(r["text"]) for r in test_gold[:256]]
+    pt_probs = expit(predict_logits(best_mdl, sample_texts) / best_temp)
+
     # Export FP32 -> Dynamic INT8 ONNX (auxiliary heads pruned for zero runtime overhead!)
     best_mdl.eval()
     wrapper = ExportWrapper(best_mdl.encoder, best_mdl.score_head, best_temp).cpu().eval()
@@ -518,9 +528,6 @@ def train_and_export(args) -> None:
     fp32_onnx.unlink(missing_ok=True)
 
     # Parity & CPU latency check on 256 test samples
-    sample_texts = [prepare_text(r["text"]) for r in test_gold[:256]]
-    pt_probs = expit(predict_logits(best_mdl, sample_texts) / best_temp)
-
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = 1
     opts.inter_op_num_threads = 1
@@ -574,12 +581,12 @@ def train_and_export(args) -> None:
         "ablation": ablation_results,
         "temperature": round(best_temp, 4),
         "thresholds": {"val_f05": round(t_f05, 4), "val_fpr05": round(t_fpr05, 4)},
-        "val_bili_gold": eval_group(val_gold),
-        "val_dsh_gold": eval_group(val_dsh_gold),
-        "test_bili_gold": eval_group(test_gold),
-        "test_dsh_gold": eval_group(test_dsh_gold),
-        "test_all_bili_distilled": eval_group(test_bili_all),
-        "test_all_dsh_distilled": eval_group(test_dsh_all),
+        "val_bili_gold": eval_val_gold,
+        "val_dsh_gold": eval_val_dsh_gold,
+        "test_bili_gold": eval_test_gold,
+        "test_dsh_gold": eval_test_dsh_gold,
+        "test_all_bili_distilled": eval_test_bili_all,
+        "test_all_dsh_distilled": eval_test_dsh_all,
         "probe_u001_u017": probe_metrics,
         "onnx_int8": {**parity, "bytes": int8_onnx.stat().st_size, "sha256": onnx_sha},
         "qwen_rows_used": len(qwen_map) if qwen_map else 0,
