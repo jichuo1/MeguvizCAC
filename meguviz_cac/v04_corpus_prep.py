@@ -18,15 +18,18 @@ if str(REPO_ROOT) not in sys.path:
 
 from bili_round01_data import body_key  # noqa: E402
 
+from .inkling_distill import detect_lang_tag  # noqa: E402
 from .train_student import CODE_TO_IDX, PRAG_TAGS, load_pairs, load_qwen_fused, load_rescored_corpus  # noqa: E402
 from .v03_runtime import EXTRA_CROSS_PLATFORM_TRAPS  # noqa: E402
 from .v03_tokenizer import prepare_text  # noqa: E402
 from .v04_bili_ingest import DEFAULT_LEGACY_DB, derive_era_bucket  # noqa: E402
+from .v04_runtime import MULTILINGUAL_TRAPS  # noqa: E402
 
 
 V04_GROUPS = (
     "pre_llm_human",
     "structured_human_hard",
+    "multilingual_world_knowledge",
     "tech_knowledge_real",
     "ultra_short_ai",
     "evasive_plugin_ai",
@@ -74,6 +77,7 @@ BENCH_TRAP_TEXTS = (
     "要的不是一次点击，是整只手。给权限容易，收回来难。",
     "373行字幕读完：前两步重在定位边界，最后一步才是真正决定通过率的关键——慢一点反而不容易返工。",
     *(txt for _, txt in EXTRA_CROSS_PLATFORM_TRAPS),
+    *(txt for _, txt in MULTILINGUAL_TRAPS),
 )
 
 
@@ -95,8 +99,20 @@ def is_structured_human(text: str) -> bool:
     return bool(STRUCTURED_HUMAN_RE.search(text)) or len(text.strip()) >= 80
 
 
+def is_multilingual_wk(text: str, row: dict) -> bool:
+    lt = str(row.get("lang_tag") or detect_lang_tag(text, str(row.get("partition") or "")))
+    if lt in ("en_dominant", "ja_dominant", "ko_dominant", "eu_other", "zh_en_mixed"):
+        return True
+    if row.get("cohort") in ("inkling_wk", "v04_multilingual"):
+        return True
+    src = str(row.get("score_source") or "").lower()
+    if "inkling" in src and lt != "zh_general":
+        return True
+    return False
+
+
 def assign_group_id(row: dict, evasive_modes: frozenset[str] = DEFAULT_EVASIVE_MODES) -> str:
-    """Assign deterministic 11-way GroupDRO subgroup label aligned with v0.4 empirical & OOD findings."""
+    """Assign deterministic 12-way GroupDRO subgroup label aligned with v0.4 empirical & OOD findings."""
     text = str(row.get("text") or "")
     cohort = str(row.get("cohort") or "")
     era = str(row.get("era_bucket") or "")
@@ -106,8 +122,17 @@ def assign_group_id(row: dict, evasive_modes: frozenset[str] = DEFAULT_EVASIVE_M
     partition = str(row.get("partition") or "")
     score = row.get("score")
     score_f = float(score) if score is not None else 50.0
+    lt = str(row.get("lang_tag") or detect_lang_tag(text, partition))
+    is_zh_core = lt in ("zh_general", "zh_world_knowledge")
 
-    is_confirmed_ai = origin == "confirmed_ai" or cohort in ("deepseek", "other_models", "synth_250k")
+    is_confirmed_ai = origin == "confirmed_ai" or cohort in ("deepseek", "other_models", "synth_250k", "inkling_wk")
+    if (era == "pre_llm" or (row.get("has_score", True) and score_f <= 28.0)) and is_structured_human(text) and is_zh_core:
+        return "structured_human_hard"
+    if is_zh_core and has_stress_marker(text) and (not is_confirmed_ai or not (len(text.strip()) <= 22 or length_bucket == "ultra_short")):
+        return "persona_space_kaomoji"
+    if is_multilingual_wk(text, row):
+        return "multilingual_world_knowledge"
+
     if is_confirmed_ai:
         if len(text.strip()) <= 22 or length_bucket == "ultra_short":
             return "ultra_short_ai"
@@ -117,8 +142,6 @@ def assign_group_id(row: dict, evasive_modes: frozenset[str] = DEFAULT_EVASIVE_M
             return "evasive_plugin_ai"
         return "standard_plugin_ai"
 
-    if (era == "pre_llm" or (row.get("has_score", True) and score_f <= 28.0)) and is_structured_human(text):
-        return "structured_human_hard"
     if era == "pre_llm":
         return "pre_llm_human"
     if row.get("dsh"):
@@ -172,14 +195,21 @@ def merge_v04_corpus(
     v04_real_db: Path | None,
     legacy_db: Path | None = DEFAULT_LEGACY_DB,
     teacher_scores_path: Path | None = None,
+    v04_qwen_distill: Path | None = None,
+    v04_inkling_distill: Path | None = None,
+    v04_joint_distill: Path | None = None,
+    v04_multilingual_corpus: Path | None = None,
     evasive_modes: frozenset[str] = DEFAULT_EVASIVE_MODES,
     export_out: Path | None = None,
 ) -> dict:
-    """Merge Stage-1/2 + v04 +250k synth + v04 1M real with strict zero held-out leakage verification."""
+    """Merge Stage-1/2 + v04 +250k synth + v04 1M real + Inkling/Joint 4-teacher distill with zero held-out leakage."""
     t0 = time.monotonic()
     stage1_rows = load_rescored_corpus(stage1_data)
     qwen_map = load_qwen_fused(qwen_data) if qwen_data and qwen_data.is_file() else {}
     qwen_dist = load_qwen_distill_map(qwen_distill)
+    v04_qwen_map = load_qwen_distill_map(v04_qwen_distill)
+    v04_inkling_map = load_qwen_distill_map(v04_inkling_distill)
+    v04_joint_map = load_qwen_distill_map(v04_joint_distill)
     teacher_map = load_teacher_scores(teacher_scores_path)
 
     # 1. Build ironclad forbidden sets from all val/test/user_confirmed rows + runtime stress traps
@@ -354,6 +384,46 @@ def merge_v04_corpus(
             seen_train_hashes.add(bh)
 
             ts = teacher_map.get(sid)
+            vj = v04_joint_map.get(sid)
+            vq = v04_qwen_map.get(sid)
+            vi = v04_inkling_map.get(sid)
+            lt = detect_lang_tag(txt, part)
+
+            prag_v = [-1.0] * len(PRAG_TAGS)
+            q_intent = ""
+            if lt in ("en_dominant", "ja_dominant", "ko_dominant", "eu_other"):
+                wq, wi = 0.30, 0.70
+            elif lt == "zh_en_mixed":
+                wq, wi = 0.50, 0.50
+            else:
+                wq, wi = 0.65, 0.35
+
+            if vj is not None:
+                vtags = vj.get("pragmatic_tags")
+                if isinstance(vtags, list) and len(vtags) == len(PRAG_TAGS):
+                    prag_v = [float(x) for x in vtags]
+                q_intent = str(vj.get("semantic_intent") or "")
+            elif vq is not None and vi is not None:
+                vqt = vq.get("pragmatic_tags")
+                vit = vi.get("pragmatic_tags")
+                if isinstance(vqt, list) and len(vqt) == len(PRAG_TAGS) and isinstance(vit, list) and len(vit) == len(PRAG_TAGS):
+                    prag_v = [round(wq * float(a) + wi * float(b), 4) for a, b in zip(vqt, vit)]
+                elif isinstance(vqt, list) and len(vqt) == len(PRAG_TAGS):
+                    prag_v = [float(x) for x in vqt]
+                elif isinstance(vit, list) and len(vit) == len(PRAG_TAGS):
+                    prag_v = [float(x) for x in vit]
+                q_intent = str((vi.get("semantic_intent") or vq.get("semantic_intent")) if lt in ("en_dominant", "ja_dominant", "ko_dominant", "eu_other", "zh_en_mixed") else (vq.get("semantic_intent") or vi.get("semantic_intent")) or "")
+            elif vq is not None:
+                vtags = vq.get("pragmatic_tags")
+                if isinstance(vtags, list) and len(vtags) == len(PRAG_TAGS):
+                    prag_v = [float(x) for x in vtags]
+                q_intent = str(vq.get("semantic_intent") or "")
+            elif vi is not None:
+                vtags = vi.get("pragmatic_tags")
+                if isinstance(vtags, list) and len(vtags) == len(PRAG_TAGS):
+                    prag_v = [float(x) for x in vtags]
+                q_intent = str(vi.get("semantic_intent") or "")
+
             if ts is not None:
                 sc = float(ts["teacher_score"])
                 unc = float(ts.get("teacher_uncertainty", 6.0))
@@ -376,8 +446,42 @@ def merge_v04_corpus(
             if hard_neg:
                 hard_human_neg_count += 1
             if era == "pre_llm":
-                w_real = 1.6 if hard_neg else 0.85
+                w_real = 1.6 if hard_neg else (1.5 if (vj is not None or vq is not None or vi is not None) else 0.85)
                 code = "H"
+            elif vj is not None and ("fused_score" in vj or "score" in vj):
+                sc = float(vj.get("fused_score", vj.get("score", sc)))
+                unc = float(vj.get("uncertainty", 4.0))
+                src = str(vj.get("score_source") or "v04_four_teacher_joint")
+                has_sc = True
+                w_real = float(vj.get("quality_weight", 1.8))
+                code = str(vj.get("reason_code") or ("A" if sc >= 70.0 else ("H" if sc <= 30.0 else "E")))
+            elif vq is not None and "qwen_score" in vq and vi is not None and "inkling_score" in vi:
+                q_sc = float(vq["qwen_score"])
+                i_sc = float(vi["inkling_score"])
+                sc = wq * q_sc + wi * i_sc
+                diff_oi = abs(q_sc - i_sc)
+                unc = max(4.0, diff_oi)
+                src = "v04_qwen_inkling_joint" if diff_oi < 18.0 else "v04_qwen_inkling_disagree"
+                has_sc = True
+                w_real = 1.8 if diff_oi < 18.0 else 0.85
+                code = "A" if (sc >= 75.0 and prag_v[2] >= 0.5) else ("E" if sc >= 70.0 else ("H" if sc <= 30.0 else "P"))
+            elif vq is not None and "qwen_score" in vq:
+                q_sc = float(vq["qwen_score"])
+                sc = (0.60 * q_sc + 0.40 * sc) if has_sc else q_sc
+                unc = abs(q_sc - sc) if has_sc else 4.0
+                src = "v04_qwen38_bf16_fused"
+                has_sc = True
+                w_real = 1.5
+                code = "A" if sc >= 70.0 else ("H" if sc <= 30.0 else "E")
+            elif vi is not None and "inkling_score" in vi:
+                i_sc = float(vi["inkling_score"])
+                alpha_i = 0.75 if lt in ("en_dominant", "ja_dominant", "ko_dominant", "eu_other") else 0.60
+                sc = (alpha_i * i_sc + (1.0 - alpha_i) * sc) if has_sc else i_sc
+                unc = abs(i_sc - sc) if has_sc else 5.0
+                src = "v04_inkling2_mini_fused"
+                has_sc = True
+                w_real = 1.6
+                code = "E" if sc >= 70.0 else ("H" if sc <= 30.0 else "P")
             elif not has_sc:
                 w_real = 0.0
                 code = ""
@@ -404,10 +508,11 @@ def merge_v04_corpus(
                 "partition": part,
                 "era_bucket": era,
                 "comment_level": lvl,
+                "lang_tag": lt,
                 "hard_human_neg": hard_neg,
                 "train_weight": w_real,
-                "prag_vec": [-1.0] * len(PRAG_TAGS),
-                "semantic_intent": "",
+                "prag_vec": prag_v,
+                "semantic_intent": q_intent,
                 "has_score": has_sc,
             }
             gid = assign_group_id(rec, evasive_modes=evasive_modes)
@@ -447,6 +552,58 @@ def merge_v04_corpus(
                 for sid, vid, part, era, lvl, txt in con.execute(q):
                     if txt:
                         _handle_real_row(sid, vid, part, era, lvl, txt)
+
+        if v04_multilingual_corpus is not None and v04_multilingual_corpus.is_file():
+            with _open_read(v04_multilingual_corpus) as mf:
+                for line in mf:
+                    if not line.strip():
+                        continue
+                    r = json.loads(line)
+                    if r.get("split", "train") != "train":
+                        raise ValueError(f"防泄漏校验失败: multilingual_corpus 发现非 train 样本 {r.get('sample_id')}")
+                    txt = str(r.get("text") or "")
+                    if not txt:
+                        continue
+                    bh = _norm_hash(txt)
+                    pt = prepare_text(txt)
+                    if bh in forbidden_hashes or pt in forbidden_norm_texts:
+                        leak_blocked["v04_multilingual"] += 1
+                        continue
+                    if bh in seen_train_hashes:
+                        dedup_skipped["v04_multilingual"] += 1
+                        continue
+                    seen_train_hashes.add(bh)
+                    prag = r.get("prag_vec") or r.get("pragmatic_tags")
+                    if not (isinstance(prag, list) and len(prag) == len(PRAG_TAGS)):
+                        prag = [-1.0] * len(PRAG_TAGS)
+                    sc = float(r.get("score", 50.0))
+                    rec = {
+                        "sample_id": r["sample_id"],
+                        "text": txt,
+                        "cohort": str(r.get("cohort") or "inkling_wk"),
+                        "origin_status": str(r.get("origin_status") or ("confirmed_ai" if sc >= 70.0 else "real_public_web")),
+                        "split": "train",
+                        "score": round(sc, 2),
+                        "reason_code": str(r.get("reason_code") or ("E" if sc >= 70.0 else "H")),
+                        "judgment": str(r.get("judgment") or ("ai_like" if sc >= 70.0 else "human_like")),
+                        "score_source": str(r.get("score_source") or "v04_inkling_wk_counterfactual"),
+                        "uncertainty": float(r.get("uncertainty", 4.0)),
+                        "dsh": False,
+                        "partition": str(r.get("partition") or r.get("world_knowledge_domain") or "知识"),
+                        "era_bucket": str(r.get("era_bucket") or "current_2026"),
+                        "comment_level": str(r.get("comment_level") or "top"),
+                        "lang_tag": str(r.get("lang_tag") or detect_lang_tag(txt)),
+                        "train_weight": float(r.get("train_weight", 1.25)),
+                        "prag_vec": [float(x) for x in prag],
+                        "semantic_intent": str(r.get("semantic_intent") or ""),
+                        "has_score": True,
+                    }
+                    gid = assign_group_id(rec, evasive_modes=evasive_modes)
+                    rec["group_id"] = gid
+                    _emit(rec)
+                    source_counts["v04_multilingual_wk"] += 1
+                    split_counts["train"] += 1
+                    group_counts[gid] += 1
     finally:
         if writer is not None:
             writer.close()
@@ -483,6 +640,10 @@ def main() -> None:
     parser.add_argument("--v04-real-db", type=Path, default=REPO_ROOT / "v04-corpus" / "bili-live-1m.sqlite3")
     parser.add_argument("--legacy-db", type=Path, default=DEFAULT_LEGACY_DB)
     parser.add_argument("--teacher-scores", type=Path, default=None)
+    parser.add_argument("--v04-qwen-distill", type=Path, default=None)
+    parser.add_argument("--v04-inkling-distill", type=Path, default=None)
+    parser.add_argument("--v04-joint-distill", type=Path, default=None)
+    parser.add_argument("--v04-multilingual-corpus", type=Path, default=None)
     parser.add_argument("--export-out", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -497,6 +658,10 @@ def main() -> None:
         v04_real_db=args.v04_real_db,
         legacy_db=args.legacy_db,
         teacher_scores_path=args.teacher_scores,
+        v04_qwen_distill=args.v04_qwen_distill,
+        v04_inkling_distill=args.v04_inkling_distill,
+        v04_joint_distill=args.v04_joint_distill,
+        v04_multilingual_corpus=args.v04_multilingual_corpus,
         export_out=None if args.dry_run else args.export_out,
     )
     print(json.dumps(out, ensure_ascii=False, indent=2))

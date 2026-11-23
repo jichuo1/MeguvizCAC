@@ -167,7 +167,7 @@ def format_chat_prompts(tokenizer, prompts: list[str]) -> list[str]:
 
 
 class QwenRunner:
-    """Unified high-throughput runner supporting vLLM (preferred on H100 FP8/BF16) and transformers fallback."""
+    """Unified high-throughput runner supporting vLLM APC (full BF16 on A100-80GB sm_80, FP8 on sm_89+) and SDPA HF fallback."""
 
     def __init__(self, backend_pref: str = "auto", model_override: str | None = None):
         import torch
@@ -176,7 +176,12 @@ class QwenRunner:
             raise RuntimeError("需要 CUDA GPU 运行 Qwen3.8-27B 蒸馏。")
         self.vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
         self.gpu_name = torch.cuda.get_device_name(0)
-        print(f"[Qwen] GPU={self.gpu_name}, VRAM={self.vram_gb:.1f} GB, backend_pref={backend_pref}", flush=True)
+        self.cc = torch.cuda.get_device_capability(0)
+        print(
+            f"[Qwen] GPU={self.gpu_name}, cc={self.cc[0]}.{self.cc[1]}, "
+            f"VRAM={self.vram_gb:.1f} GB, backend_pref={backend_pref}",
+            flush=True,
+        )
 
         self.backend = None
         self.model_id = None
@@ -186,8 +191,12 @@ class QwenRunner:
 
         if model_override:
             candidates = [model_override]
-        elif self.vram_gb >= 70.0:
-            candidates = ["Qwen/Qwen3.8-27B-FP8", "Qwen/Qwen3.8-27B"]
+        elif self.vram_gb >= 68.0:
+            if self.cc >= (8, 9):
+                candidates = ["Qwen/Qwen3.8-27B-FP8", "Qwen/Qwen3.8-27B"]
+            else:
+                # A100-SXM4-80GB (sm_80) has no native FP8 Tensor Cores: full BF16 (~54 GB + ~19 GB KV cache) is optimal
+                candidates = ["Qwen/Qwen3.8-27B", "Qwen/Qwen3.8-27B-FP8", "unsloth/Qwen3.8-27B-unsloth-bnb-4bit"]
         elif self.vram_gb >= 38.0:
             candidates = ["Qwen/Qwen3.8-27B-FP8", "unsloth/Qwen3.8-27B-unsloth-bnb-4bit"]
         else:
@@ -202,18 +211,27 @@ class QwenRunner:
                     try:
                         print(f"[Qwen/vLLM] 尝试加载 {mid}...", flush=True)
                         tok = AutoTokenizer.from_pretrained(mid, trust_remote_code=True)
-                        llm = LLM(
-                            model=mid,
-                            trust_remote_code=True,
-                            max_model_len=4096,
-                            gpu_memory_utilization=0.90,
-                            dtype="auto",
-                        )
+                        vllm_kwargs = {
+                            "model": mid,
+                            "trust_remote_code": True,
+                            "max_model_len": 2560,
+                            "gpu_memory_utilization": 0.92,
+                            "dtype": "bfloat16" if "FP8" not in mid else "auto",
+                            "enable_prefix_caching": True,
+                            "max_num_seqs": 128,
+                            "max_num_batched_tokens": 16384,
+                        }
+                        try:
+                            llm = LLM(**vllm_kwargs)
+                        except TypeError:
+                            for opt_k in ("enable_prefix_caching", "max_num_seqs", "max_num_batched_tokens"):
+                                vllm_kwargs.pop(opt_k, None)
+                            llm = LLM(**vllm_kwargs)
                         self.backend = "vllm"
                         self.model_id = mid
                         self.tokenizer = tok
                         self.llm = llm
-                        print(f"[Qwen/vLLM] 成功加载 {mid}", flush=True)
+                        print(f"[Qwen/vLLM] 成功加载 {mid} (dtype={vllm_kwargs['dtype']})", flush=True)
                         return
                     except Exception as err:
                         print(f"[Qwen/vLLM] 加载 {mid} 失败: {err}", flush=True)
@@ -254,7 +272,10 @@ class QwenRunner:
                 mdl = None
                 for cls_name, cls in model_classes:
                     try:
-                        mdl = cls.from_pretrained(mid, **kwargs)
+                        try:
+                            mdl = cls.from_pretrained(mid, attn_implementation="sdpa", **kwargs)
+                        except (TypeError, ValueError):
+                            mdl = cls.from_pretrained(mid, **kwargs)
                         print(f"[Qwen/HF] 成功通过 {cls_name} 加载 {mid}", flush=True)
                         break
                     except Exception as cls_err:
@@ -334,11 +355,13 @@ def run_qwen_distill(args) -> None:
         for line in args.pool.resolve().read_text(encoding="utf-8").splitlines():
             if line.strip():
                 r = json.loads(line)
-                if r["split"] != "train":
+                if r.get("split", "train") != "train":
                     raise AssertionError("防泄漏校验失败: pool 含非 train 行")
                 pool.append(r)
 
-    if args.select_only:
+    if args.select_only or args.dry_run:
+        if args.dry_run:
+            print(json.dumps({"dry_run": "PASS", "pool_rows": len(pool), "pool_path": str(args.pool)}, ensure_ascii=False, indent=2))
         return
 
     out_path = args.out.resolve()
@@ -359,7 +382,12 @@ def run_qwen_distill(args) -> None:
 
     runner = QwenRunner(backend_pref=args.backend, model_override=args.model)
     chunk_sz = args.comments_per_prompt
-    gpu_bs = args.gpu_batch_prompts if args.gpu_batch_prompts > 0 else (32 if runner.backend == "vllm" else 12 if runner.vram_gb >= 60 else 6)
+    if args.gpu_batch_prompts > 0:
+        gpu_bs = args.gpu_batch_prompts
+    elif runner.backend == "vllm":
+        gpu_bs = 128 if runner.vram_gb >= 68.0 else 48
+    else:
+        gpu_bs = 24 if runner.vram_gb >= 68.0 else (12 if runner.vram_gb >= 60.0 else 6)
     t0 = time.monotonic()
     scored_now = 0
     attempted_now = 0
@@ -419,8 +447,14 @@ def run_qwen_distill(args) -> None:
             for line in twins_path.read_text(encoding="utf-8").splitlines():
                 if line.strip():
                     existing_twins.add(json.loads(line)["source_id"])
-        bili_ai = [r for r in pool if r["cohort"] == "bili" and r["stage1_score"] >= 72.0 and 15 <= len(r["text"]) <= 120 and r["sample_id"] not in existing_twins]
-        bili_hu = [r for r in pool if r["cohort"] == "bili" and r["stage1_score"] <= 25.0 and 15 <= len(r["text"]) <= 120 and r["sample_id"] not in existing_twins]
+        def _pool_score(r: dict) -> float:
+            return float(r.get("stage1_score", r.get("raw_teacher_score", r.get("teacher_score", 50.0))))
+
+        def _pool_eligible(r: dict) -> bool:
+            return r.get("cohort", "v04_1m") in ("bili", "v04_1m")
+
+        bili_ai = [r for r in pool if _pool_eligible(r) and _pool_score(r) >= 72.0 and 15 <= len(r["text"]) <= 120 and r["sample_id"] not in existing_twins]
+        bili_hu = [r for r in pool if _pool_eligible(r) and _pool_score(r) <= 25.0 and 15 <= len(r["text"]) <= 120 and r["sample_id"] not in existing_twins]
         half = args.gen_twins // 2
         rng = random.Random(20261128)
         twin_jobs = [(r, "to_human") for r in rng.sample(bili_ai, min(half, len(bili_ai)))] + [
@@ -449,7 +483,7 @@ def run_qwen_distill(args) -> None:
                                     "direction": direction,
                                     "ai_text": src["text"] if direction == "to_human" else rewritten,
                                     "human_text": rewritten if direction == "to_human" else src["text"],
-                                    "source_stage1_score": src["stage1_score"],
+                                    "source_stage1_score": _pool_score(src),
                                 }
                                 tw_f.write(json.dumps(pair, ensure_ascii=False, separators=(",", ":")) + "\n")
                                 tw_count += 1
@@ -467,6 +501,7 @@ def main():
     parser.add_argument("--model", default=None)
     parser.add_argument("--pool-cap", type=int, default=15000)
     parser.add_argument("--select-only", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--pilot", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--comments-per-prompt", type=int, default=8)

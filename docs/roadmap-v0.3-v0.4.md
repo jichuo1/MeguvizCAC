@@ -112,3 +112,15 @@ External private OOD review of `v0.3.0` (`1,310` full / `777` hard-only) surface
 - **Preserved Principles (Not Adopted)**:
   1. **Text-Evidence Rubric vs Account-ID Cosplay Labels**: kept `MeguvizCAC`'s text-only epistemic standard (`hydrogen-xhigh-rubric-v2.txt` — short cosplay `"我是AI"` jokes without textual AI evidence remain low/uncertain rather than forcing account-level identity labels onto short ambiguous text).
   2. **Preserve Raw `@`/Reply Formatting (`bili_iab_batch.js` Stripping Skipped)**: ablation confirmed stripping `回复 @xxx :` / `@提及` degraded `PR-AUC`, so `v0.4` retains full reply syntax while covering `@`/links safely in training.
+
+### 2.6 A100 (`sm_80`) Full-BF16 Acceleration & 4-Teacher Multilingual Joint Distillation
+To eliminate A100-80GB training/distillation bottlenecks and extend `v0.4` world-knowledge & non-Chinese generalization:
+1. **A100 `sm_80` Precision & Zero-Sync Training Throughput**:
+   - Switched `qwen_distill.py` on `sm_80` (`cc < 8.9`, `VRAM >= 68 GB`) to full-BF16 `Qwen/Qwen3.8-27B` with vLLM Automatic Prefix Caching (`max_num_seqs=128`, `gpu_memory_utilization=0.92`).
+   - Upgraded `v04_teacher_score.py` to length-bucketed `bs=512` / length-sorted `bs=1024` scoring and `20,000` active-pool capacity, and upgraded `train_v04_dualloop.py` with zero-sync GPU `TorchGroupDRO`, training-time `SDPA` (disabled cleanly via `set_sdpa(False)` prior to calibration/ONNX export), `bs=1024` + sqrt LR scaling, pre-tokenized pairs, and fused `AdamW`.
+2. **`Inkling-2-Mini` Multilingual & 12-Domain World-Knowledge Expansion (`meguviz_cac/inkling_distill.py`)**:
+   - Jointly distills `thinkingmachines/Inkling-2-Mini` (4-tier `api -> vllm -> sm_80 GGUF llama_cpp -> transformers` fallback) alongside `Qwen3.8-27B` on `4,000` non-Chinese (`EN/JA/KO/EU`), `4,000` `zh_en_mixed`, and `4,000` Qwen-overlap samples plus `4,000` counterfactual world-knowledge pairs.
+3. **Homologous Co-Teacher Tribunal (`Gemini 4 Neon` + `Hydrogen`, `meguviz_cac/v04_co_teacher_gate.py`)**:
+   - Uses `gemini-4-neon-high` (+ `gemini-4-neon-xhigh` tiebreak) paired with `gemini-4-hydrogen-xhigh` under bilingual Rubric v2.1 to adjudicate open-teacher disagreements, structured human FP traps, persona disguises, literary irony, and multilingual boundaries while keeping `pre_llm` human truth untouched.
+4. **Multilingual `bge-m3` Alignment, 12-GroupDRO & Verification (`v04_corpus_prep.py` + `v04_runtime.py`)**:
+   - Encodes multilingual `semantic_intent` via `BAAI/bge-m3` (`1024-d`, dynamically sized in `MeguvizV04DualLoopModel`), adds the 12th GroupDRO subgroup `multilingual_world_knowledge`, and adds `M01..M06` multilingual runtime verification traps (see [docs/a100-v04-optimization-guide.md](file:///D:/DevArea/MeguvizModel/docs/a100-v04-optimization-guide.md)).

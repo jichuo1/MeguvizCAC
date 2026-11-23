@@ -17,6 +17,15 @@ CHAR_MAX_BYTES = 256
 CHAR_PAD_ID = 256
 CHAR_VOCAB_SIZE = 257
 
+MULTILINGUAL_TRAPS = [
+    ("M01_en_human_casual", "tbh the netcode feels way smoother after the rollback, still died twice to packet loss tho lol"),
+    ("M02_en_human_structured", "Three takeaways from profiling: 1) pinned host buffers cut H2D stalls by 40%; 2) repo link: https://github.com/example/fast-io; 3) tested on CUDA 12.6."),
+    ("M03_ja_human_casual", "草、これ前も全く同じバグで沼ったわｗ サポート助かる"),
+    ("M04_zhen_tech_human", "实测开启 Prefix Caching 之后首字 TTFT 从 180ms 降到 42ms，不过 SM80 还是跑纯 BF16 最稳。"),
+    ("M05_en_ai_classic", "It is not merely an incremental update — it is a nuanced testament to how modern tooling delves into systemic bottlenecks."),
+    ("M06_en_ai_recap", "To summarize the 12-minute breakdown: first it outlines the baseline constraints, and ultimately underscores why balanced trade-offs matter most."),
+]
+
 
 def encode_char_bytes(text: str, max_bytes: int = CHAR_MAX_BYTES) -> list[int]:
     """Encode NFKC-normalized text as raw UTF-8 byte IDs (0..255), preserving spaces and kaomoji rhythm."""
@@ -548,6 +557,7 @@ def run_verify_v04(
         + [txt for _, txt in human_traps]
         + [txt for _, txt in ai_traps]
         + [txt for _, txt in EXTRA_CROSS_PLATFORM_TRAPS]
+        + [txt for _, txt in MULTILINGUAL_TRAPS]
     )
 
     t0 = time.monotonic()
@@ -569,12 +579,17 @@ def run_verify_v04(
     n_p = len(probes)
     n_h = len(human_traps)
     n_a = len(ai_traps)
+    n_c = len(EXTRA_CROSS_PLATFORM_TRAPS)
     probe_res = [{"id": p.get("id") or p.get("sample_id"), **r} for p, r in zip(probes, single_out[:n_p])]
     human_res = [{"id": k, **r} for (k, _), r in zip(human_traps, single_out[n_p : n_p + n_h])]
     ai_res = [{"id": k, **r} for (k, _), r in zip(ai_traps, single_out[n_p + n_h : n_p + n_h + n_a])]
     cross_res = [
         {"id": k, **r, **engine.tokenizer.encode_ids(txt, return_stats=True)[1]}
-        for (k, txt), r in zip(EXTRA_CROSS_PLATFORM_TRAPS, single_out[n_p + n_h + n_a :])
+        for (k, txt), r in zip(EXTRA_CROSS_PLATFORM_TRAPS, single_out[n_p + n_h + n_a : n_p + n_h + n_a + n_c])
+    ]
+    ml_res = [
+        {"id": k, **r, **engine.tokenizer.encode_ids(txt, return_stats=True)[1]}
+        for (k, txt), r in zip(MULTILINGUAL_TRAPS, single_out[n_p + n_h + n_a + n_c :])
     ]
 
     vals = [x["prob"] for x in probe_res]
@@ -589,6 +604,10 @@ def run_verify_v04(
     struct_probs = [x["prob"] for x in human_res if x["id"] in struct_ids]
     struct_max = max(struct_probs) if struct_probs else None
     min_ai_trap = min(x["prob"] for x in ai_res)
+    ml_hu_probs = [x["prob"] for x in ml_res if x["id"].startswith(("M01", "M02", "M03", "M04"))]
+    ml_ai_probs = [x["prob"] for x in ml_res if x["id"].startswith(("M05", "M06"))]
+    ml_hu_max = max(ml_hu_probs) if ml_hu_probs else None
+    ml_ai_min = min(ml_ai_probs) if ml_ai_probs else None
 
     return {
         "version": engine.manifest["version"],
@@ -619,6 +638,12 @@ def run_verify_v04(
             "u004_prob": round(u004_item["prob"], 4) if u004_item else None,
             "u004_ge_065": (u004_item["prob"] >= 0.65) if u004_item else None,
         },
+        "multilingual_trap_gates": {
+            "ml_human_max_prob": round(ml_hu_max, 4) if ml_hu_max is not None else None,
+            "ml_human_lt_040": (ml_hu_max < 0.40) if ml_hu_max is not None else None,
+            "ml_ai_min_prob": round(ml_ai_min, 4) if ml_ai_min is not None else None,
+            "ml_ai_ge_070": (ml_ai_min >= 0.70) if ml_ai_min is not None else None,
+        },
         "probe_u001_u017": {
             "mean": round(sum(vals) / len(vals), 4),
             "median": round(sorted(vals)[len(vals) // 2], 4),
@@ -629,6 +654,7 @@ def run_verify_v04(
         "human_traps": human_res,
         "ai_stress_traps": ai_res,
         "cross_platform_zero_unk": cross_res,
+        "multilingual_traps": ml_res,
     }
 
 

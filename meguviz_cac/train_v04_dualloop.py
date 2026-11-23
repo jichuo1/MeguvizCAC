@@ -197,6 +197,7 @@ def _load_training_bundle(
     intent_cache_path: Path | None,
     stage1_synth_cap: int = 15000,
     v04_synth_cap: int = -1,
+    extra_pairs_paths: list[Path] | tuple[Path, ...] = (),
     seed: int = 20261124,
 ) -> tuple[list[dict], list[dict], list[dict], list[dict], np.ndarray | None]:
     """Load either unified v0.4 merged JSONL.GZ or Stage-1 JSONL.GZ without leakage."""
@@ -213,6 +214,28 @@ def _load_training_bundle(
     eval_rows = [r for r in rows if r["split"] != "train" or r.get("cohort") == "user_confirmed"]
     forbidden = {prepare_text(r["text"]) for r in eval_rows}
     pairs = load_pairs(pairs_path, forbidden) if pairs_path and pairs_path.is_file() else []
+    for ep_path in extra_pairs_paths:
+        if ep_path is None or not ep_path.is_file():
+            continue
+        with _open_read(ep_path) as pf:
+            for line in pf:
+                if not line.strip():
+                    continue
+                p = json.loads(line)
+                ai_t = prepare_text(p.get("ai_text") or "")
+                hu_t = prepare_text(p.get("human_text") or "")
+                if len(ai_t) < 10 or len(hu_t) < 10 or ai_t == hu_t:
+                    continue
+                if ai_t in forbidden or hu_t in forbidden:
+                    continue
+                pairs.append(
+                    {
+                        "ai_text": ai_t,
+                        "human_text": hu_t,
+                        "weight": float(p.get("weight", 0.5)),
+                        "category": p.get("category", "qwen_twin"),
+                    }
+                )
 
     rng = random.Random(seed)
     train_items: list[dict] = []
@@ -286,7 +309,7 @@ def _load_training_bundle(
 
 
 def run_dry(args) -> None:
-    """Verify pure-NumPy v0.4 components, zero leakage, 10-group DRO tags, and zero-[UNK] tokenization locally."""
+    """Verify pure-NumPy v0.4 components, zero leakage, 12-group DRO tags, and zero-[UNK] tokenization locally."""
     t0 = time.monotonic()
 
     # 1. Pure-NumPy Sinkhorn doubly-stochastic invariant check
@@ -339,6 +362,7 @@ def run_dry(args) -> None:
         args.intent_cache.resolve() if args.intent_cache else None,
         stage1_synth_cap=min(5000, args.stage1_synth_cap) if args.stage1_synth_cap != 0 else 0,
         v04_synth_cap=5000 if args.v04_synth_cap < 0 else min(5000, args.v04_synth_cap),
+        extra_pairs_paths=[p.resolve() for p in args.extra_pairs],
     )
     tok_report: dict | str = "skipped_no_vocab"
     if args.vocab and args.vocab.is_file():
@@ -421,8 +445,20 @@ def train_and_export(args) -> None:
     device = torch.device("cuda")
     gpu_name = torch.cuda.get_device_name(0)
     vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-    batch_size = int(args.batch_size) if int(args.batch_size) > 0 else (256 if vram_gb >= 35.0 else 128)
+    if int(args.batch_size) > 0:
+        batch_size = int(args.batch_size)
+        lr_scale = 1.0
+    elif vram_gb >= 60.0:
+        batch_size = 1024
+        lr_scale = 1.0 if args.no_auto_lr_scale else min(2.0, math.sqrt(batch_size / 256.0))
+    elif vram_gb >= 35.0:
+        batch_size = 512
+        lr_scale = 1.0 if args.no_auto_lr_scale else min(2.0, math.sqrt(batch_size / 256.0))
+    else:
+        batch_size = 256 if vram_gb >= 20.0 else 128
+        lr_scale = 1.0
     amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    print(f"[Config] GPU={gpu_name} ({vram_gb:.1f} GB) | amp={amp_dtype} | batch_size={batch_size} | lr_scale={lr_scale:.2f}", flush=True)
 
     out_dir = args.out.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -558,6 +594,7 @@ def train_and_export(args) -> None:
             self.ffn_down = QATLinear(intermediate_size, hidden_size)
             self.ffn_ln = nn.LayerNorm(hidden_size, eps=eps)
             self.drop = nn.Dropout(drop_p)
+            self.use_sdpa = False
 
         def load_from_bert_layer(self, layer) -> None:
             copy_linear_(self.q_proj, layer.attention.self.query)
@@ -577,8 +614,12 @@ def train_and_export(args) -> None:
             q = self.q_proj(x).view(bsz, seqlen, self.num_heads, self.head_dim).transpose(1, 2)
             k = self.k_proj(x).view(bsz, seqlen, self.num_heads, self.head_dim).transpose(1, 2)
             v = self.v_proj(x).view(bsz, seqlen, self.num_heads, self.head_dim).transpose(1, 2)
-            probs = self.drop(torch.softmax(torch.matmul(q, k.transpose(-1, -2)) * self.scale + attn_bias_4d, dim=-1))
-            ctx = torch.matmul(probs, v).transpose(1, 2).contiguous().view(bsz, seqlen, self.hidden_size)
+            if self.use_sdpa:
+                ctx = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias_4d.to(q.dtype), dropout_p=self.drop.p if self.training else 0.0)
+            else:
+                probs = self.drop(torch.softmax(torch.matmul(q, k.transpose(-1, -2)) * self.scale + attn_bias_4d, dim=-1))
+                ctx = torch.matmul(probs, v)
+            ctx = ctx.transpose(1, 2).contiguous().view(bsz, seqlen, self.hidden_size)
             h = self.attn_ln(x + self.drop(self.o_proj(ctx)))
             ff = self.ffn_down(F.gelu(self.ffn_up(h)))
             return self.ffn_ln(h + self.drop(ff))
@@ -708,6 +749,7 @@ def train_and_export(args) -> None:
             self.ffn_down = _make_proj(intermediate_size, hidden_size, "down")
             self.ffn_ln = StepModulatedLayerNorm(num_steps, hidden_size, eps)
             self.drop = nn.Dropout(drop_p)
+            self.use_sdpa = False
 
             if self.use_diff_attn:
                 self.diff_lambda = nn.Parameter(torch.full((num_steps, num_heads // 2, 1, 1), -6.0))
@@ -752,14 +794,18 @@ def train_and_export(args) -> None:
             q = self.q_norm(self.q_proj(x, step_id).view(bsz, seqlen, self.num_heads, self.head_dim).transpose(1, 2))
             k = self.k_norm(self.k_proj(x, step_id).view(bsz, seqlen, self.num_heads, self.head_dim).transpose(1, 2))
             v = self.v_proj(x, step_id).view(bsz, seqlen, self.num_heads, self.head_dim).transpose(1, 2)
-            probs = torch.softmax(torch.matmul(q, k.transpose(-1, -2)) * self.scale + attn_bias_4d, dim=-1)
-            if self.use_diff_attn:
-                p_pair = probs.view(bsz, self.num_heads // 2, 2, seqlen, seqlen)
-                p0, p1 = p_pair[:, :, 0], p_pair[:, :, 1]
-                lam = torch.sigmoid(self.diff_lambda[step_id]).unsqueeze(0) * 0.4
-                probs = torch.stack([p0 - lam * p1, p1 - lam * p0], dim=2).reshape(bsz, self.num_heads, seqlen, seqlen)
-            probs = self.drop(probs)
-            ctx = torch.matmul(probs, v).transpose(1, 2).contiguous().view(bsz, seqlen, self.hidden_size)
+            if self.use_sdpa and not self.use_diff_attn:
+                ctx = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias_4d.to(q.dtype), dropout_p=self.drop.p if self.training else 0.0)
+            else:
+                probs = torch.softmax(torch.matmul(q, k.transpose(-1, -2)) * self.scale + attn_bias_4d, dim=-1)
+                if self.use_diff_attn:
+                    p_pair = probs.view(bsz, self.num_heads // 2, 2, seqlen, seqlen)
+                    p0, p1 = p_pair[:, :, 0], p_pair[:, :, 1]
+                    lam = torch.sigmoid(self.diff_lambda[step_id]).unsqueeze(0) * 0.4
+                    probs = torch.stack([p0 - lam * p1, p1 - lam * p0], dim=2).reshape(bsz, self.num_heads, seqlen, seqlen)
+                probs = self.drop(probs)
+                ctx = torch.matmul(probs, v)
+            ctx = ctx.transpose(1, 2).contiguous().view(bsz, seqlen, self.hidden_size)
             h = self.attn_ln(x + self.drop(self.o_proj(ctx, step_id)), step_id)
             ff = self.ffn_down(F.gelu(self.ffn_up(h, step_id)), step_id)
             return self.ffn_ln(h + self.drop(ff), step_id)
@@ -789,6 +835,7 @@ def train_and_export(args) -> None:
             lora_targets: str = "qvo_down",
             use_diff_attn: bool = False,
             emb_drop_p: float = 0.15,
+            intent_dim: int = 512,
         ):
             super().__init__()
             self.hidden_size = hidden_size
@@ -872,7 +919,7 @@ def train_and_export(args) -> None:
             self.prag_head = nn.Linear(256, len(PRAG_TAGS))
             if self.num_latents >= 4:
                 self.lat1_surf_prag = nn.Linear(hidden_size, len(SURFACE_PRAG_IDXS))
-                self.lat2_intent_proj = nn.Linear(hidden_size, 512)
+                self.lat2_intent_proj = nn.Linear(hidden_size, int(intent_dim))
                 self.lat3_code = nn.Linear(hidden_size, len(CODE_LIST))
                 self.lat3_deep_prag = nn.Linear(hidden_size, len(DEEP_PRAG_IDXS))
 
@@ -883,6 +930,11 @@ def train_and_export(args) -> None:
             for mod in self.modules():
                 if isinstance(mod, (QATLinear, QATEmbedding)):
                     mod.qat_enabled = bool(enabled)
+
+        def set_sdpa(self, enabled: bool) -> None:
+            self.prelude.use_sdpa = bool(enabled)
+            for blk in self.core_blocks:
+                blk.use_sdpa = bool(enabled) and not blk.use_diff_attn
 
         def bake_mhc_matrices(self) -> None:
             if self.mhc_streams <= 1:
@@ -1010,6 +1062,7 @@ def train_and_export(args) -> None:
         args.intent_cache.resolve() if args.intent_cache else None,
         stage1_synth_cap=args.stage1_synth_cap,
         v04_synth_cap=args.v04_synth_cap,
+        extra_pairs_paths=[p.resolve() for p in args.extra_pairs],
     )
     intent_vecs_t = torch.from_numpy(intent_vecs).to(device) if intent_vecs is not None and len(intent_vecs) else None
 
@@ -1049,6 +1102,18 @@ def train_and_export(args) -> None:
             if tid < BASE_VOCAB_SIZE:
                 train_counts[tid] += 1.0
 
+    # Pre-tokenize ALL minimal & twin pairs once so zero Python tokenization happens inside the GPU loop
+    pairs_pre = [
+        {
+            "ai_ids": tokenizer.encode_ids(p["ai_text"], max_len=MAX_LEN),
+            "hu_ids": tokenizer.encode_ids(p["human_text"], max_len=MAX_LEN),
+            "ai_cids": encode_char_bytes(p["ai_text"], max_bytes=CHAR_MAX_BYTES),
+            "hu_cids": encode_char_bytes(p["human_text"], max_bytes=CHAR_MAX_BYTES),
+            "weight": float(p.get("weight", 1.0)),
+        }
+        for p in pairs
+    ]
+
     bert_src = AutoModel.from_pretrained(args.backbone)
     cfg = bert_src.config
     a_full, p_mat = compute_weighted_svd_factors(
@@ -1058,6 +1123,7 @@ def train_and_export(args) -> None:
         unk_id=tokenizer.unk_id,
     )
     a_full = _seed_ascii_bytes_into_a(a_full, tokenizer, tokenizer.byte_offset)
+    intent_dim = int(intent_vecs.shape[1]) if (intent_vecs is not None and intent_vecs.ndim == 2) else 512
 
     def build_model() -> MeguvizV04DualLoopModel:
         mdl = MeguvizV04DualLoopModel(
@@ -1076,6 +1142,7 @@ def train_and_export(args) -> None:
             lora_targets=args.lora_targets,
             use_diff_attn=args.diff_attn,
             emb_drop_p=eff_emb_drop,
+            intent_dim=intent_dim,
         )
         mdl.embeddings.load_from_bert(bert_src.embeddings, a_full, p_mat)
         mdl.prelude.load_from_bert_layer(bert_src.encoder.layer[0])
@@ -1170,19 +1237,19 @@ def train_and_export(args) -> None:
     def collate_train(batch):
         max_seq = max(x["length"] for x in batch)
         max_ch = max(8, max(len(x["cids"]) for x in batch))
-        ids = torch.full((len(batch), max_seq), tokenizer.pad_id, dtype=torch.long)
-        mask = torch.zeros((len(batch), max_seq), dtype=torch.long)
-        cids = torch.full((len(batch), max_ch), CHAR_PAD_ID, dtype=torch.long)
+        ids = np.full((len(batch), max_seq), tokenizer.pad_id, dtype=np.int64)
+        mask = np.zeros((len(batch), max_seq), dtype=np.int64)
+        cids = np.full((len(batch), max_ch), CHAR_PAD_ID, dtype=np.int64)
         for i, x in enumerate(batch):
             n = x["length"]
-            ids[i, :n] = torch.tensor(x["ids"], dtype=torch.long)
+            ids[i, :n] = x["ids"]
             mask[i, :n] = 1
             nc = len(x["cids"])
-            cids[i, :nc] = torch.tensor(x["cids"], dtype=torch.long)
+            cids[i, :nc] = x["cids"]
         return (
-            ids,
-            mask,
-            cids,
+            torch.from_numpy(ids),
+            torch.from_numpy(mask),
+            torch.from_numpy(cids),
             torch.tensor([x["y_score"] for x in batch], dtype=torch.float32),
             torch.tensor([x["code_idx"] for x in batch], dtype=torch.long),
             torch.tensor([x["weight"] for x in batch], dtype=torch.float32),
@@ -1192,7 +1259,12 @@ def train_and_export(args) -> None:
         )
 
     def make_loader(items: list[dict]) -> DataLoader:
-        return DataLoader(TokenDataset(items), batch_sampler=BucketSampler([x["length"] for x in items], batch_size), collate_fn=collate_train, num_workers=0, pin_memory=True)
+        nw = 4 if (os.name != "nt" and not args.smoke_test) else 0
+        kw = {"batch_sampler": BucketSampler([x["length"] for x in items], batch_size), "collate_fn": collate_train, "num_workers": nw, "pin_memory": True}
+        if nw > 0:
+            kw["persistent_workers"] = True
+            kw["prefetch_factor"] = 4
+        return DataLoader(TokenDataset(items), **kw)
 
     def subset_balanced_prio(items: list[dict], cap: int, seed_s: int) -> list[dict]:
         if cap <= 0 or len(items) <= cap:
@@ -1297,7 +1369,83 @@ def train_and_export(args) -> None:
             wv[idx] = 0.5 + 1.0 * alpha_s
         prag_step_weights.append(torch.tensor(wv, dtype=torch.float32, device=device))
 
-    dro_tracker = GroupDROTracker()
+    class TorchGroupDRO:
+        """Zero-sync pure-GPU GroupDRO subgroup weight tracker eliminating per-step host sync stalls."""
+
+        def __init__(self, num_groups: int = len(V04_GROUPS), eta: float = 0.05, ema_decay: float = 0.9, floor_share: float = 0.03):
+            self.num_groups = int(num_groups)
+            self.eta = float(eta)
+            self.ema_decay = float(ema_decay)
+            self.floor_share = float(floor_share)
+            self.q = torch.full((self.num_groups,), 1.0 / self.num_groups, dtype=torch.float32, device=device)
+            self.ema_losses = torch.zeros(self.num_groups, dtype=torch.float32, device=device)
+            self.initialized = torch.zeros(self.num_groups, dtype=torch.bool, device=device)
+
+        @torch.no_grad()
+        def update(self, group_idxs, sample_losses):
+            g = group_idxs.long()
+            l = sample_losses.detach().float()
+            counts = torch.bincount(g, minlength=self.num_groups).float()
+            sums = torch.zeros(self.num_groups, dtype=torch.float32, device=l.device)
+            sums.scatter_add_(0, g, l)
+            present = counts > 0
+            mean_l = torch.where(present, sums / counts.clamp(min=1.0), self.ema_losses)
+            new_ema = torch.where(self.initialized, self.ema_decay * self.ema_losses + (1.0 - self.ema_decay) * mean_l, mean_l)
+            self.ema_losses = torch.where(present, new_ema, self.ema_losses)
+            self.initialized |= present
+            self.q = torch.where(present, self.q * torch.exp((self.eta * self.ema_losses).clamp(max=2.0)), self.q)
+            self.q = self.q / self.q.sum().clamp(min=1e-12)
+            floor_total = min(0.8, self.floor_share * self.num_groups)
+            eff = (1.0 - floor_total) * self.q + (floor_total / self.num_groups)
+            return eff / eff.sum()
+
+    def _collate_pre_pairs(p_batch: list[dict]):
+        bs_p = len(p_batch)
+        max_ai = max(len(x["ai_ids"]) for x in p_batch)
+        max_hu = max(len(x["hu_ids"]) for x in p_batch)
+        ai_ids = np.full((bs_p, max_ai), tokenizer.pad_id, dtype=np.int64)
+        ai_mask = np.zeros((bs_p, max_ai), dtype=np.int64)
+        hu_ids = np.full((bs_p, max_hu), tokenizer.pad_id, dtype=np.int64)
+        hu_mask = np.zeros((bs_p, max_hu), dtype=np.int64)
+        ai_c = hu_c = None
+        if mdl.use_char_stem:
+            mc_ai = max(8, max(len(x["ai_cids"]) for x in p_batch))
+            mc_hu = max(8, max(len(x["hu_cids"]) for x in p_batch))
+            ai_c = np.full((bs_p, mc_ai), CHAR_PAD_ID, dtype=np.int64)
+            hu_c = np.full((bs_p, mc_hu), CHAR_PAD_ID, dtype=np.int64)
+        for i, x in enumerate(p_batch):
+            na, nh = len(x["ai_ids"]), len(x["hu_ids"])
+            ai_ids[i, :na] = x["ai_ids"]
+            ai_mask[i, :na] = 1
+            hu_ids[i, :nh] = x["hu_ids"]
+            hu_mask[i, :nh] = 1
+            if ai_c is not None:
+                ai_c[i, : len(x["ai_cids"])] = x["ai_cids"]
+                hu_c[i, : len(x["hu_cids"])] = x["hu_cids"]
+        return (
+            torch.from_numpy(ai_ids).to(device, non_blocking=True),
+            torch.from_numpy(ai_mask).to(device, non_blocking=True),
+            torch.from_numpy(hu_ids).to(device, non_blocking=True),
+            torch.from_numpy(hu_mask).to(device, non_blocking=True),
+            torch.from_numpy(ai_c).to(device, non_blocking=True) if ai_c is not None else None,
+            torch.from_numpy(hu_c).to(device, non_blocking=True) if hu_c is not None else None,
+            torch.tensor([x["weight"] for x in p_batch], dtype=torch.float32, device=device),
+        )
+
+    dro_tracker = TorchGroupDRO()
+    mdl.set_sdpa(torch.cuda.is_available())
+    orig_prelude_fn = mdl.forward_prelude
+    orig_core_fn = mdl.forward_core_step
+
+    def _set_compiled_hotpaths(enable: bool) -> None:
+        if enable and hasattr(torch, "compile"):
+            if hasattr(torch, "_dynamo"):
+                torch._dynamo.reset()
+            mdl.forward_prelude = torch.compile(orig_prelude_fn, dynamic=True)
+            mdl.forward_core_step = torch.compile(orig_core_fn, dynamic=True)
+        else:
+            mdl.forward_prelude = orig_prelude_fn
+            mdl.forward_core_step = orig_core_fn
 
     def run_phase(
         items: list[dict],
@@ -1313,13 +1461,18 @@ def train_and_export(args) -> None:
         if num_epochs <= 0 or not items:
             return None
         mdl.set_qat_enabled(qat)
+        _set_compiled_hotpaths(bool(args.compile and not args.smoke_test))
         loader = make_loader(items)
-        opt = torch.optim.AdamW(mdl.parameters(), lr=lr, weight_decay=0.01)
+        eff_lr = float(lr) * lr_scale
+        try:
+            opt = torch.optim.AdamW(mdl.parameters(), lr=eff_lr, weight_decay=0.01, fused=True)
+        except TypeError:
+            opt = torch.optim.AdamW(mdl.parameters(), lr=eff_lr, weight_decay=0.01)
         total_steps = min(max_steps_cap, len(loader) * num_epochs) if max_steps_cap > 0 else max(1, len(loader) * num_epochs)
         sched = get_cosine_schedule_with_warmup(opt, max(1, int(total_steps * 0.08)), total_steps)
         scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
         rng_p = random.Random(20261124 + len(phase_name))
-        pair_bs = 12
+        pair_bs = 24 if batch_size >= 512 else 12
         log_every = max(50, len(loader) // 4)
         t_p = time.monotonic()
         global_step = 0
@@ -1328,7 +1481,7 @@ def train_and_export(args) -> None:
 
         for ep in range(num_epochs):
             mdl.train()
-            running_loss = 0.0
+            running_loss_t = torch.zeros((), dtype=torch.float32, device=device)
             n_seen = 0
             for step, (ids, mask, cids, y_sc, y_cd, w, prag, grp, intent_idx) in enumerate(loader):
                 ids = ids.to(device, non_blocking=True)
@@ -1413,9 +1566,8 @@ def train_and_export(args) -> None:
                                     pred_v = F.normalize(l2_vec[im].float(), p=2, dim=-1)
                                     loss_lat_total = loss_lat_total + 0.20 * (1.0 - (pred_v * tgt_v).sum(dim=-1)).mean()
 
-                    # GroupDRO dynamic worst-subgroup weighting using last step errors
-                    grp_weights_np = dro_tracker.update(grp.cpu().numpy(), step_losses[-1].detach().float().cpu().numpy())
-                    grp_w_t = torch.from_numpy(grp_weights_np).to(device=device, dtype=torch.float32) * len(V04_GROUPS)
+                    # Zero-sync GPU GroupDRO weighting
+                    grp_w_t = dro_tracker.update(grp, step_losses[-1]) * len(V04_GROUPS)
                     dro_mult = grp_w_t[grp]
 
                     q_mat = torch.stack(step_q_list, dim=-1)
@@ -1458,11 +1610,16 @@ def train_and_export(args) -> None:
                     if prag_mask.any():
                         loss = loss + 0.22 * (loss_pr_total / args.num_loops)
 
-                    # Asymmetric high-precision tail-push loss (maximizes R@P95%/P99% & suppresses structured human FPs)
+                    # Asymmetric high-precision tail-push loss (maximizes R@P95%/P99% & suppresses structured/multilingual human FPs)
                     ai_def_mask = (y_sc >= 0.85) & (w > 0.0)
                     struct_grp_idx = GROUP_TO_IDX["structured_human_hard"]
                     pre_grp_idx = GROUP_TO_IDX["pre_llm_human"]
-                    hu_def_mask = ((y_sc <= 0.15) | (((grp == struct_grp_idx) | (grp == pre_grp_idx)) & (y_sc <= 0.22))) & (w > 0.0)
+                    ml_grp_idx = GROUP_TO_IDX["multilingual_world_knowledge"]
+                    hu_def_mask = (
+                        (y_sc <= 0.15)
+                        | (((grp == struct_grp_idx) | (grp == pre_grp_idx)) & (y_sc <= 0.22))
+                        | ((grp == ml_grp_idx) & (y_sc <= 0.18))
+                    ) & (w > 0.0)
                     if ai_def_mask.any() and hu_def_mask.any():
                         l_last_fp = step_logits[-1].float()
                         p_last_fp = step_probs[-1].float()
@@ -1479,19 +1636,10 @@ def train_and_export(args) -> None:
                         h_stack = torch.stack(step_halts, dim=-1).float()
                         loss = loss + 0.06 * F.mse_loss(step_probs[-1].float(), ema_last_p) + 0.06 * F.mse_loss(h_stack, ema_halts)
 
-                    # Length-normalized SimPO pairwise margin + Prelude topic invariance
-                    if pairs:
-                        p_batch = rng_p.sample(pairs, min(pair_bs, len(pairs)))
-                        ai_texts = [p["ai_text"] for p in p_batch]
-                        hu_texts = [p["human_text"] for p in p_batch]
-                        ai_np, ai_m_np, _ = tokenizer.encode_batch(ai_texts, max_len=MAX_LEN)
-                        hu_np, hu_m_np, _ = tokenizer.encode_batch(hu_texts, max_len=MAX_LEN)
-                        ai_ids, ai_mask = torch.from_numpy(ai_np).to(device), torch.from_numpy(ai_m_np).to(device)
-                        hu_ids, hu_mask = torch.from_numpy(hu_np).to(device), torch.from_numpy(hu_m_np).to(device)
-                        ai_c = hu_c = None
-                        if mdl.use_char_stem:
-                            ai_c = torch.from_numpy(encode_char_bytes_batch(ai_texts, max_bytes=CHAR_MAX_BYTES)[0]).to(device)
-                            hu_c = torch.from_numpy(encode_char_bytes_batch(hu_texts, max_bytes=CHAR_MAX_BYTES)[0]).to(device)
+                    # Pre-tokenized Length-normalized SimPO pairwise margin + Prelude topic invariance
+                    if pairs_pre:
+                        p_batch = rng_p.sample(pairs_pre, min(pair_bs, len(pairs_pre)))
+                        ai_ids, ai_mask, hu_ids, hu_mask, ai_c, hu_c, pw_t = _collate_pre_pairs(p_batch)
 
                         pre_ai = mdl.forward_prelude(ai_ids, ai_mask, ai_c)
                         pre_hu = mdl.forward_prelude(hu_ids, hu_mask, hu_c)
@@ -1500,7 +1648,6 @@ def train_and_export(args) -> None:
                         z_ai = pre_ai[1] if mdl.mhc_streams > 1 else h0_ai
                         z_hu = pre_hu[1] if mdl.mhc_streams > 1 else h0_hu
 
-                        # Prelude topic invariance on [CLS]
                         loss_topic = (1.0 - F.cosine_similarity(h0_ai[:, 0, :].float(), h0_hu[:, 0, :].float(), dim=-1)).mean()
                         pair_acc = 0.0
                         pair_w = 0.0
@@ -1508,7 +1655,7 @@ def train_and_export(args) -> None:
                             z_ai, _, l_ai, _, _, _, _ = mdl.forward_core_step(z_ai, h0_ai, cm_ai, mdl.step_idxs[s], apply_aux=True)
                             z_hu, _, l_hu, _, _, _, _ = mdl.forward_core_step(z_hu, h0_hu, cm_hu, mdl.step_idxs[s], apply_aux=True)
                             sw = 0.60 if s == 0 else 1.0
-                            simpo_m = F.softplus(1.6 - (l_ai.float() - l_hu.float())).mean()
+                            simpo_m = (F.softplus(1.6 - (l_ai.float() - l_hu.float())) * pw_t).mean()
                             pair_acc = pair_acc + sw * simpo_m
                             pair_w += sw
                         loss = loss + 0.30 * (pair_acc / max(1e-6, pair_w)) + 0.04 * loss_topic
@@ -1537,11 +1684,12 @@ def train_and_export(args) -> None:
                                     swa_state[k].mul_(swa_count / (swa_count + 1)).add_(cur_sd[k], alpha=1.0 / (swa_count + 1))
                             swa_count += 1
 
-                running_loss += float(loss.detach())
+                running_loss_t = running_loss_t + loss.detach().float()
                 n_seen += 1
                 global_step += 1
                 if (step + 1) % log_every == 0:
-                    print(f"[{phase_name} ep={ep+1}/{num_epochs} step={step+1}/{len(loader)}] loss={running_loss/n_seen:.4f} elapsed={time.monotonic()-t_p:.1f}s", flush=True)
+                    avg_l = float(running_loss_t.item()) / max(1, n_seen)
+                    print(f"[{phase_name} ep={ep+1}/{num_epochs} step={step+1}/{len(loader)}] loss={avg_l:.4f} elapsed={time.monotonic()-t_p:.1f}s", flush=True)
                 if max_steps_cap > 0 and global_step >= max_steps_cap:
                     break
 
@@ -1562,12 +1710,14 @@ def train_and_export(args) -> None:
         phase_name="Stage1-Warmup",
     )
 
-    # Snapshot EMA teacher for Stage 2 + QAT boundary parity
+    # Snapshot eager EMA teacher for Stage 2 + QAT boundary parity
+    _set_compiled_hotpaths(False)
     ema_teacher = copy.deepcopy(mdl).eval()
+    ema_teacher.set_sdpa(torch.cuda.is_available())
     for p in ema_teacher.parameters():
         p.requires_grad_(False)
 
-    # Stage 2: Born-Again EMA Refinement on stratified 10-group subset
+    # Stage 2: Born-Again EMA Refinement on stratified 11-group subset
     stage2_items = train_items_raw if args.smoke_test else subset_balanced_prio(train_items_raw, args.stage2_cap, seed_s=20261126)
     run_phase(
         stage2_items,
@@ -1598,6 +1748,8 @@ def train_and_export(args) -> None:
             print("[Stage3-QAT-SWA] Applied SWA weights.", flush=True)
 
     del ema_teacher
+    _set_compiled_hotpaths(False)
+    mdl.set_sdpa(False)
     mdl.set_qat_enabled(False)
     mdl.bake_mhc_matrices()
     mdl.eval()
@@ -1973,6 +2125,7 @@ def main() -> None:
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--qwen-data", type=Path, default=None)
     parser.add_argument("--pairs-data", type=Path, default=None)
+    parser.add_argument("--extra-pairs", type=Path, action="append", default=[])
     parser.add_argument("--intent-cache", type=Path, default=None)
     parser.add_argument("--vocab", type=Path, default=None)
     parser.add_argument("--out", type=Path, default=Path("./out_v04"))
@@ -1998,6 +2151,8 @@ def main() -> None:
     parser.add_argument("--stage1-synth-cap", type=int, default=15000)
     parser.add_argument("--v04-synth-cap", type=int, default=-1)
     parser.add_argument("--batch-size", type=int, default=0)
+    parser.add_argument("--no-auto-lr-scale", action="store_true")
+    parser.add_argument("--compile", action="store_true", help="Enable torch.compile(dynamic=True) on A100 Linux training hotpaths")
     parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--refine-lr", type=float, default=1.5e-5)
     parser.add_argument("--qat-lr", type=float, default=5e-6)
