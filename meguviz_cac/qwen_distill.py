@@ -211,15 +211,16 @@ class QwenRunner:
                     try:
                         print(f"[Qwen/vLLM] 尝试加载 {mid}...", flush=True)
                         tok = AutoTokenizer.from_pretrained(mid, trust_remote_code=True)
+                        is_80g = self.vram_gb >= 68.0
                         vllm_kwargs = {
                             "model": mid,
                             "trust_remote_code": True,
-                            "max_model_len": 2560,
+                            "max_model_len": 2560 if is_80g else 2048,
                             "gpu_memory_utilization": 0.92,
                             "dtype": "bfloat16" if "FP8" not in mid else "auto",
                             "enable_prefix_caching": True,
-                            "max_num_seqs": 128,
-                            "max_num_batched_tokens": 16384,
+                            "max_num_seqs": 128 if is_80g else 48,
+                            "max_num_batched_tokens": 16384 if is_80g else 8192,
                         }
                         try:
                             llm = LLM(**vllm_kwargs)
