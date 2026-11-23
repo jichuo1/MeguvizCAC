@@ -1,0 +1,20 @@
+{
+  "qwen_rows_total": 3408,
+  "hydrogen_gate_rows": 530,
+  "qwen_literary_or_irony_checked": 150,
+  "qwen_literary_false_positives_caught": 59,
+  "persona_space_disguises_caught": 30,
+  "dual_teacher_disagreements_adjudicated": 200,
+  "twins_audited": 150,
+  "twins_passed": 81,
+  "twins_pass_rate": 0.54,
+  "swarm_literary_pairs": 500,
+  "total_stage2_pairs": 581,
+  "fusion_counts": {
+    "hydrogen_gate_override": 530,
+    "unaudited_gap_downweighted": 1633,
+    "high_agreement_fused": 752,
+    "moderate_agreement_fused": 493,
+    "qwen_literary_fp_overridden": 59
+  }
+}
