@@ -7,6 +7,7 @@ import json
 import re
 import sqlite3
 import sys
+import time
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from bili_round01_generate import CONTACT  # noqa: E402
 DEFAULT_DB = REPO_ROOT / "v04-corpus" / "bili-live-1m.sqlite3"
 DEFAULT_LEGACY_DB = REPO_ROOT / "bili-live-corpus.sqlite3"
 DEFAULT_PLAN = Path(__file__).resolve().parent / "v04_bili_plan.json"
+DEFAULT_STATUS_OUT = REPO_ROOT / "v04-corpus" / "bili-live-1m-status.json"
 TZ_CN = timezone(timedelta(hours=8))
 YEAR_PREFIX_RE = re.compile(r"\b(20\d{2})[-/年]")
 
@@ -215,8 +217,35 @@ def _ingest_files(
     files: list[Path],
     extract_fn,
     legacy_db: Path = DEFAULT_LEGACY_DB,
+    preloaded_legacy_hashes: set[str] | None = None,
 ) -> dict:
-    _, legacy_hashes = load_legacy_hashes(legacy_db)
+    pending: list[tuple[Path, float, int]] = []
+    now_epoch = time.time()
+    for path in files:
+        if not path.is_file():
+            continue
+        st = path.stat()
+        if now_epoch - st.st_mtime < 1.5:
+            continue
+        prev = db.execute("SELECT mtime, size FROM ingested_files WHERE file_path=?", (str(path.resolve()),)).fetchone()
+        if prev and prev[0] == st.st_mtime and prev[1] == st.st_size:
+            continue
+        pending.append((path, st.st_mtime, st.st_size))
+
+    if not pending:
+        return {
+            "files_processed": 0,
+            "submitted": 0,
+            "added": 0,
+            "duplicates": 0,
+            "filtered": 0,
+            **status_report(db, legacy_db=legacy_db),
+        }
+
+    if preloaded_legacy_hashes is None:
+        _, legacy_hashes = load_legacy_hashes(legacy_db)
+    else:
+        legacy_hashes = preloaded_legacy_hashes
     existing_hashes = {r[0] for r in db.execute("SELECT body_hash FROM comments")}
     seen_hashes = legacy_hashes | existing_hashes
 
@@ -227,13 +256,7 @@ def _ingest_files(
     total_filtered = 0
     now_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    for path in files:
-        if not path.is_file():
-            continue
-        st = path.stat()
-        prev = db.execute("SELECT mtime, size FROM ingested_files WHERE file_path=?", (str(path.resolve()),)).fetchone()
-        if prev and prev[0] == st.st_mtime and prev[1] == st.st_size:
-            continue
+    for path, f_mtime, f_size in pending:
 
         file_added = 0
         video_stats: dict[str, dict] = {}
@@ -289,7 +312,7 @@ def _ingest_files(
                 )
             db.execute(
                 "INSERT INTO ingested_files VALUES (?, ?, ?, ?) ON CONFLICT(file_path) DO UPDATE SET mtime=excluded.mtime, size=excluded.size, rows_added=excluded.rows_added",
-                (str(path.resolve()), st.st_mtime, st.st_size, file_added),
+                (str(path.resolve()), f_mtime, f_size, file_added),
             )
         files_processed += 1
 
@@ -308,6 +331,7 @@ def ingest_dir(
     scan_dir: Path,
     legacy_db: Path = DEFAULT_LEGACY_DB,
     pattern: str = "bili_v04_*.jsonl*",
+    preloaded_legacy_hashes: set[str] | None = None,
 ) -> dict:
     def _extract_jsonl(path: Path):
         for item in iter_jsonl_lines(path):
@@ -327,13 +351,15 @@ def ingest_dir(
             else:
                 yield None
 
-    return _ingest_files(db, sorted(scan_dir.glob(pattern)), _extract_jsonl, legacy_db=legacy_db)
+    files = sorted(p for p in scan_dir.glob(pattern) if p.name.endswith(".jsonl") or p.name.endswith(".jsonl.gz"))
+    return _ingest_files(db, files, _extract_jsonl, legacy_db=legacy_db, preloaded_legacy_hashes=preloaded_legacy_hashes)
 
 
 def ingest_browser_steps(
     db: sqlite3.Connection,
     steps_dir: Path,
     legacy_db: Path = DEFAULT_LEGACY_DB,
+    preloaded_legacy_hashes: set[str] | None = None,
 ) -> dict:
     def _extract_step(path: Path):
         try:
@@ -368,7 +394,72 @@ def ingest_browser_steps(
                 disp = strip_ip_suffix(reply_times[i] if i < len(reply_times) else "")
                 yield {"text": txt, "displayed_time": disp, "comment_level": "reply"}, fallback
 
-    return _ingest_files(db, sorted(steps_dir.glob("step_*.json")), _extract_step, legacy_db=legacy_db)
+    return _ingest_files(
+        db,
+        sorted(steps_dir.glob("step_*.json")),
+        _extract_step,
+        legacy_db=legacy_db,
+        preloaded_legacy_hashes=preloaded_legacy_hashes,
+    )
+
+
+def watch_loop(
+    db_path: Path,
+    watch_dirs: list[Path],
+    watch_step_dirs: list[Path],
+    legacy_db: Path,
+    status_out: Path,
+    interval: float = 25.0,
+    once: bool = False,
+) -> None:
+    _, legacy_hashes = load_legacy_hashes(legacy_db)
+    status_out.parent.mkdir(parents=True, exist_ok=True)
+    cycle = 0
+    while True:
+        cycle += 1
+        added = 0
+        files_processed = 0
+        with closing(connect(db_path)) as db:
+            for d in watch_dirs:
+                if d.is_dir():
+                    res = ingest_dir(db, d, legacy_db=legacy_db, preloaded_legacy_hashes=legacy_hashes)
+                    added += res["added"]
+                    files_processed += res["files_processed"]
+            for sd in watch_step_dirs:
+                if sd.is_dir():
+                    res = ingest_browser_steps(db, sd, legacy_db=legacy_db, preloaded_legacy_hashes=legacy_hashes)
+                    added += res["added"]
+                    files_processed += res["files_processed"]
+            st = status_report(db, legacy_db=legacy_db)
+
+        snap = {
+            **st,
+            "watch_cycle": cycle,
+            "last_scan_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "last_cycle_added": added,
+            "last_cycle_files_processed": files_processed,
+        }
+        pending_status = status_out.with_suffix(".writing")
+        pending_status.write_text(json.dumps(snap, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        pending_status.replace(status_out)
+        if added > 0 or cycle == 1:
+            print(
+                json.dumps(
+                    {
+                        "watch_cycle": cycle,
+                        "added": added,
+                        "files": files_processed,
+                        "combined_total_rows": st["combined_total_rows"],
+                        "new_v04_rows": st["new_v04_rows"],
+                        "by_partition": st["by_partition"],
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+        if once:
+            return
+        time.sleep(max(2.0, interval))
 
 
 def status_report(db: sqlite3.Connection, legacy_db: Path = DEFAULT_LEGACY_DB, plan_path: Path = DEFAULT_PLAN) -> dict:
@@ -429,12 +520,39 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--legacy-db", type=Path, default=DEFAULT_LEGACY_DB)
-    action = parser.add_mutually_exclusive_group(required=True)
-    action.add_argument("--import-dir", type=Path)
-    action.add_argument("--import-browser-steps", type=Path)
-    action.add_argument("--status", action="store_true")
-    action.add_argument("--export", type=Path)
+    parser.add_argument("--import-dir", type=Path)
+    parser.add_argument("--import-browser-steps", type=Path)
+    parser.add_argument("--status", action="store_true")
+    parser.add_argument("--export", type=Path)
+    parser.add_argument("--watch-dir", type=Path, action="append", default=[])
+    parser.add_argument("--watch-browser-steps", type=Path, action="append", default=[])
+    parser.add_argument("--interval", type=float, default=25.0)
+    parser.add_argument("--status-out", type=Path, default=DEFAULT_STATUS_OUT)
+    parser.add_argument("--watch-once", action="store_true")
     args = parser.parse_args()
+
+    oneshot = sum(
+        bool(x) for x in (args.import_dir is not None, args.import_browser_steps is not None, args.status, args.export is not None)
+    )
+    has_watch = bool(args.watch_dir or args.watch_browser_steps)
+    if oneshot and has_watch:
+        parser.error("Cannot mix watcher flags with one-shot actions.")
+    if not oneshot and not has_watch:
+        parser.error("Specify one action (--import-dir/--import-browser-steps/--status/--export) or --watch-dir/--watch-browser-steps.")
+    if oneshot > 1:
+        parser.error("Only one one-shot action can be specified at a time.")
+
+    if has_watch:
+        watch_loop(
+            args.db,
+            args.watch_dir,
+            args.watch_browser_steps,
+            args.legacy_db,
+            args.status_out,
+            interval=args.interval,
+            once=args.watch_once,
+        )
+        return
 
     with closing(connect(args.db)) as db:
         if args.import_dir is not None:
