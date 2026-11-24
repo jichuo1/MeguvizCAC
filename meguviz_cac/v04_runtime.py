@@ -260,6 +260,14 @@ def quantize_prelude_ordered_w4_w8(
     tmp_w4 = prelude_out.with_suffix(".tmp_w4only.onnx")
     try:
         model = onnx.load(str(prelude_fp32_in), load_external_data=True)
+        # MatMulNBitsQuantizer needs opset >= 21 for int4 and otherwise only relabels opset_import, leaving
+        # opset-17 nodes (e.g. ReduceMax with an `axes` attribute) invalid. Convert the graph properly first.
+        default_opset = max((op.version for op in model.opset_import if op.domain in ("", "ai.onnx")), default=0)
+        if default_opset < 21:
+            from onnx import version_converter
+
+            model = version_converter.convert_version(model, 21)
+            model.ir_version = max(model.ir_version, 10)
         init_shapes = {init.name: tuple(init.dims) for init in model.graph.initializer}
         target_gather_names: list[str] = []
         used_names = {n.name for n in model.graph.node if n.name}
@@ -294,11 +302,14 @@ def quantize_prelude_ordered_w4_w8(
         quant.model.save_model_to_file(str(tmp_w4))
 
         # Now dynamically INT8-quantize dense MatMul/Gemm layers while preserving W4 GatherBlockQuantized
+        # GatherBlockQuantized (com.microsoft) output has no ONNX shape-inference type, so downstream
+        # MatMul inputs are untyped; tell the quantizer they are FP32 instead of failing.
         quantize_dynamic(
             str(tmp_w4),
             str(prelude_out),
             weight_type=QuantType.QInt8,
             op_types_to_quantize=["MatMul", "Gemm"],
+            extra_options={"DefaultTensorType": onnx.TensorProto.FLOAT},
         )
 
         # Smoke-verify ORT loading and numerical parity on representative token + byte-fallback IDs

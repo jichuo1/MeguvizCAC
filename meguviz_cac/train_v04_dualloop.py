@@ -1582,7 +1582,9 @@ def train_and_export(args) -> None:
                     for s in range(args.num_loops - 1):
                         err_s = (step_probs[s].detach() - y_eff).abs()
                         oracle_sufficient = ((err_s <= err_last + 0.035) & (err_s <= 0.18)).float()
-                        loss_oracle_exit = loss_oracle_exit + F.binary_cross_entropy(step_halts[s].float().clamp(1e-4, 1.0 - 1e-4), oracle_sufficient)
+                        # F.binary_cross_entropy is rejected inside autocast regions; run it in fp32 with autocast off.
+                        with torch.amp.autocast("cuda", enabled=False):
+                            loss_oracle_exit = loss_oracle_exit + F.binary_cross_entropy(step_halts[s].float().clamp(1e-4, 1.0 - 1e-4), oracle_sufficient)
                     loss_oracle_exit = loss_oracle_exit / max(1, args.num_loops - 1)
 
                     # Cross-step logit consistency + monotonic anti-regression step penalty
