@@ -283,7 +283,16 @@ def _load_training_bundle(
                     "group_idx": GROUP_TO_IDX.get(gid_str, GROUP_TO_IDX["general_real"]),
                     "intent_idx": sid_to_intent.get(sid, -1),
                     "is_high_prio": bool(
-                        r.get("score_source") == "hydrogen_xhigh_direct"
+                        r.get("score_source")
+                        in (
+                            "hydrogen_xhigh_direct",
+                            # v0.4 Neon/Hydrogen co-teacher tribunal gold; v04_homologous_uncertain stays low-prio
+                            "v04_neon_xhigh_tiebreak",
+                            "v04_neon_hydrogen_consensus",
+                            "v04_neon_hydrogen_weighted",
+                            "v04_neon_gate_override",
+                            "v04_hydrogen_gate_override",
+                        )
                         or sid in qwen_map
                         or r.get("hard_human_neg")
                         or gid_str in ("ultra_short_ai", "evasive_plugin_ai", "pre_llm_human", "structured_human_hard", "literary_boundary", "dsh_hard_slice")
