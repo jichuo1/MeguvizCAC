@@ -46,7 +46,7 @@ from .train_v06_hyperloop import (
 from .train_v07_omniveritas import (
     _derive_attr5_label,
     _eval_traps_v07,
-    _precompute_v06_bf16_teacher_probs,
+    _precompute_v06_bf16_teacher_targets,
     _train_frozen_ebt_critic,
     _train_nano_draft_v07,
     _wsd_lr_mult,
@@ -162,7 +162,8 @@ def check_v08_release_gates(metrics: dict[str, Any]) -> dict[str, Any]:
     traps = (metrics.get("traps") or {}).get("summary") or {}
 
     zip_mb = float(metrics.get("bundle_v4_total_mb") or 99.0)
-    delta_auc = abs(float(sub2.get("auroc_delta_vs_fp16", 99.0)))
+    # Only downward degradation counts as drift (positive sub2 > fp16 gain = 0.0 drift!)
+    delta_auc = max(0.0, -float(sub2.get("auroc_delta_vs_fp16", -99.0)))
     era_auc = float(metrics.get("human_era_probe_auroc", 1.0))
     cells = (m9.get("cells") or {}).values()
     max_cell_fpr = max((float(c["fpr"]) for c in cells if int(c.get("n_hu", 0)) >= 20), default=0.0)
@@ -242,13 +243,15 @@ def train_v08_zenith(args) -> None:
         train_items_raw = rng_s.sample(train_items_raw, min(640, len(train_items_raw)))
         pairs = pairs[:48]
 
-    # Stage 0a: Optional Frozen BF16 v0.6.0 Teacher Probs (for Multi-Teacher Consensus + Cleanlab/Margin Denoising!)
+    # Stage 0a: Optional Frozen BF16 v0.6.0 Dual Teacher (Probs + 256-d Embs for Cleanlab Denoising + Latent Distillation!)
     teacher_v06_p = None
+    teacher_v06_embs = None
     if args.teacher_v06_ckpt and args.teacher_v06_ckpt.is_file() and not args.smoke_test:
-        teacher_v06_p = _precompute_v06_bf16_teacher_probs(
-            args.teacher_v06_ckpt, train_items_raw, args.v06_backbone, device, amp_dtype, bs=1024
+        teacher_v06_p, teacher_v06_embs = _precompute_v06_bf16_teacher_targets(
+            args.teacher_v06_ckpt, train_items_raw, [], [], args.v06_backbone, device, amp_dtype, ckpt_dir=None, polish_steps=0, bs=1024
         )
     for idx_it, item in enumerate(train_items_raw):
+        item["row_idx"] = idx_it
         item["teacher_p"] = float(teacher_v06_p[idx_it]) if teacher_v06_p is not None else -1.0
 
     # Reuse exact frozen v0.7.0 tokenizer if provided (100% Bundle v4 drop-in compatibility!)
@@ -462,6 +465,7 @@ def train_v08_zenith(args) -> None:
                 torch.tensor([x["weight"] for x in batch], dtype=torch.float32),
                 torch.tensor([x["group_idx"] for x in batch], dtype=torch.long),
                 torch.tensor([x["era_idx"] for x in batch], dtype=torch.long),
+                torch.tensor([x["row_idx"] for x in batch], dtype=torch.long),
             )
         return _collate
 
@@ -523,11 +527,14 @@ def train_v08_zenith(args) -> None:
             except StopIteration:
                 it_dl = iter(dl)
                 batch = next(it_dl)
-            ids, mask, eng, st, y_sc, tp_v06, is_g, y_cd, y_a5, w, grp, era = [t.to(device, non_blocking=True) for t in batch]
+            ids, mask, eng, st, y_sc, tp_v06, is_g, y_cd, y_a5, w, grp, era, row_idx = [t.to(device, non_blocking=True) for t in batch]
             mult = _wsd_lr_mult(step, steps)
             for pg in opt.param_groups:
                 pg["lr"] = lr * mult
             loops_now = 4 if (step % 5 == 0) else 2
+            t_emb_v06 = None
+            if teacher_m is None and teacher_v06_embs is not None:
+                t_emb_v06 = torch.from_numpy(teacher_v06_embs[row_idx.cpu().numpy()]).to(device, dtype=torch.float32, non_blocking=True)
 
             # Pre-sample GateGuard / Gemini Queue-C minimal pairs once per step (shared across ASAM pass!)
             pair_tensors = None
@@ -567,6 +574,12 @@ def train_v08_zenith(args) -> None:
                         loss = loss + 0.10 * listnet_tail_distill_loss(lg, to["logit"])
                         cos_d = 1.0 - F.cosine_similarity(out["emb"].float(), to["emb"].float(), dim=-1).mean()
                         loss = loss + 0.20 * cos_d
+                    elif t_emb_v06 is not None:
+                        cos_v06 = 1.0 - F.cosine_similarity(out["emb"].float(), t_emb_v06, dim=-1).mean()
+                        loss = loss + 0.18 * cos_v06
+                        v_tp = tp_v06 >= 0.0
+                        if int(v_tp.sum()) >= 8:
+                            loss = loss + 0.08 * listnet_tail_distill_loss(lg[v_tp], torch.logit(tp_v06[v_tp].clamp(1e-4, 1.0 - 1e-4)))
                     if pair_tensors is not None:
                         ai_i, ai_m, ai_e, ai_s, hu_i, hu_m, hu_e, hu_s, pw_t = pair_tensors
                         la, _, _, _ = mdl(ai_i, ai_m, ai_s, engram_ids=ai_e, num_loops=2, return_aux=False)
@@ -674,7 +687,7 @@ def train_v08_zenith(args) -> None:
     p_steps = 4 if args.smoke_test else 220
     ps_i = 0
     for batch in p_dl:
-        ids, mask, eng, st, y_sc, _, _, _, _, w, grp, _ = [t.to(device, non_blocking=True) for t in batch]
+        ids, mask, eng, st, y_sc, _, _, _, _, w, grp, _, _ = [t.to(device, non_blocking=True) for t in batch]
         p_opt.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", dtype=amp_dtype):
             out = mdl(ids, mask, st, engram_ids=eng, num_loops=2, return_aux=True)

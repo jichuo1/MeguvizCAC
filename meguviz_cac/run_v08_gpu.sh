@@ -13,11 +13,11 @@ LOG_TRAIN="${LOG_TRAIN:-/content/log_v08_r1_full.txt}"
 DONE_JSON="${DONE_JSON:-/content/v08_r1_done.json}"
 VERSION="${VERSION:-v0.8.0-r1-zenith-b4}"
 
-V07_FP16_CKPT="${V07_FP16_CKPT:-$V07_DRIVE_DIR/v0.7.0-r1-omniveritas-b4_fp16_master.pt}"
-V07_TOKENIZER="${V07_TOKENIZER:-/content/out_v07_r1/bili_picky_bpe_12k.json}"
-TEACHER_V06_CKPT="${TEACHER_V06_CKPT:-$V06_DRIVE_DIR/v0.6.0-r2-hyperloop-b3_stage1_ckpt.pt}"
+V07_FP16_CKPT="${V07_FP16_CKPT:-$V07_DRIVE_DIR/v0.7.0-r2-omniveritas-b4_fp16_master.pt}"
+V07_TOKENIZER="${V07_TOKENIZER:-$V07_DRIVE_DIR/v0.7.0-r2-omniveritas-b4_bili_picky_bpe_12k.json}"
+TEACHER_V06_CKPT="${TEACHER_V06_CKPT:-$V07_DRIVE_DIR/v0.6.0-r3-polished-teacher_bf16.pt}"
 GEMINI_GOLD="${GEMINI_GOLD:-$DRIVE_DIR/data/v08-gemini-gold-labels.jsonl.gz}"
-GEMINI_PAIRS="${GEMINI_PAIRS:-$DRIVE_DIR/data/v08-gemini-pairs.jsonl}"
+GEMINI_PAIRS="${GEMINI_PAIRS:-$DRIVE_DIR/data/v08-gemini-counterfactual-pairs.jsonl}"
 
 mkdir -p "$OUT_DIR" "$DRIVE_DIR"
 cd "$REPO_DIR"
@@ -32,11 +32,14 @@ if [ ! -f "$DATA_FILE" ]; then
   exit 2
 fi
 
-# Extract frozen v0.7.0 tokenizer from Drive full zip if not already unpacked locally
-if [ ! -f "$V07_TOKENIZER" ] && [ -f "$V07_DRIVE_DIR/meguvizcac-v0.7.0-r1-omniveritas-b4-bundle-v4-sub2bit.zip" ]; then
+# Extract frozen v0.7.0 tokenizer from Drive bundle zip if not already unpacked
+if [ ! -f "$V07_TOKENIZER" ] && [ -f "$V07_DRIVE_DIR/meguvizcac-v0.7.0-r2-omniveritas-b4-bundle-v4-sub2bit.zip" ]; then
   mkdir -p /content/_v07_tok_tmp
-  python3 -c "import zipfile; zipfile.ZipFile('$V07_DRIVE_DIR/meguvizcac-v0.7.0-r1-omniveritas-b4-bundle-v4-sub2bit.zip').extract('bili_picky_bpe_12k.json', '/content/_v07_tok_tmp')"
+  python3 -c "import zipfile; zipfile.ZipFile('$V07_DRIVE_DIR/meguvizcac-v0.7.0-r2-omniveritas-b4-bundle-v4-sub2bit.zip').extract('bili_picky_bpe_12k.json', '/content/_v07_tok_tmp')"
   V07_TOKENIZER="/content/_v07_tok_tmp/bili_picky_bpe_12k.json"
+fi
+if [ ! -f "$TEACHER_V06_CKPT" ] && [ -f "$V06_DRIVE_DIR/v0.6.0-r2-hyperloop-b3_stage1_ckpt.pt" ]; then
+  TEACHER_V06_CKPT="$V06_DRIVE_DIR/v0.6.0-r2-hyperloop-b3_stage1_ckpt.pt"
 fi
 
 EXTRA_ARGS=()
@@ -91,8 +94,8 @@ python3 -u -m meguviz_cac.train_v08_zenith \
   --version "$VERSION" \
   --max-len 256 \
   --anchor-steps "${ANCHOR_STEPS_OVERRIDE:-3500}" \
-  --branch-steps "${BRANCH_STEPS_OVERRIDE:-1600}" \
-  --qat-steps "${QAT_STEPS_OVERRIDE:-1800}" \
+  --branch-steps "${BRANCH_STEPS_OVERRIDE:-2200}" \
+  --qat-steps "${QAT_STEPS_OVERRIDE:-2200}" \
   --batch-size "$BS" \
   2>&1 | tee "$LOG_TRAIN"
 
