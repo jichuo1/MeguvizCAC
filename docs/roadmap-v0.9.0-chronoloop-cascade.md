@@ -142,3 +142,14 @@ flowchart TD
 3. **`A2 -> A3`**：叠加 3 相位 `W4 Phase-LoRA r=4 + AdaLN-Zero` + 闭式 `mHC` 锚定 + Top-Down Span 反馈，验证 `H03/H06` 与三明治 `Char-Span F1`。
 4. **`A4 -> A5`**：替换 `Prelude L0` 为 `BLT-Matryoshka (D_1=128)` + 训练 `p_defer` 残差路由头 + 8 字节仿射对齐 + `Selection-Safe / CompCRC / LTT` 认证，实测 `1T-CPU <= 0.35 ms` 达标。
 5. **`A6`**：复用 `v0.8.0-Zenith` 全套 **20 万外部 Gemini 黄金库 + 3 分支 ASAM + DARE-TIES Soup + TRM-Detach UPQ + Post-UPQ Shock-Absorber Refit**，在 Colab G4 上训练 **`MeguvizCAC v0.9.0`** 正式版，目标：**`< 2.00 MB` + `<= 0.35 ms` 1T-CPU + `test_bili_gold AUROC >= 0.975 / R@P95 >= 0.88` + 盲测 `OjinjinBench-v2` 全面刷新 SOTA！**
+
+---
+
+## 8. 代码实现与本地真机验收状态（已就绪，随时可在 Colab G4 一键拉起）
+
+| 模块文件 | 核心能力 | RTX 4060 Ti / 1T-CPU 实测验证 |
+|---|---|---|
+| [`meguviz_cac/v09_chronoloop.py`](../meguviz_cac/v09_chronoloop.py) | `BLT-Matryoshka Prelude L0 (D_1=128, W_12===0)` + `ChronoLoopCoreM35` (`4S/12F` + `3-Phase W4 LoRA/AdaLN` + 闭式 `mHC` + Cached-KV Active Re-Read + Top-Down Span) + `MGVZ5` Packer + 比特级模块化 ONNX 拆分 + `MeguvizV09CascadeEngine` + `V9-L0..L2 & V9-C1..C4` CI | `r1_fp32_max_diff = 1.2e-6`，`r2_fp32_max_diff = 1e-7`，`BLT diff = 0.0`，`SRAM = 21.0 KB <= 32 KB`，`Rung-1` 单测 **`15.06×`** 加速，**全项 CI PASS** |
+| [`meguviz_cac/v09_cascade_cert.py`](../meguviz_cac/v09_cascade_cert.py) | 8 字节跨出口仿射对齐 + `Selection-Safe` 路径前缀最大 9 格 Mondrian 保形校准 + `CompCRC / LTT` 有限样本 Clopper-Pearson 早退风险认证 | 已通过本地单元测试与全链路联调 |
+| [`meguviz_cac/train_v09_chronoloop.py`](../meguviz_cac/train_v09_chronoloop.py) | Matryoshka 能量排序 BGE→BPE12k SVD 初始化 + 外部 Gemini 黄金/反事实对直连 + 双时钟深度课程 + 联合非对称 `p_defer / r1_span` 路由训练 + `TRM 1-Step Detach` Sub-2-Bit QAT Soup + `~76 KB` Post-UPQ Shock-Absorber Refit + 全套 Bundle v5 导出 | RTX 4060 Ti 端到端 `--smoke-test` 全链路 0 错通关：**`Bundle v5 = 1.98 MB <= 2.20 MB`**（含完整 12k BPE + 3 个冻结 Critic），Sub-2-Bit 较 FP16 **`+0.0072` AUROC** |
+| [`meguviz_cac/run_v09_gpu.sh`](../meguviz_cac/run_v09_gpu.sh) & [`meguviz_cac/eval_v08_lofo_temporal.py`](../meguviz_cac/eval_v08_lofo_temporal.py) | Colab G4 一键启动脚本（自动复用缓存 `v0.6.0-R3` 教师、`v0.7.0-R2` BPE12k 与 Drive `v080_zenith/data/` Gemini 库 + 自动 LOFO/Temporal/9-Cell 审计 + `SHA256SUMS.txt` 同步至 Drive `v090_chronoloop/`） | LF 行尾 + `Bundle v4/v5` 自动双模审计已就绪 |

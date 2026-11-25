@@ -448,7 +448,8 @@ class MeguvizV09ChronoLoopModel(nn.Module):
         self.prelude_l1 = PreludeBlockV07(hidden_size, num_heads=num_heads, swa_heads=2, ffn_size=ffn_size)
 
         # Cached-KV Cross-Attention Workbench (precomputed ONCE -> reused by ALL outer Active Re-Reads!)
-        self.slot_queries = nn.Parameter(torch.randn(1, NUM_SLOTS_V09, hidden_size) * 0.02)
+        self.slot_queries = nn.Parameter(torch.empty(1, NUM_SLOTS_V09, hidden_size))
+        nn.init.orthogonal_(self.slot_queries.data[0], gain=0.6)
         self.slot_k = OmniQuantLinear(hidden_size, hidden_size, target_bits="seq2", group_size=128)
         self.slot_v = OmniQuantLinear(hidden_size, hidden_size, target_bits="seq2", group_size=128)
         self.slot_o = OmniQuantLinear(hidden_size, hidden_size, target_bits="seq2", group_size=128)
@@ -517,8 +518,8 @@ class MeguvizV09ChronoLoopModel(nn.Module):
         h_avg = (h0_1 * m_f).sum(dim=1) / m_f.sum(dim=1).clamp(min=1.0)
         h_max = h0_1.masked_fill(~attention_mask.bool().unsqueeze(-1), -1e4).amax(dim=1)
 
-        # Quote-Gated w=8 Local Span Risk inside Rung 1 (defeats Sandwich bypass up to L<=96 tokens!)
-        tok_r = self.r1_span_head(h0_1).squeeze(-1) * attention_mask.float()
+        # Quote-Gated w=8 Local Span Risk probability in [0, 1] inside Rung 1 (defeats Sandwich bypass up to L<=96!)
+        tok_r = torch.sigmoid(self.r1_span_head(h0_1).squeeze(-1)) * attention_mask.float()
         w_avg = F.avg_pool1d(F.pad(tok_r.unsqueeze(1), (0, 7)), kernel_size=8, stride=4).squeeze(1)
         r_max_win = w_avg.amax(dim=-1)
         r_std_win = torch.sqrt(((w_avg - w_avg.mean(dim=-1, keepdim=True)) ** 2).mean(dim=-1) + 1e-6)
@@ -1105,6 +1106,10 @@ class MeguvizV09CascadeEngine:
                         "spoof_any": bool(metas[oi]["spoof_any"] > 0.0),
                     }
         return [r for r in results if r is not None]
+
+    def predict_one(self, text: str, force_full: bool = False) -> dict[str, Any]:
+        """Single-comment convenience wrapper (100% compatible with `_eval_traps_v07` & online edge hooks)."""
+        return self.predict_batch([text], max_batch=1, force_full=force_full)[0]
 
 
 # ---------------------------------------------------------------------------

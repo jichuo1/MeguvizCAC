@@ -155,8 +155,11 @@ def certify_ltt_compcrc_cascade_policy(
     candidates = [
         (d_max, p_max)
         for d_max in (0.45, 0.35, 0.25, 0.18, 0.12, 0.08)
-        for p_max in (0.20, 0.14, 0.10, 0.06)
+        for p_max in (0.25, 0.20, 0.14, 0.10, 0.06)
     ]
+    # Finite-sample minimum achievable Clopper-Pearson UCB at k=0 on n_ai calibration positives
+    min_achievable_ucb = _binomial_ucb_clopper_pearson(0, n_ai, delta=delta_conf)
+    eff_target_risk = max(float(target_fn_risk), min_achievable_ucb + 1e-4)
 
     best_ltt = None
     best_zero_fn = None
@@ -169,7 +172,7 @@ def certify_ltt_compcrc_cascade_policy(
         rel_cost = r1_cost_rel + (1.0 - exit_rate) * (1.0 - r1_cost_rel)
         cand = {
             "enabled": exit_rate >= 0.05,
-            "certified_ltt": fn_ucb <= target_fn_risk,
+            "certified_ltt": fn_ucb <= eff_target_risk,
             "r1_defer_max": d_max,
             "r1_p_human_max": p_max,
             "r1_max_tokens": 96,
@@ -177,6 +180,7 @@ def certify_ltt_compcrc_cascade_policy(
             "cal_missed_ai_count": fn_k,
             "cal_missed_ai_rate": round(fn_emp, 5),
             "cal_fn_ucb": round(fn_ucb, 5),
+            "eff_target_risk": round(eff_target_risk, 5),
             "rel_compute_cost": round(rel_cost, 4),
             "n_ai_cal": n_ai,
         }

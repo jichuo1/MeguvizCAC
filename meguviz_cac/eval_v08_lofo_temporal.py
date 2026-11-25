@@ -29,6 +29,14 @@ from .v08_zenith_ops import (
     assign_mondrian_cell_9,
     compute_zenith_calibration_and_lowfpr_metrics,
 )
+from .v09_chronoloop import MeguvizV09CascadeEngine
+
+
+def _load_bundle_engine(bundle_dir: Path, threads: int = 2):
+    manifest = json.loads((Path(bundle_dir) / "manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("schema_version") == "meguviz.bundle.v5" or "rung1_onnx" in manifest:
+        return MeguvizV09CascadeEngine(bundle_dir, threads=threads), True
+    return MeguvizV07Engine(bundle_dir, threads=threads, enable_nano_cascade=True), False
 
 
 def _infer_family_tag(row: dict[str, Any]) -> str:
@@ -40,15 +48,16 @@ def _infer_family_tag(row: dict[str, Any]) -> str:
     return "unknown"
 
 
-def _eval_subset(engine: MeguvizV07Engine, rows: list[dict], thresh: float = 0.70, max_batch: int = 32) -> dict[str, Any]:
+def _eval_subset(engine, rows: list[dict], thresh: float = 0.70, max_batch: int = 32, is_v09: bool = False) -> dict[str, Any]:
     if not rows:
         return {"n": 0}
     txts = [str(r["text"]) for r in rows]
     scores = np.array([float(r["score"]) for r in rows], dtype=np.float32)
-    preds = engine.predict_batch(txts, max_batch=max_batch, force_main=False)
+    preds = engine.predict_batch(txts, max_batch=max_batch, force_full=False) if is_v09 else engine.predict_batch(txts, max_batch=max_batch, force_main=False)
     probs = np.array([x["prob"] for x in preds], dtype=np.float32)
     m_all = {**compute_eval_metrics(scores, probs, thresh, thresh), **compute_high_precision_metrics(scores, probs)}
     m_cal = compute_zenith_calibration_and_lowfpr_metrics(scores, probs)
+    exited = np.array([1.0 if (x.get("exit_rung") == 1 if is_v09 else x.get("exited_nano")) else 0.0 for x in preds], dtype=np.float32)
     return {
         "n": len(rows),
         "auroc": m_all.get("auroc"),
@@ -56,7 +65,8 @@ def _eval_subset(engine: MeguvizV07Engine, rows: list[dict], thresh: float = 0.7
         "best_f05": m_all.get("best_f05"),
         "recall_at_p95": m_all.get("recall_at_p95"),
         "recall_at_p99": m_all.get("recall_at_p99"),
-        "nano_exit_rate": round(float(np.mean([1.0 if x.get("exited_nano") else 0.0 for x in preds])), 4),
+        "early_exit_rate": round(float(np.mean(exited)), 4),
+        "early_exit_missed_ai": int(np.sum((exited > 0.5) & (scores >= 70.0))),
         "calibration_and_lowfpr": m_cal,
         "_probs": probs,
         "_scores": scores,
@@ -71,10 +81,11 @@ def run_lofo_and_temporal_audit(
     out_json: Path | None = None,
 ) -> dict[str, Any]:
     t0 = time.monotonic()
-    engine = MeguvizV07Engine(bundle_dir, threads=threads, enable_nano_cascade=True)
+    engine, is_v09 = _load_bundle_engine(bundle_dir, threads=threads)
     manifest = engine.manifest
     t_deploy = float((manifest.get("thresholds") or {}).get("f05", 0.70))
-    m9_cfg = ((manifest.get("mondrian_9cell") or {}).get("alphas") or {}).get("alpha_003") or {}
+    m9_root = manifest.get("selection_safe_mondrian_9cell") or manifest.get("mondrian_9cell") or {}
+    m9_cfg = (m9_root.get("alphas") or {}).get("alpha_003") or {}
     m9_cells = m9_cfg.get("cells") or {}
 
     test_gold: list[dict] = []
@@ -115,10 +126,10 @@ def run_lofo_and_temporal_audit(
                 if len(by_family_pos[fam]) < 400:
                     by_family_pos[fam].append(r)
 
-    res_gold = _eval_subset(engine, test_gold, thresh=t_deploy)
-    res_dsh = _eval_subset(engine, test_dsh_gold, thresh=t_deploy)
-    res_all = _eval_subset(engine, test_all, thresh=t_deploy)
-    res_prb = _eval_subset(engine, probe_rows, thresh=t_deploy)
+    res_gold = _eval_subset(engine, test_gold, thresh=t_deploy, is_v09=is_v09)
+    res_dsh = _eval_subset(engine, test_dsh_gold, thresh=t_deploy, is_v09=is_v09)
+    res_all = _eval_subset(engine, test_all, thresh=t_deploy, is_v09=is_v09)
+    res_prb = _eval_subset(engine, probe_rows, thresh=t_deploy, is_v09=is_v09)
 
     # 1. Temporal Holdout Audit: |FPR(modern_2026) - FPR(pre_llm)| at deployment threshold!
     temporal_audit: dict[str, Any] = {"n_pre_llm": len(pre_llm_hu), "n_modern": len(modern_hu)}
