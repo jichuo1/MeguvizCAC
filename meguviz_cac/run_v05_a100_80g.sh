@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
-# MeguvizCAC v0.5.0-ApexLoop A100-80GB Detached Training Driver
-# Incorporates all v0.4.0 lessons: 30s --probe-vram, Stage-0 RTD, mmBERT-small transfer,
-# fixed optimizer-step budgets (Stage-2=2400, Stage-3 LoopQ QAT=3000), reusable Stage-1 ckpt,
-# Drive dual-write + SHA256SUMS + automatic zip packaging.
+# MeguvizCAC v0.5.0-R3 (BGE-4L + DWConv + PIFE-32d + Parallel Residual TopK-SAE + Clean-Whitelist Two-Way pAUC)
+# Auto-adapts across G4-96G / H100 / A100-80G / A100-40G / L4-24G / T4-16G with 30s --probe-vram,
+# Drive dual-write, SHA256SUMS, and automatic full/int8/edge-w4 zip packaging.
 set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-/content/MeguvizCAC}"
 DATA_DIR="${DATA_DIR:-/content/data}"
-OUT_DIR="${OUT_DIR:-/content/out_v05_apexloop}"
+OUT_DIR="${OUT_DIR:-/content/out_v05_r3}"
 DRIVE_DIR="${DRIVE_DIR:-/content/drive/MyDrive/MeguvizCAC/v050_apexloop}"
 LOG_DRIVER="${LOG_DRIVER:-/content/log_v05_driver.txt}"
 LOG_TRAIN="${LOG_TRAIN:-/content/log_v05_full.txt}"
 DONE_JSON="${DONE_JSON:-/content/v05_done.json}"
-VERSION="${VERSION:-v0.5.0-r2-apexloop-2x1-e128}"
-CAND_BS="${CAND_BS:-512,384,256}"
+VERSION="${VERSION:-v0.5.0-r3-bge4l-pauc}"
 
 mkdir -p "$OUT_DIR" "$DRIVE_DIR"
 cd "$REPO_DIR"
@@ -22,7 +20,6 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-# Collect all available non-leaking pair files (all passed through non-silent anti-leakage guard!)
 EXTRA_PAIR_ARGS=()
 for pf in \
   "$DATA_DIR/stage2/stage2-literary-pairs.jsonl" \
@@ -44,29 +41,23 @@ fi
 
 GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)"
 VRAM_MB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n 1 | tr -d ' ')"
-if [ "${VRAM_MB:-0}" -ge 60000 ]; then
+if [ "${VRAM_MB:-0}" -ge 35000 ]; then
   CAND_BS="${CAND_BS_OVERRIDE:-512,384,256}"
-  S1_EPOCHS=3; S2_STEPS=2800; QAT_STEPS=3000; RTD_STEPS=300
-elif [ "${VRAM_MB:-0}" -ge 35000 ]; then
-  CAND_BS="${CAND_BS_OVERRIDE:-512,384,256}"
-  S1_EPOCHS=3; S2_STEPS=2800; QAT_STEPS=3000; RTD_STEPS=300
+  S1_EPOCHS=3; S2_STEPS=2400; QAT_STEPS=2800
 elif [ "${VRAM_MB:-0}" -ge 20000 ]; then
   CAND_BS="${CAND_BS_OVERRIDE:-384,256,192}"
-  S1_EPOCHS=2; S2_STEPS=2200; QAT_STEPS=2400; RTD_STEPS=250
+  S1_EPOCHS=2; S2_STEPS=2000; QAT_STEPS=2400
 else
-  CAND_BS="${CAND_BS_OVERRIDE:-256,192,128,96}"
-  S1_EPOCHS=2; S2_STEPS=1800; QAT_STEPS=2200; RTD_STEPS=200
+  CAND_BS="${CAND_BS_OVERRIDE:-192,128,96}"
+  S1_EPOCHS=2; S2_STEPS=1800; QAT_STEPS=2200
 fi
 echo "[$(date +%H:%M:%S)] GPU_DETECTED name=\"$GPU_NAME\" vram_mb=$VRAM_MB -> cands=$CAND_BS epochs=$S1_EPOCHS s2=$S2_STEPS qat=$QAT_STEPS" | tee -a "$LOG_DRIVER"
 
-echo "[$(date +%H:%M:%S)] PROBING worst-case seq=192 LoopQ QAT+EMA VRAM on candidates=$CAND_BS" | tee -a "$LOG_DRIVER"
-PROBE_OUT="$(python3 -m meguviz_cac.train_v05_apexloop \
+echo "[$(date +%H:%M:%S)] PROBING worst-case seq=192 BGE-4L QAT+EMA VRAM on candidates=$CAND_BS" | tee -a "$LOG_DRIVER"
+PROBE_OUT="$(python3 -m meguviz_cac.train_v05_r3 \
   --data "$DATA_FILE" \
   --gateguard-data "$REPO_DIR/meguviz_cac/data/v05-gateguard-pairs.jsonl" \
-  --prelude-layers 2 \
-  --core-layers 1 \
-  --vocab-size 20480 \
-  --optimizer adamw \
+  --embed-dim 192 \
   --out "$OUT_DIR" \
   --probe-vram "$CAND_BS" 2>&1)"
 echo "$PROBE_OUT" | tee -a "$LOG_DRIVER"
@@ -82,9 +73,9 @@ else:
     print(256)
 ' <<< "$PROBE_OUT")"
 
-echo "[$(date +%H:%M:%S)] START v0.5.0-R2-ApexLoop gpu=\"$GPU_NAME\" batch=$BS version=$VERSION rtd=$RTD_STEPS s1=${S1_EPOCHS}ep s2=${S2_STEPS}st qat=${QAT_STEPS}st" | tee -a "$LOG_DRIVER"
+echo "[$(date +%H:%M:%S)] START v0.5.0-R3-BGE4L-pAUC gpu=\"$GPU_NAME\" batch=$BS version=$VERSION s1=${S1_EPOCHS}ep s2=${S2_STEPS}st qat=${QAT_STEPS}st" | tee -a "$LOG_DRIVER"
 
-python3 -u -m meguviz_cac.train_v05_apexloop \
+python3 -u -m meguviz_cac.train_v05_r3 \
   --data "$DATA_FILE" \
   --gateguard-data "$REPO_DIR/meguviz_cac/data/v05-gateguard-pairs.jsonl" \
   "${EXTRA_PAIR_ARGS[@]}" \
@@ -92,29 +83,23 @@ python3 -u -m meguviz_cac.train_v05_apexloop \
   --out "$OUT_DIR" \
   --checkpoint-dir "$DRIVE_DIR" \
   --version "$VERSION" \
-  --backbone jhu-clsp/mmBERT-small \
-  --vocab-size 20480 \
-  --embed-dim 128 \
-  --prelude-layers 2 \
-  --core-layers 1 \
+  --backbone BAAI/bge-small-zh-v1.5 \
+  --embed-dim 192 \
   --stage1-synth-cap 10000 \
   --v04-synth-cap 35000 \
-  --optimizer adamw \
-  --rtd-steps "$RTD_STEPS" \
   --epochs "$S1_EPOCHS" \
   --stage2-steps "$S2_STEPS" \
   --qat-steps "$QAT_STEPS" \
   --stage2-cap 420000 \
   --qat-cap 380000 \
   --batch-size "$BS" \
-  --lr 1.5e-4 \
-  --refine-lr 4e-5 \
-  --qat-lr 1.5e-5 \
+  --lr 1.2e-4 \
+  --refine-lr 3.5e-5 \
+  --qat-lr 1.2e-5 \
   2>&1 | tee "$LOG_TRAIN"
 
-echo "[$(date +%H:%M:%S)] DONE v0.5.0-ApexLoop training batch=$BS" | tee -a "$LOG_DRIVER"
+echo "[$(date +%H:%M:%S)] DONE v0.5.0-R3 training batch=$BS" | tee -a "$LOG_DRIVER"
 
-# Scorecard, zip packaging, SHA256 & Google Drive dual-write
 python3 - "$OUT_DIR" "$DRIVE_DIR" "$DONE_JSON" "$VERSION" "$BS" << 'PYEOF' | tee -a "$LOG_DRIVER"
 import hashlib, json, shutil, sys
 from pathlib import Path
@@ -130,18 +115,19 @@ metrics_p = out_dir / f"metrics-{version}.json"
 m = json.loads(metrics_p.read_text(encoding="utf-8"))
 v = m.get("onnx_verify", {})
 tb = m.get("test_bili_gold", {})
+dsh = m.get("test_dsh_gold", {})
 ox = m.get("onnx_int8", {})
 ed = m.get("edge_w4_w8", {})
 rg = m.get("release_gates", {})
 
-print("=== v0.5.0-ApexLoop FULL SCORECARD ===")
-print(f"batch_size_used: {bs_used} | elapsed_s: {m.get('elapsed_seconds')} | baked_T: e0={m.get('exit0_temperature')} c2={m.get('coda_temperature')}")
+print("=== v0.5.0-R3 BGE4L-pAUC FULL SCORECARD ===")
+print(f"batch_size_used: {bs_used} | elapsed_s: {m.get('elapsed_seconds')} | baked_T: {m.get('temperature')} (raw={m.get('raw_fitted_temperature')})")
 print("ai_traps:", {x["id"]: round(x["prob"], 3) for x in v.get("ai_stress_traps", [])})
 print("human_traps:", {x["id"]: round(x["prob"], 3) for x in v.get("human_traps", [])})
 print("ml_traps:", {x["id"]: round(x["prob"], 3) for x in v.get("multilingual_traps", [])})
 print("pife_traps:", {x["id"]: round(x["prob"], 3) for x in v.get("pife_adversarial_traps", [])})
-print("test_bili_gold:", {k: tb.get(k) for k in ("auroc", "pr_auc", "best_f05", "recall_at_p95", "recall_at_p99", "spearman", "mae", "exit0_rate")})
-print("loop_monotonicity:", m.get("loop_monotonicity"))
+print("test_bili_gold:", {k: tb.get(k) for k in ("auroc", "pr_auc", "best_f05", "recall_at_p95", "recall_at_p99", "spearman", "mae")})
+print("test_dsh_gold:", {k: dsh.get(k) for k in ("auroc", "pr_auc", "best_f05", "recall_at_p95", "recall_at_p99", "spearman", "mae")})
 print("conformal_alpha03:", (m.get("conformal") or {}).get("alpha_03"))
 print("onnx_int8:", ox)
 print("edge_w4_w8:", ed)
