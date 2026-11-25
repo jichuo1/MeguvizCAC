@@ -6,12 +6,12 @@ set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-/content/MeguvizCAC}"
 DATA_DIR="${DATA_DIR:-/content/data}"
-OUT_DIR="${OUT_DIR:-/content/out_v06_hyperloop}"
+OUT_DIR="${OUT_DIR:-/content/out_v06_r2}"
 DRIVE_DIR="${DRIVE_DIR:-/content/drive/MyDrive/MeguvizCAC/v060_hyperloop}"
-LOG_DRIVER="${LOG_DRIVER:-/content/log_v06_driver.txt}"
-LOG_TRAIN="${LOG_TRAIN:-/content/log_v06_full.txt}"
-DONE_JSON="${DONE_JSON:-/content/v06_done.json}"
-VERSION="${VERSION:-v0.6.0-hyperloop-b3}"
+LOG_DRIVER="${LOG_DRIVER:-/content/log_v06_r2_driver.txt}"
+LOG_TRAIN="${LOG_TRAIN:-/content/log_v06_r2_full.txt}"
+DONE_JSON="${DONE_JSON:-/content/v06_r2_done.json}"
+VERSION="${VERSION:-v0.6.0-r2-hyperloop-b3}"
 
 mkdir -p "$OUT_DIR" "$DRIVE_DIR"
 cd "$REPO_DIR"
@@ -97,7 +97,7 @@ python3 -u -m meguviz_cac.train_v06_hyperloop \
   --embed-dim 192 \
   --max-len 256 \
   --stage1-synth-cap 15000 \
-  --v04-synth-cap 160000 \
+  --v04-synth-cap -1 \
   --mohawk-steps "$MOHAWK_STEPS" \
   --epochs "$S1_EPOCHS" \
   --stage2-steps "$S2_STEPS" \
@@ -105,9 +105,9 @@ python3 -u -m meguviz_cac.train_v06_hyperloop \
   --stage2-cap 420000 \
   --qat-cap 380000 \
   --batch-size "$BS" \
-  --lr 4.5e-5 \
-  --refine-lr 1.6e-5 \
-  --qat-lr 6.0e-6 \
+  --lr 3.2e-5 \
+  --refine-lr 1.4e-5 \
+  --qat-lr 5.0e-6 \
   2>&1 | tee "$LOG_TRAIN"
 
 echo "[$(date +%H:%M:%S)] DONE v0.6.0-HyperLoop training batch=$BS" | tee -a "$LOG_DRIVER"
@@ -165,7 +165,7 @@ for fn in (f"meguvizcac-{version}-int8.zip", f"meguvizcac-{version}-edge-w4.zip"
     src_z = out_dir / fn
     if src_z.is_file():
         shutil.copy2(src_z, drive_dir / fn)
-for lp in (Path("/content/log_v06_driver.txt"), Path("/content/log_v06_full.txt")):
+for lp in (Path("/content/log_v06_r2_driver.txt"), Path("/content/log_v06_r2_full.txt")):
     if lp.is_file():
         shutil.copy2(lp, drive_dir / lp.name)
 sums = []

@@ -330,7 +330,7 @@ class MeguvizV06HyperLoopModel(nn.Module):
         self.word_emb_P = QATLinear(embed_dim, hidden_size, bias=False)
         self.pos_emb = nn.Embedding(max_len, hidden_size)
         self.emb_ln = nn.LayerNorm(hidden_size, eps=1e-12)
-        self.emb_drop = nn.Dropout(drop_p)
+        self.emb_drop = nn.Dropout(0.15 if embed_dim >= 192 else drop_p)
 
         # 2:2 Interleaved Split-Head Hybrid (L0/L2: 8x Exact SWA-64, L1/L3: 4x SWA-64 + 4x Bi-DeltaNet-2!)
         self.layers = nn.ModuleList(
@@ -353,7 +353,8 @@ class MeguvizV06HyperLoopModel(nn.Module):
         self.span_head = QATLinear(hidden_size + 1, 1, bias=True)  # token repr + Bi-DeltaNet asymmetry wave
         self.mil_gate = nn.Parameter(torch.tensor(-2.0))
 
-        # 32-d PIFE + 4-d Bi-DeltaNet Asymmetry Statistics -> 128-d style/forensic embedding (dropout prevents style shortcut!)
+        # 32-d PIFE + 4-d Bi-DeltaNet Asymmetry Statistics -> 128-d residual-gated forensic vector
+        # Low-init style_gate (-2.5 -> sigmoid ~0.076) prevents colon/list/rating shortcuts on structured tech humans (H03/H06/M04)!
         self.style_net = nn.Sequential(
             QATLinear(style_dim + 4, 64, bias=True),
             nn.SiLU(),
@@ -362,6 +363,7 @@ class MeguvizV06HyperLoopModel(nn.Module):
             nn.LayerNorm(128),
             nn.Dropout(0.15),
         )
+        self.style_gate = nn.Parameter(torch.full((1, 128), -2.5))
         self.ctx_echo_net = nn.Sequential(
             nn.Linear(4, 32),
             nn.SiLU(),
@@ -472,6 +474,10 @@ class MeguvizV06HyperLoopModel(nn.Module):
         for lyr in self.layers:
             lyr.use_sdpa = bool(enabled)
 
+    def set_swa_head_drop(self, drop_p: float) -> None:
+        for lyr in self.layers:
+            lyr.swa_head_drop_p = float(drop_p)
+
     def set_qat_enabled(self, enabled: bool) -> None:
         for m in self.modules():
             if isinstance(m, (QATEmbedding, QATLinear)):
@@ -521,7 +527,7 @@ class MeguvizV06HyperLoopModel(nn.Module):
         att_h = (x * torch.softmax(pool_sc, dim=-1).unsqueeze(-1)).sum(dim=1)
 
         st_in = torch.cat([style_feats.to(x.dtype), bi_stats], dim=-1)
-        st_vec = self.style_net(st_in)
+        st_vec = torch.sigmoid(self.style_gate).to(x.dtype) * self.style_net(st_in)
         if ctx_echo is not None:
             st_vec = st_vec + self.ctx_echo_net(ctx_echo.to(x.dtype))
 

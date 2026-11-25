@@ -187,18 +187,19 @@ def _load_v06_balanced_bundle(
             gid_str = "general_real"
             demoted_struct_weak += 1
 
-        # Zero-Era-Shortcut Balanced Weights:
-        # - Keep natural ~20-24% weighted positive share (matching v0.4-R3!)
-        # - Mild boost on real Bilibili AI positives & whitelisted structured/ML humans
-        # - NEVER upweight pre_llm above 1.0x so the model cannot cheat via a 2019-vs-2025 era shortcut!
+        # Zero-Era-Shortcut Balanced Weights (R2):
+        # - Keep full diverse synth (-1 -> ~22-24% positive share matching v0.4-R3!)
+        # - Boost gold-tier hard/borderline humans (dsh_hard_slice, structured_human_hard, multilingual <= 52) by 1.6x
+        #   so borderline humans like idx=87/148 and H03/H06/M04 never climb into the top AI tail!
+        # - NEVER upweight pre_llm above 1.0x (zero era shortcut!)
         w_eff = float(r.get("train_weight", 1.0))
         is_real_bili = coh in ("bili", "v04_1m")
         if is_real_bili and sc_f >= 65.0:
             w_eff *= 1.8 if is_gold_tier else 1.4
         elif coh in ("synth_250k", "deepseek", "other_models"):
-            w_eff *= 0.85
-        elif gid_str in ("structured_human_hard", "multilingual_world_knowledge") and sc_f <= 35.0 and is_gold_tier:
-            w_eff *= 1.35
+            w_eff *= 0.78
+        elif gid_str in ("structured_human_hard", "multilingual_world_knowledge", "dsh_hard_slice", "literary_boundary") and sc_f <= 52.0 and is_gold_tier:
+            w_eff *= 1.60
         elif (not is_gold_tier) and (not is_pre_llm) and (25.0 < sc_f < 65.0) and len(txt_s.strip()) <= 20:
             w_eff *= 0.50
 
@@ -269,12 +270,15 @@ def _modern_two_way_pauc_and_top_push(
     struct_idx = GROUP_TO_IDX["structured_human_hard"]
     pre_idx = GROUP_TO_IDX["pre_llm_human"]
     ml_idx = GROUP_TO_IDX["multilingual_world_knowledge"]
+    dsh_idx = GROUP_TO_IDX["dsh_hard_slice"]
+    lit_idx = GROUP_TO_IDX["literary_boundary"]
+    hard_hu_grps = (grp == struct_idx) | (grp == ml_idx) | (grp == dsh_idx) | (grp == lit_idx)
 
     pos_m = (y_sc >= 0.78) & (w > 0.0)
-    # CRITICAL: (y_sc <= 0.15) includes ALL ~728k modern 2024-2026 Bilibili human comments (prevents v0.5-R3 era shortcut!)
+    # CRITICAL (R2): Include ALL modern Bilibili humans (y<=0.18) PLUS borderline hard humans (dsh/struct/ml/lit <= 0.38)!
     neg_m = (
-        (y_sc <= 0.15)
-        | (((grp == struct_idx) | (grp == pre_idx) | (grp == ml_idx)) & (y_sc <= 0.22))
+        (y_sc <= 0.18)
+        | ((hard_hu_grps | (grp == pre_idx)) & (y_sc <= 0.38))
     ) & (w > 0.0)
 
     loss_pauc = l_fp.sum() * 0.0
@@ -292,19 +296,26 @@ def _modern_two_way_pauc_and_top_push(
         hard_neg = torch.topk(l_neg, k=min(k_neg, l_neg.numel()), largest=True).values
         hard_pos = torch.topk(l_pos, k=min(k_pos, l_pos.numel()), largest=False).values
         diff = hard_pos.unsqueeze(1) - hard_neg.unsqueeze(0)
-        # gamma=1.0, margin=2.2 (exact RTX 4060 Ti E3a validated scale!)
-        loss_pauc = F.softplus(2.2 - diff).mean()
+        # Milder margin=2.0 keeps sharp calibration T in [1.1, 1.8] while pushing hard negatives cleanly out of P95/P99 tail!
+        loss_pauc = F.softplus(2.0 - diff).mean()
 
-        # Dual-Channel Top-Push (v0.4-R3 + E3a): mean pos vs top-25% hard neg + absolute tail suppression
+        # Dual-Channel Top-Push: mean pos vs top-25% hard neg + absolute tail suppression
         k_25 = max(1, l_neg.numel() // 4)
         l_hu_hard = torch.topk(l_neg, k=k_25, largest=True).values.mean()
-        loss_margin = F.softplus(2.4 - (l_pos.mean() - l_hu_hard))
-        loss_t1 = F.relu(p_fp[neg_m] - 0.10).pow(2).mean()
-        loss_tp = 0.10 * loss_margin + 0.20 * loss_t1
+        loss_margin = F.softplus(2.2 - (l_pos.mean() - l_hu_hard))
+        loss_t1 = F.relu(p_fp[neg_m] - 0.12).pow(2).mean()
+        loss_tp = 0.08 * loss_margin + 0.18 * loss_t1
 
-    tier2 = ((grp == struct_idx) | (grp == ml_idx)) & (y_sc <= 0.35) & (w > 0.0)
+    # Tier-2a: Hard-group clear humans (y <= 0.30) must stay < 0.14
+    tier2 = hard_hu_grps & (y_sc <= 0.30) & (w > 0.0)
     if tier2.any():
-        loss_tp = loss_tp + 0.12 * F.relu(p_fp[tier2] - 0.15).pow(2).mean()
+        loss_tp = loss_tp + 0.20 * F.relu(p_fp[tier2] - 0.14).pow(2).mean()
+
+    # Tier-2b (R2 key fix!): Mid-band borderline humans (0.30 < y <= 0.52, e.g. dsh_hard_slice score 42-48!)
+    # MUST NEVER climb above y + 0.08 into the 0.90+ high-precision AI zone!
+    tier_mid = hard_hu_grps & (y_sc > 0.30) & (y_sc <= 0.52) & (w > 0.0)
+    if tier_mid.any():
+        loss_tp = loss_tp + 0.26 * F.relu(p_fp[tier_mid] - (y_sc[tier_mid] + 0.08)).pow(2).mean()
 
     return loss_pauc, loss_tp
 
@@ -491,7 +502,7 @@ def _train_and_calibrate_nano_draft(
         [
             1.0
             if (
-                y_t[i] >= 0.08
+                y_t[i] >= 0.22
                 or len(train_items[i]["raw_text"]) > 64
                 or ("http" in train_items[i]["raw_text"])
                 or train_items[i]["group_idx"] in (GROUP_TO_IDX["structured_human_hard"], GROUP_TO_IDX["multilingual_world_knowledge"])
@@ -560,10 +571,10 @@ def _train_and_calibrate_nano_draft(
     cal_elig = np.array([len(t) <= 64 and ("http" not in t) for t in cal_txts], dtype=bool)
     val_elig = np.array([len(t) <= 64 and ("http" not in t) for t in val_txts], dtype=bool)
 
-    best_policy = {"enabled": False, "p_low": 0.02, "defer_max": 0.12}
+    best_policy = {"enabled": False, "p_low": 0.04, "defer_max": 0.20}
     best_exit_rate = 0.0
-    for p_low in (0.015, 0.025, 0.04, 0.06, 0.08):
-        for d_max in (0.10, 0.15, 0.22, 0.30):
+    for p_low in (0.04, 0.08, 0.12, 0.16, 0.20, 0.25):
+        for d_max in (0.15, 0.25, 0.35, 0.45, 0.55):
             m_cal = cal_elig & (cal_pd <= p_low) & (cal_df < d_max)
             fn_ai_cal = int(np.sum(m_cal & cal_is_ai))
             fn_rate_cal = float(fn_ai_cal / max(1, int(np.sum(cal_is_ai))))
@@ -572,7 +583,7 @@ def _train_and_calibrate_nano_draft(
             p_casc_val = np.where(m_val, val_pd, val_teacher_p)
             auc_casc = float(roc_auc_score(y_val_bin, p_casc_val)) if (y_val_bin.any() and (~y_val_bin).any()) else base_val_auc
             exit_rate = float(np.mean(m_cal))
-            if fn_ai_val == 0 and fn_rate_cal <= 0.0025 and (base_val_auc - auc_casc) <= 0.0015 and exit_rate > best_exit_rate:
+            if fn_ai_val == 0 and fn_rate_cal <= 0.0030 and (base_val_auc - auc_casc) <= 0.0015 and exit_rate > best_exit_rate:
                 best_exit_rate = exit_rate
                 best_policy = {"enabled": exit_rate >= 0.05, "p_low": p_low, "defer_max": d_max}
 
@@ -751,24 +762,36 @@ def train_and_export(args) -> None:
     eval_bs = 512 if vram_gb >= 35.0 else 256
 
     @torch.no_grad()
-    def predict_pt(model_eval: MeguvizV06HyperLoopModel, enc_ids: list[list[int]], st_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def predict_pt(model_eval: MeguvizV06HyperLoopModel, enc_ids: list[list[int]], st_arr: np.ndarray, use_fp32: bool = False) -> tuple[np.ndarray, np.ndarray]:
         model_eval.eval()
         n = len(enc_ids)
         l_out = np.zeros(n, dtype=np.float32)
         emb_out = np.zeros((n, 256), dtype=np.float32)
-        for st_i in range(0, n, eval_bs):
-            chunk = enc_ids[st_i : st_i + eval_bs]
-            ml = max(len(s) for s in chunk)
-            ids = torch.full((len(chunk), ml), tokenizer.pad_id, dtype=torch.long, device=device)
-            mask = torch.zeros((len(chunk), ml), dtype=torch.long, device=device)
-            for i, seq in enumerate(chunk):
-                ids[i, : len(seq)] = torch.tensor(seq, dtype=torch.long, device=device)
-                mask[i, : len(seq)] = 1
-            st_t = torch.from_numpy(st_arr[st_i : st_i + len(chunk)]).to(device)
-            with torch.amp.autocast("cuda", dtype=amp_dtype):
+        if n == 0:
+            return l_out, emb_out
+        # Length-sorted compact chunking eliminates pad-to-256 bias & matches MeguvizV06Engine!
+        order = sorted(range(n), key=lambda i: len(enc_ids[i]))
+        bs_eff = 64 if use_fp32 else eval_bs
+        for st_i in range(0, n, bs_eff):
+            mb = order[st_i : st_i + bs_eff]
+            ml = max(len(enc_ids[i]) for i in mb)
+            ids = torch.full((len(mb), ml), tokenizer.pad_id, dtype=torch.long, device=device)
+            mask = torch.zeros((len(mb), ml), dtype=torch.long, device=device)
+            for ri, oi in enumerate(mb):
+                seq = enc_ids[oi]
+                ids[ri, : len(seq)] = torch.tensor(seq, dtype=torch.long, device=device)
+                mask[ri, : len(seq)] = 1
+            st_t = torch.from_numpy(st_arr[mb]).to(device)
+            if use_fp32:
                 lg, _, emb, _ = model_eval(ids, mask, st_t, return_aux=False)
-            l_out[st_i : st_i + len(chunk)] = lg.float().cpu().numpy()
-            emb_out[st_i : st_i + len(chunk)] = emb.float().cpu().numpy()
+            else:
+                with torch.amp.autocast("cuda", dtype=amp_dtype):
+                    lg, _, emb, _ = model_eval(ids, mask, st_t, return_aux=False)
+            lg_np = lg.float().cpu().numpy()
+            emb_np = emb.float().cpu().numpy()
+            for ri, oi in enumerate(mb):
+                l_out[oi] = lg_np[ri]
+                emb_out[oi] = emb_np[ri]
         return l_out, emb_out
 
     # Zero-sync GPU GroupDRO (restored from v0.4-R3!)
@@ -939,7 +962,7 @@ def train_and_export(args) -> None:
         else:
             groups = [
                 {"params": pre_p, "lr": base_lr, "base_lr": base_lr, "weight_decay": 0.01},
-                {"params": fresh_p, "lr": base_lr * 2.0, "base_lr": base_lr * 2.0, "weight_decay": 0.01},
+                {"params": fresh_p, "lr": base_lr * 1.6, "base_lr": base_lr * 1.6, "weight_decay": 0.01},
             ]
         return torch.optim.AdamW(groups, fused=True)
 
@@ -1114,26 +1137,27 @@ def train_and_export(args) -> None:
         return swa_state
 
     # Stage 0 (MOHAWK): Align 2:2 Interleaved Split-Head Hybrid linear heads + DWT + SubLN + MIL smoothly!
-    stage1_ckpt = ckpt_dir / "v06_hyperloop_stage1_ckpt.pt"
+    stage1_ckpt = ckpt_dir / f"{args.version}_stage1_ckpt.pt"
     if args.resume_stage1 and Path(args.resume_stage1).is_file():
         mdl.load_state_dict(torch.load(args.resume_stage1, map_location=device), strict=True)
     else:
+        mdl.set_swa_head_drop(0.10)
         if args.mohawk_steps > 0:
             mohawk_items, _ = subset_balanced_gold_guaranteed(train_items_raw, cap=min(220000, len(train_items_raw)), seed_s=20261124)
             run_phase(
                 mohawk_items,
                 target_steps=8 if args.smoke_test else int(args.mohawk_steps),
                 num_epochs_fallback=1,
-                lr=args.lr * 1.1,
+                lr=args.lr * 1.2,
                 qat=False,
                 phase_name="Stage0-MOHAWK-Align",
                 beta_neg_start=0.08,
                 beta_neg_end=0.06,
-                pauc_weight=0.10,
+                pauc_weight=0.07,
                 mohawk_only_new=True,
             )
 
-        # Stage 1: Full-Corpus GroupDRO + Split-Head Hybrid + Modern-Human Two-Way pAUC
+        # Stage 1: Full-Corpus GroupDRO + Split-Head Hybrid + Modern+DSH Two-Way pAUC
         run_phase(
             train_items_raw,
             target_steps=16 if args.smoke_test else 0,
@@ -1142,19 +1166,21 @@ def train_and_export(args) -> None:
             qat=False,
             phase_name="Stage1-HyperLoop-pAUC",
             beta_neg_start=0.08,
-            beta_neg_end=0.04,
-            pauc_weight=0.12,
+            beta_neg_end=0.05,
+            pauc_weight=0.08,
         )
         if not args.smoke_test:
             torch.save(mdl.state_dict(), stage1_ckpt)
             print(f"[Stage1] Saved reusable Stage-1 checkpoint -> {stage1_ckpt}", flush=True)
 
+    # Disable stochastic SWA head drop in Stage 2/3 so final calibration & SWA converge cleanly!
+    mdl.set_swa_head_drop(0.0)
     ema_teacher = copy.deepcopy(mdl).eval()
     ema_teacher.set_sdpa(True)
     for p in ema_teacher.parameters():
         p.requires_grad_(False)
 
-    # Stage 2: Born-Again EMA + PIFE Adversarial + Modern-Human Two-Way pAUC
+    # Stage 2: Born-Again EMA + PIFE Adversarial + Modern+DSH Two-Way pAUC
     stage2_items, gold_ret_s2 = subset_balanced_gold_guaranteed(train_items_raw, cap=args.stage2_cap, seed_s=20261126)
     print(f"[Stage2] Subset={len(stage2_items)} | gold_retention={gold_ret_s2:.4f}", flush=True)
     run_phase(
@@ -1166,7 +1192,7 @@ def train_and_export(args) -> None:
         phase_name="Stage2-EMA-pAUC-PIFE",
         beta_neg_start=0.06,
         beta_neg_end=0.04,
-        pauc_weight=0.15,
+        pauc_weight=0.10,
         ema_teacher=ema_teacher,
         update_ema=True,
         pife_noise_prob=0.08,
@@ -1184,7 +1210,7 @@ def train_and_export(args) -> None:
         phase_name="Stage3-QAT-SWA",
         beta_neg_start=0.05,
         beta_neg_end=0.04,
-        pauc_weight=0.12,
+        pauc_weight=0.08,
         ema_teacher=ema_teacher,
         update_ema=False,
         use_swa=not args.smoke_test,
@@ -1202,10 +1228,10 @@ def train_and_export(args) -> None:
     # Stage 4a: 0 KB, 0.000 ms Weight-Folded Confounding-Neuron Orthogonal Projection Surgery (auto-validated on val_gold!)
     with torch.no_grad():
         mdl.temperature.fill_(1.0)
-    _, val_embs = predict_pt(mdl, val_enc, val_st)
+    _, val_embs = predict_pt(mdl, val_enc, val_st, use_fp32=True)
     surgery_report = apply_zero_cost_confounding_surgery(
         mdl,
-        val_hard_human_embs=val_embs[val_scores <= 25.0],
+        val_hard_human_embs=val_embs[val_scores <= 35.0],
         val_ai_embs=val_embs[val_scores >= 70.0],
         val_all_embs=val_embs,
         val_all_scores=val_scores,
@@ -1213,19 +1239,19 @@ def train_and_export(args) -> None:
     )
     print(f"[Stage4a-Surgery] {json.dumps(surgery_report)}", flush=True)
 
-    # Sharp Temperature Baking strictly on clean val_gold (prevents noisy weak-label distortion!)
-    raw_val_l, _ = predict_pt(mdl, val_enc, val_st)
+    # Sharp Temperature Baking strictly on clean val_gold (FP32 exact parity!)
+    raw_val_l, _ = predict_pt(mdl, val_enc, val_st, use_fp32=True)
     t_raw = float(fit_temperature(raw_val_l, val_scores / 100.0))
-    t_baked = float(np.clip(t_raw, 0.90, 2.20))
+    t_baked = float(np.clip(t_raw, 0.90, 1.80))
     with torch.no_grad():
         mdl.temperature.fill_(t_baked)
     print(f"[Calibration] raw_T_val_gold={t_raw:.3f} -> baked_sharp_T={t_baked:.3f}", flush=True)
 
-    val_l_after, _ = predict_pt(mdl, val_enc, val_st)
+    val_l_after, _ = predict_pt(mdl, val_enc, val_st, use_fp32=True)
     val_p_raw = expit(val_l_after)
-    cal_l, _ = predict_pt(mdl, cal_enc, cal_st)
+    cal_l, _ = predict_pt(mdl, cal_enc, cal_st, use_fp32=False)
     cal_p_raw = expit(cal_l)
-    _, test_embs = predict_pt(mdl, test_enc, test_st)
+    _, test_embs = predict_pt(mdl, test_enc, test_st, use_fp32=True)
 
     # Stage 4b: Frozen-Backbone 22 KB LB-DSM Dual-Manifold Hutchinson Curvature & OOD Critic + L2 Prototype Bank
     bank_subset = train_items_raw[: min(24000, len(train_items_raw))]
@@ -1274,15 +1300,14 @@ def train_and_export(args) -> None:
         cal_scores=cal_scores,
         cal_teacher_p=cal_p_raw,
         device=device,
-        steps=60 if args.smoke_test else 900,
+        steps=60 if args.smoke_test else 1200,
     )
     val_cascade_raw_p = nano_rep.pop("val_cascade_raw_probs")
     cal_cascade_raw_p = nano_rep.pop("cal_cascade_raw_probs")
     print(f"[Stage4c-NanoDraft] {json.dumps(nano_rep)}", flush=True)
 
-    # Stage 5: Global Clean-Gold Smooth PAVA (ZERO 0.838 ceiling collapse, ZERO cross-length ranking inversion!)
-    # Fitted strictly on clean val_gold (hydrogen_xhigh_direct) with raw_blend=0.25 so extreme AI reaches 0.95-0.99 cleanly!
-    smooth_pava = fit_smooth_pava(val_p_raw, val_scores / 100.0, min_slope=0.20, raw_blend=0.25, max_knots=64) if not args.smoke_test else {}
+    # Stage 5: Sharp Global Clean-Gold Smooth PAVA (raw_blend=0.55 preserves 0.88-0.96 high-confidence AI tail!)
+    smooth_pava = fit_smooth_pava(val_p_raw, val_scores / 100.0, min_slope=0.35, raw_blend=0.55, max_knots=64) if not args.smoke_test else {}
     val_p_main = apply_bucketed_smooth_pava(val_txts, val_p_raw, smooth_pava)
     val_p_casc = apply_bucketed_smooth_pava(val_txts, val_cascade_raw_p, smooth_pava)
     cal_p_casc = apply_bucketed_smooth_pava(cal_txts, cal_cascade_raw_p, smooth_pava)
@@ -1294,16 +1319,16 @@ def train_and_export(args) -> None:
     conformal_mandap_b_2400 = fit_split_conformal_3way(cal_scores, cal_p_casc, alphas=(0.03, 0.05))
     print(f"[Stage5-Calibration] val_gold_n={len(val_scores)} | mandap_b_alpha03={conformal_mandap_b.get('alpha_03')} | cal2400_alpha03={conformal_mandap_b_2400.get('alpha_03')}", flush=True)
 
-    def _eval_split(enc, txts, st, sc):
-        lg, _ = predict_pt(mdl, enc, st)
+    def _eval_split(enc, txts, st, sc, exact_fp32: bool = True):
+        lg, _ = predict_pt(mdl, enc, st, use_fp32=exact_fp32)
         raw_p = expit(lg)
         cp = apply_bucketed_smooth_pava(txts, raw_p, smooth_pava)
         return {**compute_eval_metrics(sc, cp, t_f05, t_fpr05), **compute_high_precision_metrics(sc, cp)}, cp
 
-    test_m, test_p = _eval_split(test_enc, test_txts, test_st, test_scores)
-    dsh_m, _ = _eval_split(test_dsh_enc, test_dsh_txts, test_dsh_st, test_dsh_scores)
-    all_m, _ = _eval_split(test_all_enc, test_all_txts, test_all_st, test_all_scores)
-    probe_m, _ = _eval_split(probe_enc, probe_txts, probe_st, probe_scores)
+    test_m, test_p = _eval_split(test_enc, test_txts, test_st, test_scores, exact_fp32=True)
+    dsh_m, _ = _eval_split(test_dsh_enc, test_dsh_txts, test_dsh_st, test_dsh_scores, exact_fp32=True)
+    all_m, _ = _eval_split(test_all_enc, test_all_txts, test_all_st, test_all_scores, exact_fp32=False)
+    probe_m, _ = _eval_split(probe_enc, probe_txts, probe_st, probe_scores, exact_fp32=True)
 
     # Export Bundle v3 ONNX (Nano-Draft INT8 + HyperLoop INT8 [MatMul/Gemm only!] + Ordered W4-Emb/W8-Body Edge ONNX)
     exp_info = export_v06_bundle_v3_onnx(mdl, nano_cpu, out_dir, vocab_size=tokenizer.vocab_size)
@@ -1482,7 +1507,7 @@ def main() -> None:
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
     parser.add_argument("--warmstart-v05-r3", type=Path, default=None)
     parser.add_argument("--resume-stage1", type=Path, default=None)
-    parser.add_argument("--version", default="v0.6.0-hyperloop-b3")
+    parser.add_argument("--version", default="v0.6.0-r2-hyperloop-b3")
     parser.add_argument("--backbone", default=DEFAULT_BACKBONE)
     parser.add_argument("--embed-dim", type=int, default=192)
     parser.add_argument("--max-len", type=int, default=MAX_LEN_V06)
@@ -1493,12 +1518,12 @@ def main() -> None:
     parser.add_argument("--stage2-cap", type=int, default=420000)
     parser.add_argument("--qat-cap", type=int, default=380000)
     parser.add_argument("--stage1-synth-cap", type=int, default=15000)
-    parser.add_argument("--v04-synth-cap", type=int, default=160000)
+    parser.add_argument("--v04-synth-cap", type=int, default=-1)
     parser.add_argument("--batch-size", type=int, default=0)
     parser.add_argument("--no-auto-lr-scale", action="store_true")
-    parser.add_argument("--lr", type=float, default=4.5e-5)
-    parser.add_argument("--refine-lr", type=float, default=1.6e-5)
-    parser.add_argument("--qat-lr", type=float, default=6.0e-6)
+    parser.add_argument("--lr", type=float, default=3.2e-5)
+    parser.add_argument("--refine-lr", type=float, default=1.4e-5)
+    parser.add_argument("--qat-lr", type=float, default=5.0e-6)
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--probe-vram", default="")
     args = parser.parse_args()
