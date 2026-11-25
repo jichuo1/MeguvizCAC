@@ -632,7 +632,8 @@ def train_and_export(args) -> None:
     device = torch.device("cuda")
     gpu_name = torch.cuda.get_device_name(0)
     vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-    amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    use_bf16 = bool(torch.cuda.is_bf16_supported())
+    amp_dtype = torch.bfloat16 if use_bf16 else torch.float32
 
     if args.probe_vram:
         _run_vram_probe(args, device, amp_dtype)

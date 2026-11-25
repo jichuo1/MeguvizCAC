@@ -42,6 +42,23 @@ if [ ! -f "$DATA_FILE" ]; then
   exit 2
 fi
 
+GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)"
+VRAM_MB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n 1 | tr -d ' ')"
+if [ "${VRAM_MB:-0}" -ge 60000 ]; then
+  CAND_BS="${CAND_BS_OVERRIDE:-1024,896,768,640,512}"
+  S1_EPOCHS=3; S2_STEPS=2400; QAT_STEPS=3000; RTD_STEPS=400
+elif [ "${VRAM_MB:-0}" -ge 35000 ]; then
+  CAND_BS="${CAND_BS_OVERRIDE:-768,640,512,384,256}"
+  S1_EPOCHS=3; S2_STEPS=2400; QAT_STEPS=3000; RTD_STEPS=400
+elif [ "${VRAM_MB:-0}" -ge 20000 ]; then
+  CAND_BS="${CAND_BS_OVERRIDE:-512,384,256,192}"
+  S1_EPOCHS=2; S2_STEPS=2000; QAT_STEPS=2400; RTD_STEPS=300
+else
+  CAND_BS="${CAND_BS_OVERRIDE:-256,192,128,96}"
+  S1_EPOCHS=2; S2_STEPS=1800; QAT_STEPS=2200; RTD_STEPS=250
+fi
+echo "[$(date +%H:%M:%S)] GPU_DETECTED name=\"$GPU_NAME\" vram_mb=$VRAM_MB -> cands=$CAND_BS epochs=$S1_EPOCHS s2=$S2_STEPS qat=$QAT_STEPS" | tee -a "$LOG_DRIVER"
+
 echo "[$(date +%H:%M:%S)] PROBING worst-case seq=192 LoopQ QAT+EMA VRAM on candidates=$CAND_BS" | tee -a "$LOG_DRIVER"
 PROBE_OUT="$(python3 -m meguviz_cac.train_v05_apexloop \
   --data "$DATA_FILE" \
@@ -60,10 +77,10 @@ for line in sys.stdin:
         print(int(d["chosen_batch_size"]))
         break
 else:
-    print(768)
+    print(256)
 ' <<< "$PROBE_OUT")"
 
-echo "[$(date +%H:%M:%S)] START v0.5.0-ApexLoop batch=$BS version=$VERSION rtd=350 s1=2ep s2=2400st qat=3000st" | tee -a "$LOG_DRIVER"
+echo "[$(date +%H:%M:%S)] START v0.5.0-ApexLoop gpu=\"$GPU_NAME\" batch=$BS version=$VERSION rtd=$RTD_STEPS s1=${S1_EPOCHS}ep s2=${S2_STEPS}st qat=${QAT_STEPS}st" | tee -a "$LOG_DRIVER"
 
 python3 -u -m meguviz_cac.train_v05_apexloop \
   --data "$DATA_FILE" \
@@ -80,10 +97,10 @@ python3 -u -m meguviz_cac.train_v05_apexloop \
   --stage1-synth-cap 10000 \
   --v04-synth-cap 35000 \
   --optimizer muonclip \
-  --rtd-steps 400 \
-  --epochs 3 \
-  --stage2-steps 2400 \
-  --qat-steps 3000 \
+  --rtd-steps "$RTD_STEPS" \
+  --epochs "$S1_EPOCHS" \
+  --stage2-steps "$S2_STEPS" \
+  --qat-steps "$QAT_STEPS" \
   --stage2-cap 420000 \
   --qat-cap 380000 \
   --batch-size "$BS" \
