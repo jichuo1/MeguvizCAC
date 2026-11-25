@@ -451,20 +451,22 @@ def train_and_export(args) -> None:
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("high")
     device = torch.device("cuda")
     gpu_name = torch.cuda.get_device_name(0)
     vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
     if int(args.batch_size) > 0:
         batch_size = int(args.batch_size)
-        lr_scale = 1.0
     elif vram_gb >= 60.0:
         batch_size = 1024
-        lr_scale = 1.0 if args.no_auto_lr_scale else min(2.0, math.sqrt(batch_size / 256.0))
     elif vram_gb >= 35.0:
         batch_size = 512
-        lr_scale = 1.0 if args.no_auto_lr_scale else min(2.0, math.sqrt(batch_size / 256.0))
     else:
         batch_size = 256 if vram_gb >= 20.0 else 128
+    if batch_size > 256 and not args.no_auto_lr_scale:
+        lr_scale = min(2.0, math.sqrt(batch_size / 256.0))
+    else:
         lr_scale = 1.0
     amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     print(f"[Config] GPU={gpu_name} ({vram_gb:.1f} GB) | amp={amp_dtype} | batch_size={batch_size} | lr_scale={lr_scale:.2f}", flush=True)
@@ -1062,6 +1064,126 @@ def train_and_export(args) -> None:
             return self.m.forward_core_step(z_prev, h0, attention_mask, step_id, apply_aux=False)
 
     # ------------------------------------------------------------------
+    # Optional fast worst-case Stage-3 QAT+EMA+Pairs VRAM & compile probe
+    # ------------------------------------------------------------------
+    if getattr(args, "probe_vram", ""):
+        import gc
+        from transformers import AutoConfig
+
+        cfg_p = AutoConfig.from_pretrained(args.backbone)
+        eff_emb_drop_p = float(args.emb_drop) if float(args.emb_drop) >= 0.0 else (0.15 if args.embed_dim >= 192 else 0.10)
+        cand_list = [int(x.strip()) for x in str(args.probe_vram).split(",") if x.strip()]
+        vram_cap_gib = vram_gb * 0.92
+        results = []
+        chosen = 0
+
+        def _probe_once(bs_cand: int) -> float:
+            m_p = MeguvizV04DualLoopModel(
+                vocab_size=tokenizer.vocab_size,
+                embed_dim=args.embed_dim,
+                hidden_size=cfg_p.hidden_size,
+                num_heads=cfg_p.num_attention_heads,
+                intermediate_size=cfg_p.intermediate_size,
+                core_layers=args.core_layers,
+                num_loops=args.num_loops,
+                lora_rank=args.lora_rank,
+                eps=cfg_p.layer_norm_eps,
+                num_latents=args.num_latents,
+                mhc_streams=args.mhc_streams,
+                use_char_stem=not args.no_char_stem,
+                lora_targets=args.lora_targets,
+                use_diff_attn=args.diff_attn,
+                emb_drop_p=eff_emb_drop_p,
+                intent_dim=1024,
+            ).to(device)
+            m_p.set_sdpa(True)
+            m_p.set_qat_enabled(True)
+            ema_p = copy.deepcopy(m_p).eval()
+            for p in ema_p.parameters():
+                p.requires_grad_(False)
+            if args.compile and hasattr(torch, "compile"):
+                m_p.forward_prelude = torch.compile(m_p.forward_prelude, dynamic=True)
+                m_p.forward_core_step = torch.compile(m_p.forward_core_step, dynamic=True)
+            try:
+                opt_p = torch.optim.AdamW(m_p.parameters(), lr=3e-5, weight_decay=0.01, fused=True)
+            except TypeError:
+                opt_p = torch.optim.AdamW(m_p.parameters(), lr=3e-5, weight_decay=0.01)
+            p_bs = max(12, min(48, int(round(12.0 * bs_cand / 256.0))))
+            step_ms_local = 0.0
+            for it_idx in range(2):
+                ids_s = torch.randint(1, BASE_VOCAB_SIZE, (bs_cand, MAX_LEN), dtype=torch.long, device=device)
+                msk_s = torch.ones((bs_cand, MAX_LEN), dtype=torch.long, device=device)
+                cid_s = torch.randint(0, 256, (bs_cand, CHAR_MAX_BYTES), dtype=torch.long, device=device) if m_p.use_char_stem else None
+                ai_s = torch.randint(1, BASE_VOCAB_SIZE, (p_bs, MAX_LEN), dtype=torch.long, device=device)
+                am_s = torch.ones((p_bs, MAX_LEN), dtype=torch.long, device=device)
+                ac_s = torch.randint(0, 256, (p_bs, CHAR_MAX_BYTES), dtype=torch.long, device=device) if m_p.use_char_stem else None
+                hu_s = torch.randint(1, BASE_VOCAB_SIZE, (p_bs, MAX_LEN), dtype=torch.long, device=device)
+                hm_s = torch.ones((p_bs, MAX_LEN), dtype=torch.long, device=device)
+                hc_s = torch.randint(0, 256, (p_bs, CHAR_MAX_BYTES), dtype=torch.long, device=device) if m_p.use_char_stem else None
+                t_iter = time.monotonic()
+                opt_p.zero_grad(set_to_none=True)
+                with torch.no_grad(), torch.amp.autocast("cuda", dtype=amp_dtype):
+                    ep = ema_p.forward_prelude(ids_s, msk_s, cid_s)
+                    eh0, emk = ep[0], ep[-1]
+                    ez = ep[1] if ema_p.mhc_streams > 1 else eh0
+                    for s in range(args.num_loops):
+                        ez, _, _, _, _, _, _ = ema_p.forward_core_step(ez, eh0, emk, ema_p.step_idxs[s], apply_aux=True)
+                with torch.amp.autocast("cuda", dtype=amp_dtype):
+                    pre_s = m_p.forward_prelude(ids_s, msk_s, cid_s)
+                    h0_s, cm_s = pre_s[0], pre_s[-1]
+                    z_s = pre_s[1] if m_p.mhc_streams > 1 else h0_s
+                    loss_s = 0.0
+                    for s in range(args.num_loops):
+                        z_s, p_out, l_out, h_out, cd_out, pr_out, lat_out = m_p.forward_core_step(z_s, h0_s, cm_s, m_p.step_idxs[s], apply_aux=True)
+                        loss_s = loss_s + l_out.float().pow(2).mean() + h_out.float().mean() * 0.01 + cd_out.float().pow(2).mean() * 0.01 + pr_out.float().pow(2).mean() * 0.01
+                        if lat_out is not None:
+                            loss_s = loss_s + lat_out[1].float().pow(2).mean() * 0.01
+                    pa = m_p.forward_prelude(ai_s, am_s, ac_s)
+                    ph = m_p.forward_prelude(hu_s, hm_s, hc_s)
+                    h0a, cma = pa[0], pa[-1]
+                    h0h, cmh = ph[0], ph[-1]
+                    za = pa[1] if m_p.mhc_streams > 1 else h0a
+                    zh = ph[1] if m_p.mhc_streams > 1 else h0h
+                    for s in range(args.num_loops):
+                        za, _, la, _, _, _, _ = m_p.forward_core_step(za, h0a, cma, m_p.step_idxs[s], apply_aux=True)
+                        zh, _, lh, _, _, _, _ = m_p.forward_core_step(zh, h0h, cmh, m_p.step_idxs[s], apply_aux=True)
+                        loss_s = loss_s + F.softplus(1.6 - (la.float() - lh.float())).mean() * 0.1
+                loss_s.backward()
+                torch.nn.utils.clip_grad_norm_(m_p.parameters(), 1.0)
+                opt_p.step()
+                torch.cuda.synchronize()
+                if it_idx == 1:
+                    step_ms_local = (time.monotonic() - t_iter) * 1000.0
+            return step_ms_local
+
+        for bs_cand in cand_list:
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+            if hasattr(torch, "_dynamo"):
+                torch._dynamo.reset()
+            ok = True
+            err_msg = ""
+            step_ms = 0.0
+            try:
+                step_ms = _probe_once(bs_cand)
+            except BaseException as exc:
+                ok = False
+                err_msg = f"{type(exc).__name__}: {str(exc)[:220]}"
+            peak_alloc = round(torch.cuda.max_memory_allocated() / (1024**3), 2)
+            peak_res = round(torch.cuda.max_memory_reserved() / (1024**3), 2)
+            fits = bool(ok and peak_res <= vram_cap_gib)
+            results.append({"batch_size": bs_cand, "ok": ok, "fits": fits, "peak_alloc_gib": peak_alloc, "peak_reserved_gib": peak_res, "step_ms": round(step_ms, 1), "err": err_msg})
+            gc.collect()
+            torch.cuda.empty_cache()
+            if fits and chosen == 0:
+                chosen = bs_cand
+                break
+        summary = {"gpu": gpu_name, "vram_gb": round(vram_gb, 2), "cap_gib": round(vram_cap_gib, 2), "compile": bool(args.compile), "chosen_batch_size": chosen, "results": results}
+        print("VRAM_PROBE_JSON " + json.dumps(summary, ensure_ascii=False), flush=True)
+        return
+
+    # ------------------------------------------------------------------
     # Load corpus & pre-tokenize
     # ------------------------------------------------------------------
     train_items_raw, eval_rows, pairs, _, intent_vecs = _load_training_bundle(
@@ -1268,7 +1390,7 @@ def train_and_export(args) -> None:
         )
 
     def make_loader(items: list[dict]) -> DataLoader:
-        nw = 4 if (os.name != "nt" and not args.smoke_test) else 0
+        nw = min(8, max(4, (os.cpu_count() or 4) - 2)) if (os.name != "nt" and not args.smoke_test) else 0
         kw = {"batch_sampler": BucketSampler([x["length"] for x in items], batch_size), "collate_fn": collate_train, "num_workers": nw, "pin_memory": True}
         if nw > 0:
             kw["persistent_workers"] = True
@@ -1323,7 +1445,9 @@ def train_and_export(args) -> None:
     test_dsh_all_enc, test_dsh_all_txts, test_dsh_all_scores = pre_encode_eval(test_dsh_all)
     probe_enc, probe_txts, probe_scores = pre_encode_eval(probe_rows)
 
-    def predict_all_steps_pt(model_eval: MeguvizV04DualLoopModel, enc_ids: list[list[int]], texts: list[str], bs: int = 512) -> tuple[np.ndarray, np.ndarray]:
+    eval_pt_bs = 1024 if vram_gb >= 60.0 else 512
+
+    def predict_all_steps_pt(model_eval: MeguvizV04DualLoopModel, enc_ids: list[list[int]], texts: list[str], bs: int = eval_pt_bs) -> tuple[np.ndarray, np.ndarray]:
         model_eval.eval()
         num_t = model_eval.num_loops
         n_total = len(enc_ids)
@@ -1481,7 +1605,8 @@ def train_and_export(args) -> None:
         sched = get_cosine_schedule_with_warmup(opt, max(1, int(total_steps * 0.08)), total_steps)
         scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
         rng_p = random.Random(20261124 + len(phase_name))
-        pair_bs = 24 if batch_size >= 512 else 12
+        pair_bs = max(12, min(48, int(round(12.0 * batch_size / 256.0))))
+        swa_every = max(20, min(50, len(loader) // 10))
         log_every = max(50, len(loader) // 4)
         t_p = time.monotonic()
         global_step = 0
@@ -1688,7 +1813,7 @@ def train_and_export(args) -> None:
                         for p_e, p_s in zip(ema_teacher.parameters(), mdl.parameters()):
                             p_e.data.mul_(0.995).add_(p_s.data, alpha=0.005)
 
-                if use_swa and ep >= num_epochs // 2 and (global_step % 50 == 0 or global_step == total_steps - 1):
+                if use_swa and ep >= num_epochs // 2 and (global_step % swa_every == 0 or global_step == total_steps - 1):
                     with torch.no_grad():
                         cur_sd = {k: v.detach().clone() for k, v in mdl.state_dict().items()}
                         if swa_state is None:
@@ -2174,6 +2299,7 @@ def main() -> None:
     parser.add_argument("--qat-lr", type=float, default=5e-6)
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--probe-vram", default="", help="Comma-separated candidate batch sizes for fast worst-case QAT+EMA VRAM probe (e.g. 1024,896,768,640,512)")
     args = parser.parse_args()
 
     if args.dry_run:
