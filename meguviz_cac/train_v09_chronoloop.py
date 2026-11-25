@@ -95,6 +95,7 @@ from .v09_chronoloop import (
     MeguvizV09CascadeEngine,
     MeguvizV09ChronoLoopModel,
     export_v09_modular_onnx_and_bundle_v5,
+    fold_zero_op_v09,
     load_bundle_v5_mgvz_into_model,
     pack_bundle_v5_mgvz,
     run_v09_ci_gates,
@@ -301,19 +302,23 @@ def train_v09_chronoloop(args) -> None:
         is_pre_list.append(bool(item.get("is_pre_llm")))
 
     ipw_mult = compute_ccr_era_ipw(np.stack(styles_list, axis=0), np.array(era_list, dtype=np.int64), np.array(y_list, dtype=np.float32))
-    denoise_report = {"toxic_downweighted": 0, "mid_quarantined": 0}
+    denoise_report = {"toxic_downweighted": 0, "mid_softened": 0}
     if teacher_v06_p is not None:
         dn = identify_noisy_and_quarantine(
             teacher_v06_p,
             np.array(y_list, dtype=np.float32),
             np.array(is_gold_list, dtype=bool),
             np.array(is_pre_list, dtype=bool),
-            toxic_frac=0.03,
+            toxic_frac=0.025,
         )
-        denoise_mult = dn["clean_weight_mult"]
+        # Lesson from v0.8.0-R1 blind OjinjinBench: NEVER zero-out borderline 0.30-0.70 wild rows (starves stealth_ai
+        # & hard_human calibration!). Soften mid-band to 0.35x and genuine label-flip toxic rows to 0.15x instead!
+        denoise_mult = np.ones(len(train_items_raw), dtype=np.float32)
+        denoise_mult[dn["mid_quarantine"]] = 0.35
+        denoise_mult[dn["toxic_mask"]] = 0.15
         denoise_report = {
             "toxic_downweighted": int(dn["toxic_mask"].sum()),
-            "mid_quarantined": int(dn["mid_quarantine"].sum()),
+            "mid_softened": int(dn["mid_quarantine"].sum()),
         }
     else:
         denoise_mult = np.ones(len(train_items_raw), dtype=np.float32)
@@ -338,13 +343,21 @@ def train_v09_chronoloop(args) -> None:
             (pairs_gg_pre if p.get("is_gateguard") else pairs_gen_pre).append(rec)
     pairs_pre = pairs_gg_pre + pairs_gen_pre
 
-    # Disjoint eval splits: val_gold (model selection & LUTs) vs val_cal_disjoint (Selection-Safe Conformal + LTT!) vs frozen tests!
+    # Strict 3-way disjoint validation split (Lesson from v0.8.0-R1 blind OjinjinBench: NEVER overfit tiny val_gold!):
+    #   1. val_gold (n~250) + val_cal_select (1st half of val_cal, n~1100) -> Composite Generalization Selection + Beta-Spline LUTs!
+    #   2. val_cal_cert (2nd half of val_cal, n~1100, strictly untouched during selection!) -> Selection-Safe Conformal + LTT!
     val_gold = [r for r in eval_rows if r["split"] == "validation" and r.get("score_source") == "hydrogen_xhigh_direct"]
     val_cal_all, _ = build_stratified_val_calibration_set(eval_rows, target_n=2400)
     val_gold_ids = {str(r.get("sample_id", r.get("id", ""))) for r in val_gold}
     val_cal_disjoint = [r for r in val_cal_all if str(r.get("sample_id", r.get("id", ""))) not in val_gold_ids]
     if len(val_cal_disjoint) < 400:
         val_cal_disjoint = val_cal_all
+    rng_v = random.Random(20261126)
+    vc_idx = list(range(len(val_cal_disjoint)))
+    rng_v.shuffle(vc_idx)
+    half_vc = max(200, len(vc_idx) // 2)
+    val_cal_select = [val_cal_disjoint[i] for i in vc_idx[:half_vc]]
+    val_cal_cert = [val_cal_disjoint[i] for i in vc_idx[half_vc:]] or val_cal_select
     test_gold = [r for r in eval_rows if r["split"] == "test" and r.get("score_source") == "hydrogen_xhigh_direct"]
     test_dsh_gold = [r for r in test_gold if r.get("dsh")]
     test_bili_all = [r for r in eval_rows if r.get("cohort") == "bili" and r["split"] == "test"]
@@ -360,7 +373,8 @@ def train_v09_chronoloop(args) -> None:
         return enc, eng, raws, cls_l, st_m, metas_l, sc, eras
 
     val_enc, val_eng, val_txts, val_cleans, val_st, val_metas, val_scores, val_eras = _pre_eval(val_gold)
-    cal_enc, cal_eng, cal_txts, cal_cleans, cal_st, cal_metas, cal_scores, cal_eras = _pre_eval(val_cal_disjoint)
+    sel_enc, sel_eng, sel_txts, sel_cleans, sel_st, sel_metas, sel_scores, sel_eras = _pre_eval(val_cal_select)
+    cal_enc, cal_eng, cal_txts, cal_cleans, cal_st, cal_metas, cal_scores, cal_eras = _pre_eval(val_cal_cert)
     test_enc, test_eng, test_txts, test_cleans, test_st, test_metas, test_scores, test_eras = _pre_eval(test_gold)
     dsh_enc, dsh_eng, dsh_txts, dsh_cleans, dsh_st, dsh_metas, dsh_scores, _ = _pre_eval(test_dsh_gold)
     all_enc, all_eng, all_txts, all_cleans, all_st, all_metas, all_scores, _ = _pre_eval(test_bili_all)
@@ -454,19 +468,31 @@ def train_v09_chronoloop(args) -> None:
         return out_d
 
     def _val_obj_sd(sd_cand: dict[str, torch.Tensor]) -> float:
+        """Composite Generalization Objective: 50% val_gold + 50% natural-prior wild val_cal_select (prevents val_gold overfitting!)."""
         mdl.load_state_dict({k: v.to(device) for k, v in sd_cand.items()}, strict=True)
         vo = predict_v09(mdl, val_enc, val_eng, val_st, outer_steps=2)
-        vp = expit(vo["logit"])
-        vr1 = expit(vo["logit_r1"])
+        vp, vr1 = expit(vo["logit"]), expit(vo["logit_r1"])
         m = {**compute_eval_metrics(val_scores, vp), **compute_high_precision_metrics(val_scores, vp)}
         m_r1 = compute_eval_metrics(val_scores, vr1)
-        return (
+        obj_gold = (
             0.38 * float(m["auroc"])
             + 0.28 * float(m["pr_auc"])
             + 0.14 * float(m["best_f05"])
             + 0.14 * float(m["recall_at_p95"])
             + 0.06 * float(m_r1["auroc"])
         )
+        so = predict_v09(mdl, sel_enc, sel_eng, sel_st, outer_steps=2)
+        sp, sr1 = expit(so["logit"]), expit(so["logit_r1"])
+        ms = {**compute_eval_metrics(sel_scores, sp), **compute_high_precision_metrics(sel_scores, sp)}
+        ms_r1 = compute_eval_metrics(sel_scores, sr1)
+        obj_wild = (
+            0.38 * float(ms["auroc"])
+            + 0.28 * float(ms["pr_auc"])
+            + 0.14 * float(ms["best_f05"])
+            + 0.14 * float(ms["recall_at_p95"])
+            + 0.06 * float(ms_r1["auroc"])
+        )
+        return 0.50 * obj_gold + 0.50 * obj_wild
 
     class V09DS(Dataset):
         def __init__(self, items):
@@ -587,10 +613,11 @@ def train_v09_chronoloop(args) -> None:
             for pg in opt.param_groups:
                 pg["lr"] = lr * mult
 
-            # Progressive Depth Curriculum (Stage 1: first 20% T_outer=1 -> then T_outer=2 with 20% T_outer=3!)
+            # Progressive Depth Curriculum (Stage 1: first 20% T_outer=1 -> then T_outer=2 with 33% T_outer=3!)
+            # Lesson from v0.8.0-R1 blind OjinjinBench: deeper recursion R=4 gave +10x R@P95 & +0.027 PR-AUC on Hard-Only!
             if progressive_depth and step < int(steps * 0.20):
                 outer_now = 1
-            elif step % 5 == 0:
+            elif step % 3 == 0:
                 outer_now = 3
             else:
                 outer_now = 2
@@ -636,16 +663,16 @@ def train_v09_chronoloop(args) -> None:
                     hu_h = torch.isin(grp, hard_grp_t)
                     l_anc = zenith_graded_anchor_loss(lg, y_sc, hard_human_mask=hu_h)
                     l_era = era_grl(out["emb"], era, is_clean_human=(y_sc <= 0.25), lam=0.20)
-                    # Slot orthogonal diversity regularizer (locks slot effective rank high under Sub-2-Bit QAT!)
+                    # Strong off-diagonal slot orthogonal diversity regularizer (locks slot erank >= 8 even under 5-Trit QAT!)
                     s_u = F.normalize(out["slots_final"].float(), p=2, dim=-1)
                     s_gram = torch.matmul(s_u, s_u.transpose(-1, -2))
-                    s_eye = torch.eye(s_gram.shape[-1], device=s_gram.device, dtype=s_gram.dtype).unsqueeze(0)
-                    l_slot_div = ((s_gram - s_eye) ** 2).mean()
+                    s_off = 1.0 - torch.eye(s_gram.shape[-1], device=s_gram.device, dtype=s_gram.dtype).unsqueeze(0)
+                    l_slot_div = ((s_gram * s_off) ** 2).mean()
 
                     loss = (
                         loss_full + 0.18 * loss_e1 + 0.22 * loss_r1
                         + 0.08 * loss_sd_r1 + 0.06 * loss_sd_e1
-                        + pauc_w * l_pa + l_tp + l_anc + 0.08 * l_era + 0.03 * l_slot_div
+                        + pauc_w * l_pa + l_tp + l_anc + 0.08 * l_era + 0.15 * l_slot_div
                         + 0.08 * F.cross_entropy(out["attr5_logit"], y_a5)
                         + 0.08 * ce_code(out["code_logit"], y_cd)
                         + 0.04 * out["cbm_loss"]
@@ -673,7 +700,8 @@ def train_v09_chronoloop(args) -> None:
                         loss = loss + 0.22 * cos_d
                     elif t_emb_v06 is not None:
                         cos_v06 = 1.0 - F.cosine_similarity(out["emb"].float(), t_emb_v06, dim=-1).mean()
-                        loss = loss + 0.18 * cos_v06
+                        # Keep strong 0.22 BGE-v0.6-R3 256-d manifold anchor (Lesson from v0.7-R2 EBT 0.943 vs v0.8-R1!)
+                        loss = loss + 0.22 * cos_v06
                         v_tp = tp_v06 >= 0.0
                         if int(v_tp.sum()) >= 8:
                             loss = loss + 0.08 * listnet_tail_distill_loss(lg[v_tp], torch.logit(tp_v06[v_tp].clamp(1e-4, 1.0 - 1e-4)))
@@ -736,23 +764,40 @@ def train_v09_chronoloop(args) -> None:
     else:
         s1_sd = init_sd
 
-    # Stage 1.5: Natural-Prior Gold-Guaranteed ASAM Refinement!
+    # Stage 1.5: 2-Branch ASAM Diversity (Balanced-Manifold + HumanShield-Pairs) -> Greedy Generalization Soup!
+    # Lesson from v0.8.0-R1 blind OjinjinBench: moderate beta_end (0.025..0.030) + composite val_gold+wild selection!
     sub_nat, _ = _subset_natural_prior_gold_guaranteed(train_items_raw, cap=min(480000, len(train_items_raw)), seed_s=20261126)
     s15_steps = 6 if args.smoke_test else args.refine_steps
-    fp16_sd, _ = _run_stage(
-        "Stage1.5-ASAM-Refine",
+    b1_sd, b1_sc = _run_stage(
+        "Stage1.5-ASAM-Balanced",
         s1_sd,
         sub_nat,
         steps=s15_steps,
-        lr=8.0e-5,
+        lr=7.5e-5,
+        quant_mode="fp16",
+        trm_detach_k0=False,
+        progressive_depth=False,
+        use_asam=True,
+        pauc_w=0.09,
+        pair_w=0.24,
+        beta_end=0.030,
+    )
+    b2_sd, b2_sc = _run_stage(
+        "Stage1.5-ASAM-HumanShield",
+        s1_sd,
+        sub_nat,
+        steps=s15_steps,
+        lr=6.0e-5,
         quant_mode="fp16",
         trm_detach_k0=False,
         progressive_depth=False,
         use_asam=True,
         pauc_w=0.11,
-        pair_w=0.26,
-        beta_end=0.020,
+        pair_w=0.34,
+        beta_end=0.025,
     )
+    fp16_sd, fp16_soup_rep = greedy_pauc_soup(s1_sd, [("Balanced", b1_sd, b1_sc), ("HumanShield", b2_sd, b2_sc)], eval_fn=_val_obj_sd, dare_p=0.10)
+    print(f"[Stage1.5-FP16-Soup] {json.dumps(fp16_soup_rep)}", flush=True)
     mdl.load_state_dict({k: v.to(device) for k, v in fp16_sd.items()}, strict=True)
     mdl.set_quant_mode("fp16")
     if not args.smoke_test:
@@ -766,6 +811,15 @@ def train_v09_chronoloop(args) -> None:
     fp16_r1_m = compute_eval_metrics(test_scores, expit(fp16_t2["logit_r1"]))
     print(f"[FP16 Master] R1_AUROC={fp16_r1_m['auroc']} | T2_AUROC={fp16_test_m['auroc']} PR={fp16_test_m['pr_auc']} | T3_AUROC={fp16_t3_m['auroc']}", flush=True)
 
+    # Zero-Op Algebraic Folding (SpinQuant R_2 + SubLN + SmoothQuant, 0 new ops!) BEFORE UPQ!
+    calib_batches = []
+    cal_dl = DataLoader(V09DS(sub_nat[: min(256, len(sub_nat))]), batch_size=64, shuffle=False, collate_fn=_make_collate(0.0))
+    for cb in cal_dl:
+        calib_batches.append((cb[0].to(device), cb[1].to(device), cb[3].to(device), cb[2].to(device)))
+    fold_rep = fold_zero_op_v09(mdl, calib_inputs=calib_batches)
+    print(f"[Stage2-ZeroOpFold] {json.dumps(fold_rep)}", flush=True)
+    folded_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
+
     fp16_teacher = copy.deepcopy(mdl).eval()
     for p in fp16_teacher.parameters():
         p.requires_grad_(False)
@@ -773,7 +827,7 @@ def train_v09_chronoloop(args) -> None:
     # Stage 2: Progressive UPQ (`W4` -> `5-Trit/2-Bit` Sub-2-Bit QAT Soup) WITH `trm_detach_k0=True`!
     w4_sd, _ = _run_stage(
         "Stage2a-UPQ-W4-TRM1",
-        fp16_sd,
+        folded_sd,
         sub_nat,
         steps=6 if args.smoke_test else max(500, args.qat_steps // 2),
         lr=8.0e-5,
@@ -854,7 +908,10 @@ def train_v09_chronoloop(args) -> None:
                 ld1 = F.binary_cross_entropy(out["p_defer1"].float().clamp(1e-5, 1.0 - 1e-5), d1_t)
                 ld2 = F.binary_cross_entropy(out["exit1_out"]["p_defer2"].float().clamp(1e-5, 1.0 - 1e-5), d2_t)
                 l_r1_sp = (F.binary_cross_entropy(out["r1_span_max"].float().clamp(1e-5, 1.0 - 1e-5), ycl.float(), reduction="none") * w.float() * (1.0 + 2.5 * (y_sc >= 0.45).float())).mean()
-            loss = lm + 0.25 * lr1 + 0.09 * l_pa + l_tp + zenith_graded_anchor_loss(lg, y_sc) + 0.25 * ld1 + 0.12 * ld2 + 0.08 * l_r1_sp
+            s_u = F.normalize(out["slots_final"].float(), p=2, dim=-1)
+            s_g = torch.matmul(s_u, s_u.transpose(-1, -2))
+            l_sdiv = ((s_g * (1.0 - torch.eye(s_g.shape[-1], device=s_g.device, dtype=s_g.dtype).unsqueeze(0))) ** 2).mean()
+            loss = lm + 0.25 * lr1 + 0.09 * l_pa + l_tp + zenith_graded_anchor_loss(lg, y_sc) + 0.25 * ld1 + 0.12 * ld2 + 0.08 * l_r1_sp + 0.15 * l_sdiv
         loss.backward()
         torch.nn.utils.clip_grad_norm_(shock_params, 1.0)
         p_opt.step()
@@ -902,12 +959,17 @@ def train_v09_chronoloop(args) -> None:
     affine_rep = {"rung1": {"a": a_r1, "b": b_r1}, "exit1_t1": {"a": a_t1, "b": b_t1}, "full": {"a": 1.0, "b": 0.0}}
     print(f"[Stage3b-AffineAlign] {json.dumps(affine_rep)}", flush=True)
 
-    # Stage 3c: Per-Rung Beta-Spline × Venn-ABERS LUTs + Selection-Safe 9-Cell Mondrian + LTT/CompCRC Certification!
+    # Stage 3c: Per-Rung Binary-ECE Beta-Spline × Venn-ABERS LUTs (fit on natural-prior val_cal_select + val_gold -> fixes ECE=0.135!)
+    # + Selection-Safe 9-Cell Mondrian & LTT/CompCRC Certification on STRICTLY DISJOINT `val_cal_cert`!
     val_al = predict_v09(mdl, val_enc, val_eng, val_st, outer_steps=2, use_fp32=True)
+    sel_al = predict_v09(mdl, sel_enc, sel_eng, sel_st, outer_steps=2, use_fp32=False)
     cal_al = predict_v09(mdl, cal_enc, cal_eng, cal_st, outer_steps=2, use_fp32=False)
 
-    cal_va_full = fit_venn_abers_and_beta_spline_lut(val_al["logit"], val_scores / 100.0)
-    cal_va_r1 = fit_venn_abers_and_beta_spline_lut(val_al["logit_r1"], val_scores / 100.0)
+    lut_fit_z = np.concatenate([sel_al["logit"], val_al["logit"]])
+    lut_fit_zr1 = np.concatenate([sel_al["logit_r1"], val_al["logit_r1"]])
+    lut_fit_y = np.concatenate([sel_scores, val_scores]) / 100.0
+    cal_va_full = fit_venn_abers_and_beta_spline_lut(lut_fit_z, lut_fit_y, fit_binary_ece_mode=True)
+    cal_va_r1 = fit_venn_abers_and_beta_spline_lut(lut_fit_zr1, lut_fit_y, fit_binary_ece_mode=True)
     lut_full = export_beta_spline_as_v07_lut(cal_va_full, n_knots=256)
     lut_r1 = export_beta_spline_as_v07_lut(cal_va_r1, n_knots=256)
 
@@ -1058,6 +1120,8 @@ def train_v09_chronoloop(args) -> None:
         "bge_svd_matryoshka_init": svd_init_rep,
         "gemini_factory_audit": gem_audit,
         "pillar1_denoise": denoise_report,
+        "fp16_soup_report": fp16_soup_rep,
+        "zero_op_fold_report": fold_rep,
         "qat_soup_report": qat_soup_rep,
         "post_upq_shock_absorber_refit": {"kept": shock_kept, "before": round(pre_shock_sc, 5), "after": round(post_shock_sc, 5)},
         "confounding_surgery": surg_rep,

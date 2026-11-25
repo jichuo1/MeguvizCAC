@@ -449,7 +449,7 @@ class MeguvizV09ChronoLoopModel(nn.Module):
 
         # Cached-KV Cross-Attention Workbench (precomputed ONCE -> reused by ALL outer Active Re-Reads!)
         self.slot_queries = nn.Parameter(torch.empty(1, NUM_SLOTS_V09, hidden_size))
-        nn.init.orthogonal_(self.slot_queries.data[0], gain=0.6)
+        nn.init.orthogonal_(self.slot_queries.data[0], gain=1.0)
         self.slot_k = OmniQuantLinear(hidden_size, hidden_size, target_bits="seq2", group_size=128)
         self.slot_v = OmniQuantLinear(hidden_size, hidden_size, target_bits="seq2", group_size=128)
         self.slot_o = OmniQuantLinear(hidden_size, hidden_size, target_bits="seq2", group_size=128)
@@ -747,8 +747,103 @@ class MeguvizV09ChronoLoopModel(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# 5. Bundle v5 (`MGVZ5`) Sub-2-Bit Packer & Bit-Exact Unpacker (<= 2.20 MB!)
+# 5. Zero-Op Algebraic Folding (SpinQuant R_2 + SubLN + SmoothQuant, 0 new ops!)
+#    & Bundle v5 (`MGVZ5`) Sub-2-Bit Packer / Bit-Exact Unpacker (<= 2.20 MB!)
 # ---------------------------------------------------------------------------
+
+def _hadamard_64() -> torch.Tensor:
+    h = np.array([[1.0]], dtype=np.float32)
+    while h.shape[0] < 64:
+        h = np.block([[h, h], [h, -h]]) / math.sqrt(2.0)
+    return torch.from_numpy(h)
+
+
+@torch.no_grad()
+def fold_zero_op_v09(
+    model: MeguvizV09ChronoLoopModel,
+    calib_inputs: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] | None = None,
+    smooth_alpha: float = 0.5,
+) -> dict[str, Any]:
+    """Mathematically equivalent ZERO-OP offline algebraic folds for MeguvizV09ChronoLoopModel before UPQ!
+
+    Applies:
+      1. Per-head orthogonal Walsh-Hadamard R_2 in O(64) on `chrono_core` (6 heads) AND `prelude_l0` prefix (2 SWA heads)
+         after absorbing `sub_ln` into output projections -> crushes V/O outliers before 2-bit SEQ quantization!
+      2. Exact `SubLN` diagonal absorption into `w_down` / `ffn_c_down` across ALL FFN blocks -> tightens 5-Trit scales!
+      3. SmoothQuant diagonal channel equalization on `prelude_l1.norm2 -> (ffn.w_up, lora_moe.down)`.
+    """
+    h64 = _hadamard_64()
+    folded_r2 = 0
+    folded_subln = 0
+    folded_smooth = 0
+
+    def _rotate_vo(v_lin: nn.Linear, o_lin: nn.Linear, sub_ln: RMSNorm, n_heads: int) -> None:
+        dev = v_lin.weight.device
+        dt = v_lin.weight.dtype
+        sw = sub_ln.weight.detach().float()
+        o_lin.weight.data.copy_((o_lin.weight.detach().float() * sw.unsqueeze(0)).to(dt))
+        sub_ln.weight.data.fill_(1.0)
+        r2 = torch.block_diag(*([h64] * n_heads)).to(dev)
+        v_lin.weight.data.copy_((r2.T @ v_lin.weight.detach().float()).to(dt))
+        if v_lin.bias is not None:
+            v_lin.bias.data.copy_((v_lin.bias.detach().float() @ r2).to(dt))
+        o_lin.weight.data.copy_((o_lin.weight.detach().float() @ r2).to(dt))
+
+    # 1a. ChronoLoopCoreM35 6-head attention R_2
+    _rotate_vo(model.chrono_core.v_proj, model.chrono_core.o_proj, model.chrono_core.sub_ln_attn, model.chrono_core.num_heads)
+    folded_r2 += 1
+    # 1b. BLT-Matryoshka Prelude L0 Prefix 2-head SWA R_2 (preserves V9-L1 bit-exact prefix invariance!)
+    _rotate_vo(model.prelude_l0.v_p, model.prelude_l0.o_p, model.prelude_l0.sub_ln_p, model.prelude_l0.swa_heads)
+    folded_r2 += 1
+
+    # 2. Absorb ALL FFN SubLN diagonal scales into down-projections (0 new ops!)
+    for mod in model.modules():
+        if hasattr(mod, "w_up") and hasattr(mod, "sub_ln") and hasattr(mod, "w_down"):
+            dt = mod.w_down.weight.dtype
+            sw = mod.sub_ln.weight.detach().float()
+            mod.w_down.weight.data.copy_((mod.w_down.weight.detach().float() * sw.unsqueeze(0)).to(dt))
+            mod.sub_ln.weight.data.fill_(1.0)
+            folded_subln += 1
+    # Plus BLT Prelude L0 Complement FFN SubLN
+    p0 = model.prelude_l0
+    dt_c = p0.ffn_c_down.weight.dtype
+    sw_c = p0.ffn_c_subln.weight.detach().float()
+    p0.ffn_c_down.weight.data.copy_((p0.ffn_c_down.weight.detach().float() * sw_c.unsqueeze(0)).to(dt_c))
+    p0.ffn_c_subln.weight.data.fill_(1.0)
+    folded_subln += 1
+
+    # 3. SmoothQuant diagonal fold on Prelude L1 norm2 -> (ffn.w_up, lora_moe.down)
+    act_max: torch.Tensor | None = None
+    if calib_inputs:
+        def _hk(_m, _inp, out):
+            nonlocal act_max
+            mx = out.detach().float().abs().amax(dim=(0, 1))
+            act_max = mx if act_max is None else torch.maximum(act_max, mx)
+
+        h = model.prelude_l1.norm2.register_forward_hook(_hk)
+        model.eval()
+        for ids_t, m_t, st_t, eng_t in calib_inputs:
+            _ = model(ids_t, m_t, st_t, engram_ids=eng_t, outer_steps=2, return_aux=False)
+        h.remove()
+
+    b1 = model.prelude_l1
+    dt1 = b1.ffn.w_up.weight.dtype
+    w_abs = b1.ffn.w_up.weight.detach().float().abs().amax(dim=0).clamp(min=1e-4)
+    x_abs = (act_max.to(w_abs.device) if act_max is not None else torch.ones_like(w_abs)).clamp(min=1e-4)
+    s = (x_abs.pow(smooth_alpha) / w_abs.pow(1.0 - smooth_alpha)).clamp(0.25, 4.0)
+    b1.norm2.gamma.data.copy_((b1.norm2.gamma.detach().float() / s).to(dt1))
+    b1.norm2.beta.data.copy_((b1.norm2.beta.detach().float() / s).to(dt1))
+    b1.ffn.w_up.weight.data.copy_((b1.ffn.w_up.weight.detach().float() * s.unsqueeze(0)).to(dt1))
+    b1.lora_moe.down.data.copy_((b1.lora_moe.down.detach().float() * s.view(1, -1, 1)).to(dt1))
+    folded_smooth += 1
+
+    return {
+        "folded_spinquant_r2_blocks": folded_r2,
+        "folded_subln_ffn_blocks": folded_subln,
+        "folded_smoothquant_blocks": folded_smooth,
+        "new_runtime_ops_added": 0,
+    }
+
 
 def pack_bundle_v5_mgvz(model: MeguvizV09ChronoLoopModel, out_path: Path) -> dict[str, Any]:
     """Pack MeguvizV09ChronoLoopModel into TRUE binary 5-Trit/2-Bit SEQ Bundle v5 (`MGVZ5`, W_12 omitted!)."""

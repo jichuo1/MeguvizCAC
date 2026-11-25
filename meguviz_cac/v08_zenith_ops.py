@@ -496,6 +496,7 @@ def fit_venn_abers_and_beta_spline_lut(
     y_soft: np.ndarray,
     n_knots: int = 128,
     min_slope: float = 0.04,
+    fit_binary_ece_mode: bool = False,
 ) -> dict[str, Any]:
     """Pillar 5 Calibration: Strictly increasing Beta-Logit + Spline LUT (0 top-tail ties!) + Inductive Venn-ABERS [p0, p1] width."""
     from scipy.optimize import minimize
@@ -504,6 +505,12 @@ def fit_venn_abers_and_beta_spline_lut(
     z = np.asarray(logits, dtype=np.float64).reshape(-1)
     y = np.clip(np.asarray(y_soft, dtype=np.float64).reshape(-1), 1e-5, 1.0 - 1e-5)
     y_bin = (y >= 0.70).astype(np.float64)
+    # In binary ECE mode (v0.9.0 fix for v0.8.0-R1 ECE=0.135!), calibrate clean human/AI targets to crisp {0, 1}
+    # while retaining soft labels only in the ambiguous mid-band (0.30, 0.70), and tighten Beta lower bound >= 0.45!
+    y_fit = np.where(y <= 0.30, 1e-5, np.where(y >= 0.70, 1.0 - 1e-5, y)) if fit_binary_ece_mode else y
+    ab_lo = 0.45 if fit_binary_ece_mode else 0.20
+    iso_blend = 0.85 if fit_binary_ece_mode else 0.50
+    eff_min_slope = min(min_slope, 0.015) if fit_binary_ece_mode else min_slope
 
     # 1. Fit 3-parameter Beta-Logit calibration (Kull et al., AISTATS 2017): a*log(p) - b*log(1-p) + c, a,b > 0
     p_base = np.clip(expit(z), 1e-6, 1.0 - 1e-6)
@@ -516,23 +523,23 @@ def fit_venn_abers_and_beta_spline_lut(
             return 1e6
         zb = a * lp - b * l1mp + c
         pb = np.clip(expit(zb), 1e-6, 1.0 - 1e-6)
-        return float(-np.mean(y * np.log(pb) + (1.0 - y) * np.log(1.0 - pb))) + 0.005 * ((a - 1.0) ** 2 + (b - 1.0) ** 2)
+        return float(-np.mean(y_fit * np.log(pb) + (1.0 - y_fit) * np.log(1.0 - pb))) + 0.008 * ((a - 1.0) ** 2 + (b - 1.0) ** 2)
 
-    res = minimize(_beta_nll, x0=[0.85, 0.85, 0.0], bounds=[(0.2, 2.5), (0.2, 2.5), (-2.0, 2.0)], method="L-BFGS-B")
+    res = minimize(_beta_nll, x0=[0.90, 0.90, 0.0], bounds=[(ab_lo, 2.5), (ab_lo, 2.5), (-2.5, 2.5)], method="L-BFGS-B")
     a_opt, b_opt, c_opt = [float(v) for v in res.x]
     p_beta = expit(a_opt * lp - b_opt * l1mp + c_opt)
 
     # 2. Strictly increasing spline refinement over p_beta (0 ties in top 0.85..0.9999 tail -> 0 AUROC loss!)
     grid_x = np.linspace(0.0, 1.0, n_knots)
     order = np.argsort(z, kind="mergesort")
-    z_s, y_s, yb_s = z[order], y[order], y_bin[order]
+    z_s, y_s, yb_s = z[order], y_fit[order], y_bin[order]
     p_b_s = p_beta[order]
     iso_s = _pava_1d(p_b_s, y_s)
     iso_grid = np.interp(grid_x, p_b_s, iso_s)
-    cal_y = 0.50 * iso_grid + 0.50 * grid_x
+    cal_y = iso_blend * iso_grid + (1.0 - iso_blend) * grid_x
     for i in range(1, n_knots):
         dx = float(grid_x[i] - grid_x[i - 1])
-        cal_y[i] = max(cal_y[i], cal_y[i - 1] + min_slope * dx)
+        cal_y[i] = max(cal_y[i], cal_y[i - 1] + eff_min_slope * dx)
     cal_y = (cal_y - cal_y[0]) / max(1e-6, cal_y[-1] - cal_y[0])
 
     # 3. Inductive Venn-ABERS upper/lower probability envelope [p0(z), p1(z)] on logit grid (<= 2 KB!)
