@@ -6,12 +6,12 @@ set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-/content/MeguvizCAC}"
 DATA_DIR="${DATA_DIR:-/content/data}"
-OUT_DIR="${OUT_DIR:-/content/out_v06_r2}"
+OUT_DIR="${OUT_DIR:-/content/out_v06_r3}"
 DRIVE_DIR="${DRIVE_DIR:-/content/drive/MyDrive/MeguvizCAC/v060_hyperloop}"
-LOG_DRIVER="${LOG_DRIVER:-/content/log_v06_r2_driver.txt}"
-LOG_TRAIN="${LOG_TRAIN:-/content/log_v06_r2_full.txt}"
-DONE_JSON="${DONE_JSON:-/content/v06_r2_done.json}"
-VERSION="${VERSION:-v0.6.0-r2-hyperloop-b3}"
+LOG_DRIVER="${LOG_DRIVER:-/content/log_v06_r3_driver.txt}"
+LOG_TRAIN="${LOG_TRAIN:-/content/log_v06_r3_full.txt}"
+DONE_JSON="${DONE_JSON:-/content/v06_r3_done.json}"
+VERSION="${VERSION:-v0.6.0-r3-hyperloop-b3}"
 
 mkdir -p "$OUT_DIR" "$DRIVE_DIR"
 cd "$REPO_DIR"
@@ -47,17 +47,23 @@ else
   echo "[$(date +%H:%M:%S)] CLEAN_INIT from pristine BAAI/bge-small-zh-v1.5 (zero era-shortcut contamination!)" | tee -a "$LOG_DRIVER"
 fi
 
+RESUME_ARGS=()
+if [ -n "${RESUME_STAGE1_CKPT:-}" ] && [ -f "${RESUME_STAGE1_CKPT}" ]; then
+  RESUME_ARGS+=(--resume-stage1 "${RESUME_STAGE1_CKPT}")
+  echo "[$(date +%H:%M:%S)] RESUME_STAGE1 using ${RESUME_STAGE1_CKPT} (skipping Stage 0/1 -> fast ~5 min R3 polish!)" | tee -a "$LOG_DRIVER"
+fi
+
 GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)"
 VRAM_MB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n 1 | tr -d ' ')"
 if [ "${VRAM_MB:-0}" -ge 35000 ]; then
   CAND_BS="${CAND_BS_OVERRIDE:-512,384,256}"
-  S1_EPOCHS="${S1_EPOCHS_OVERRIDE:-2}"; MOHAWK_STEPS=350; S2_STEPS=2000; QAT_STEPS=2200
+  S1_EPOCHS="${S1_EPOCHS_OVERRIDE:-2}"; MOHAWK_STEPS=350; S2_STEPS="${S2_STEPS_OVERRIDE:-1100}"; QAT_STEPS="${QAT_STEPS_OVERRIDE:-1100}"
 elif [ "${VRAM_MB:-0}" -ge 20000 ]; then
   CAND_BS="${CAND_BS_OVERRIDE:-384,256,192}"
-  S1_EPOCHS=2; MOHAWK_STEPS=300; S2_STEPS=1800; QAT_STEPS=2000
+  S1_EPOCHS=2; MOHAWK_STEPS=300; S2_STEPS="${S2_STEPS_OVERRIDE:-1100}"; QAT_STEPS="${QAT_STEPS_OVERRIDE:-1100}"
 else
   CAND_BS="${CAND_BS_OVERRIDE:-192,128,96}"
-  S1_EPOCHS=2; MOHAWK_STEPS=250; S2_STEPS=1600; QAT_STEPS=1800
+  S1_EPOCHS=2; MOHAWK_STEPS=250; S2_STEPS="${S2_STEPS_OVERRIDE:-1000}"; QAT_STEPS="${QAT_STEPS_OVERRIDE:-1000}"
 fi
 echo "[$(date +%H:%M:%S)] GPU_DETECTED name=\"$GPU_NAME\" vram_mb=$VRAM_MB -> cands=$CAND_BS mohawk=$MOHAWK_STEPS epochs=$S1_EPOCHS s2=$S2_STEPS qat=$QAT_STEPS" | tee -a "$LOG_DRIVER"
 
@@ -89,6 +95,7 @@ python3 -u -m meguviz_cac.train_v06_hyperloop \
   --gateguard-data "$REPO_DIR/meguviz_cac/data/v05-gateguard-pairs.jsonl" \
   "${EXTRA_PAIR_ARGS[@]}" \
   "${WARMSTART_ARGS[@]}" \
+  "${RESUME_ARGS[@]}" \
   --intent-cache "$DATA_DIR/v04_semantic_intent_cache.npz" \
   --out "$OUT_DIR" \
   --checkpoint-dir "$DRIVE_DIR" \
@@ -102,17 +109,17 @@ python3 -u -m meguviz_cac.train_v06_hyperloop \
   --epochs "$S1_EPOCHS" \
   --stage2-steps "$S2_STEPS" \
   --qat-steps "$QAT_STEPS" \
-  --stage2-cap 420000 \
-  --qat-cap 380000 \
+  --stage2-cap 480000 \
+  --qat-cap 420000 \
   --batch-size "$BS" \
   --lr 3.2e-5 \
-  --refine-lr 1.4e-5 \
-  --qat-lr 5.0e-6 \
+  --refine-lr "${REFINE_LR_OVERRIDE:-7.5e-6}" \
+  --qat-lr "${QAT_LR_OVERRIDE:-3.5e-6}" \
   2>&1 | tee "$LOG_TRAIN"
 
 echo "[$(date +%H:%M:%S)] DONE v0.6.0-HyperLoop training batch=$BS" | tee -a "$LOG_DRIVER"
 
-python3 - "$OUT_DIR" "$DRIVE_DIR" "$DONE_JSON" "$VERSION" "$BS" << 'PYEOF' | tee -a "$LOG_DRIVER"
+python3 - "$OUT_DIR" "$DRIVE_DIR" "$DONE_JSON" "$VERSION" "$BS" "$LOG_DRIVER" "$LOG_TRAIN" << 'PYEOF' | tee -a "$LOG_DRIVER"
 import hashlib, json, shutil, sys
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -165,7 +172,7 @@ for fn in (f"meguvizcac-{version}-int8.zip", f"meguvizcac-{version}-edge-w4.zip"
     src_z = out_dir / fn
     if src_z.is_file():
         shutil.copy2(src_z, drive_dir / fn)
-for lp in (Path("/content/log_v06_r2_driver.txt"), Path("/content/log_v06_r2_full.txt")):
+for lp in (Path(sys.argv[6]), Path(sys.argv[7])):
     if lp.is_file():
         shutil.copy2(lp, drive_dir / lp.name)
 sums = []

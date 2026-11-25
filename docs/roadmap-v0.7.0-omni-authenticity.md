@@ -58,7 +58,7 @@ flowchart TD
 | **可解释证据输出** | 概率 + Conformal 3-Way | 概率 + `Span-Refiner` 混写区间 | **零额外前向证据卡（`<0.02 ms`）：5 类归因 + 字符 Span + 可加概念贡献 + C2PA 验签** |
 | **极端低误报红线** | `R@P99% >= 50–60%` | `TPR@0.1%FPR >= 60%`, `R@P99% >= 75%` | **`TPR@0.1%FPR >= 78%` / `TPR@0.01%FPR >= 45%`（万分之一误杀红线！）** |
 | **Conformal 灰区率** | `@alpha=0.03 <= 18%` | `@alpha=0.03 <= 10%` | **`@alpha=0.01 <= 8%`（`SCoRE` E-Value + Mandap 全路径保形风险控制）** |
-| **全包体量与双硅靶真实端到端延迟** | `<= 6.5 MB` / `<= 1.8 ms` 1T | `<= 11.5 MB` Edge-W4 / `~3.3 ms` 1T | **`1.976–2.141 MB <= 2.20 MB`（`ReLU² 5-Trit + 2-Bit SEQ, g=128`）/ 真端到端含宿主：NPU `0.024–0.035 ms` / WebGPU `0.045–0.082 ms` / 1T CPU `0.16–0.40 ms`** |
+| **全包体量与双硅靶真实端到端延迟** | `<= 6.5 MB` / `<= 1.8 ms` 1T | `<= 11.5 MB` Edge-W4 / `~3.3 ms` 1T | **`1.998–2.163 MB <= 2.20 MB`（含 12 项深度对抗/MV3 补丁 `+22.5 KB`；`ReLU² 5-Trit + 2-Bit SEQ, g=128`）/ 真端到端含宿主：NPU `0.026–0.038 ms` / WebGPU `0.048–0.083 ms` / 1T CPU `0.17–0.398 ms`** |
 | **整页 Token 效率与零填充打包** | 单字 WordPiece + 填充批 | 单字 WordPiece + 紧凑微批 | **多字词/16-bit 码点压缩 + `Prefix-KV` 整页复用（`29,564 -> 9,002 tok/视频`，`-69.55%` = `3.28×`）+ `0.00%` 填充 1D 打包流（GPU `33,067 r/s`）** |
 | **零 PII 隐私红线** | 零账号特征 | 形式化零 PII 群不变性 | **严格零 PII 不变性（`diff == 0.000000`）+ 临时记忆关页即毁** |
 
@@ -73,7 +73,7 @@ flowchart TD
     1. **$M_{\text{sub}}$**：吸收视频标题、简介与 ASR 字幕向量（可爬虫文本空间）；
     2. **$M_{\text{dm}}$**：用 **不可投毒的本地视听锚点**（按时间轴分散加权的高能弹幕流 + 关键帧微指纹）冷启动，并仅对通过 **有机信任门控** $w_t^{\text{org}} = (1 - p_t^{(0)})^2 \mathbb{I}[p_t^{(0)} < 0.25]$ 且经 **Huber 范数截断** $\psi_\delta(r_t)$ 的同屏有机评论做秩-1 闭式更新（`0.005 ms/条`，即便 50% 水军攻屏也零梯度污染！）。
 - **两大杀手级信号 + 2×2 局部/全局正交交互门控（经 RTX 4060 Ti 实证固化！）**：
-  1. **跨模态 RAG 水军裂缝**：$\Delta \mathcal{S}_i^{\text{RAG}} = \|r_i^{\text{dm}}\|_2 - \|r_i^{\text{sub}}\|_2$（低字幕惊奇度 + 高弹幕/画面惊奇度 -> 一击揭穿只读标题/字幕的 RAG Bot！在无弹幕新视频下由平滑置信掩码 $\sigma(\log(1+N_{\text{dm}})-2.0)$ 自动归零）。
+  1. **跨模态 RAG 水军裂缝**：$\Delta \mathcal{S}_i^{\text{RAG}} = \frac{N_{\text{dm,eff}}}{N_{\text{dm,eff}}+25}\cdot\mathbb{I}[L_{\text{sub}}\ge 16]\cdot(\|r_i^{\text{dm}}\|_2 - \|r_i^{\text{sub}}\|_2)$（低字幕惊奇度 + 高弹幕/画面惊奇度 -> 一击揭穿只读标题/字幕的 RAG Bot！采用经验贝叶斯 Kish 有效样本精度收缩取代早期 Sigmoid 掩码，修复 `N_dm=0` 时 `σ(-2)=0.1192 != 0` 的冷启动噪声泄漏，严格保证 `N_dm=0` 时输出 `=== 0.000000`）。
   2. **2×2 保护创意真人的交互门控**：仅在 **Conformal 灰区（`0.20 < p_base < 0.80`）或超短评（`<= 25` 字）** 内生效（遵循 RTX 4060 Ti 实证：避免全局加权给高确信样本引入方差），且强制交叉相乘局部视频惊奇度与全局曲率得分：
      $$\Delta \text{logit}_{\text{TTA}}(x) = \beta_{\text{tta}} \cdot \operatorname{ReLU}(S_{\text{vid}}(x) - \mu_{\text{vid}}) \cdot \operatorname{ReLU}(\Lambda_{\text{HC}}(z_0) - \tau_{\text{LLM}})$$
      于是 **脑洞大/小众梗真人**（高局部惊奇、负全局 AI 曲率）严格获 **`0.0` 误罚**，而 **套话隐蔽短 AI**（高局部惊奇、正全局 AI 曲率）精准拉响召回！
@@ -134,6 +134,34 @@ flowchart TD
    - 本地实证揭穿重大误区：当 `Nano-Draft` 早退 `70%` 短评后，剩下最难 `30%` 承载了 **`68.6%` 的总 Token**（而非 30%！），叠加 `2:1 Funnel` 后 1T CPU 真实端到端达 **`0.3976 ms/row`（`2,515 rows/sec`，较基线快 `6.58×`）**；而现有 Python/JS 预处理（`0.0718 ms`）若直接配 `0.048 ms` NPU 将占去 **`59.9%`** 耗时！
    - 终局方案：将 UTF-8 校验、32-d PIFE、归一化哈希、分词 Trie 与 **`0.155 MB` INT8 `Nano-Draft`** 全部融进 Content Script 内单个 `wasm32-simd128` 单遍内核，**`~76%` 清晰真人评论 0 IPC 本地秒结（`0.012–0.025 ms/row`）**，仅 `~24%` 疑难二进制帧经 `chrome.runtime.connect()` 直传 `COOP/COEP` Offscreen Document WebGPU 一次性批算。
 
+### 支柱八：十二大深度对抗、长文流式、Chrome MV3 生产与压缩桥盲区闭环（`+22.5 KB`，总包 `1.998–2.163 MB <= 2.20 MB`）
+> **深度审计来源**：[06_v07_deep_blindspots.md](file:///C:/Users/Administrator/.gemini/antigravity/brain/242df01f-00da-4879-a473-77ff33f0867a/scratch/arch_research/06_v07_deep_blindspots.md)（共封堵 7 大系统/对抗盲区 + 5 大生产级隐藏漏洞）。
+
+1. **Unicode 辅助平面零溢出 `PCP-16` × `SilverSpeak` 视觉欺骗反制（`+8.0 KB`, `+0.002 ms`）**：
+   - 复用永不合法的 UTF-16 代理空洞 **`0xD800–0xDFFF`（`2,048` 零冲突槽位）**，将 Top-512 B 站表情 & Emoji ZWJ/国旗簇（`😂👨‍💻🇨🇳`）、CJK Ext-B..I 与零 PII 结构哨兵无损压入 16-bit 流（`0` 溢出、`0` 代理污染）；
+   - 单遍折叠数学粗体（`U+1D400`）、全角、康熙部首，剥离隐形标签（`U+E0000`）/零宽/BiDi，配合 `8 KB` UTS #39 上下文混写同形字表（保护纯俄/希腊外语真人！）与 **4-d 对抗欺骗信标**——只要命中同形字或隐形标签即强制禁早退并反转放大 AI 取证信号。
+2. **抗三明治/后缀伪装 × `DeepSloth` 级联熔断（`+4.5 KB`, `+0.004 ms`）**：
+   - `Nano-Draft` 新增 **滑窗最大风险头（`W=32, S=16` `MaxPool1d` + 窗间突变方差）** 与硬门 `L_cp <= 48`，杜绝首尾包裹真人黑话（*“哈哈哈哈[doge]…三连支持”*）骗取假早退；
+   - 主干升级为 **引号门控连续跨度 `Top-1 MIL`（`w=8` tok）**（对任意长度真人前后包装 **`0.00%` 稀释**），并设置屏级 `DeepSloth` 熔断上限（单屏最多 `12` 条进 `R=3..6` 守住 120 Hz `<= 8.3 ms`）。
+3. **`2,048`-Token 重叠流式多块编码（`+0 KB` 磁盘 / `0 KB` 额外 KV RAM / 均摊 `+0.002 ms`）**：
+   - 针对 `>256` 长评（彻底根除 `Head-140+Tail-50` 中段截断藏匿），采用 **`224` 有效 + `±16` Halo = 静态 `[1, 256]`** 重叠分块（零重编译！），`SWA-32` 块内严格比特等价、前向 `Bi-DeltaProduct-2` 跨块传递 `32 KB` SRAM 态、配合 **在线 Flash-Cross-Attn `16-Slot` 累加器**（`12 KB` SRAM），达成 `O(N)` 恒定内存无损长文覆盖。
+4. **Chrome MV3 三层零污染 `V_kf` 契约（`+4.0 KB`, 均摊 `+0.0003 ms`）**：
+   - **绝不直接触碰 `<video>`**（避开 `*.bilivideo.com` CORS `SecurityError`、Widevine L1 DRM 封锁、跨进程限制与 `5–15 ms` `getImageData` 停顿）；
+   - Tier-A 由 Offscreen Document 借 `host_permissions` + 窄作用域 `declarativeNetRequest`（`initiatorDomains: [extensionId]` 注入 `Referer`）拉取 `api.bilibili.com/x/player/videoshot?index=1` 雪碧图 → `createImageBitmap` → `copyExternalImageToTexture` → `4 KB` WGSL 核按 Top-8 高能弹幕时刻提 `64-d` $V_{\text{kf}}$（`< 0.15 ms/视频`）；Tier-B 封面降级；Tier-C 离线无缝归零。
+5. **经验贝叶斯冷启动精确收缩 × 15 标签页单实例 Offscreen 温控隔离（`+0 KB`）**：
+   - `VideoFastMem` / `CMI` / `HypSheaf-ACDL` 统一采用 Kish 有效样本收缩 $\lambda(N_{\text{eff}})=N_{\text{eff}}/(N_{\text{eff}}+\kappa_0)$（`N=0` 严格 `=== 0.000000`）；
+   - 严守 Chrome MV3 **单 Profile 仅 1 个 Offscreen Document** 限制：4 级可见性优先级队列（后台隐藏标签页 100% 暂停）+ `6` 视频有界 LRU 池（`<= 96 KB` `VideoFastMem`，断连/淘汰强制 `.fill(0)` 物理清零）+ Chrome 125+ `PressureObserver` 4 档温控降级 + `device.lost` 指数退避与 `WASM-SIMD` 透明接管。
+6. **2026→2028 合规 `<= 32 KB` 签名热补丁 `MGVZ-DELTA v1`（`+3.0 KB` 主包热槽，`31.125 KB` OTA）**：
+   - 全部 JS/WASM/WGSL 静态固化在 CRX（100% 合规 Chrome Web Store MV3 RHC），仅热更纯二进制惰性权重（`24 KB Seq-LoRA-MoE` + `2 KB CBM` + `3 KB` 新热梗/同形字 + `2 KB` Conformal 校准），由 Chrome 137+ 原生 `crypto.subtle.verify("Ed25519")`（`0 B` 密码库）+ 单调版本号防降级验签，并配本地零 PII `E_OOD` 非交换性漂移安全阀。
+7. **`v0.6 (17.65M INT8) -> v0.7 (2.0 MB 亚 2-bit)` 8.5× 五阶段零崩塌压缩桥（`+0 KB`, `|ΔAUROC| <= 0.0022`）**：
+   - 冻结 BF16 教师（严禁蒸馏自 INT8）→ `Minitron` 尾部加权激活剪枝 + `ReLU²/SubLN` + `MiniLM` 注意力关系蒸馏 → `QuaRot/SpinQuant` 正交旋转消离群峰 → `UPQ (FP16->W4A8->5-Trit/2-Bit)` + `QuEST` + `BitDistill` + **白名单 `Two-Way pAUC` 锁尾** → 冻结量化骨干后置重训 `Seq-LoRA-MoE / EBT / CBM / Conformal`。
+8. **五大新检出生产级隐藏漏洞硬补丁（`#8A–#8E`, 合计 `+3.0 KB`）**：
+   - **`#8A`（P0 隐私）**：WASM 前端 DFA 将楼中楼 `回复 @用户名 :` 与正文 `@昵称` 折叠为 `<REPLY_HDR>/<MENTION>`，死守 `Username-Fuzz diff == 0.000000`；
+   - **`#8B`（P0 数值）**：Prelude `W_down` 前引入 **`Capped-ReLU² (τ=3.0)` + Hadamard**（或无屏障 `subgroupAdd` `SubLN`），防止 `ReLU²` 二次方离群峰（峰度 `>30`）击穿静态 INT8 QDQ；
+   - **`#8C`（P1 精度, `+3.0 KB`）**：`Span-Refiner` 增加 UNet 式全分辨率跳跃融合（复用已驻留 SRAM 的 L0 池化前表征），修复 `2:1 Funnel (L>32)` 带来的边界模糊，保卫 `Char-Span F1 >= 0.88`；
+   - **`#8D`（P1 数值）**：`HypSheaf-Thread` 庞加莱球（仅 `1 KB`）强制全 **`f32`** + 硬半径截断 $\|z\|_2 \le (1-10^{-3})/\sqrt{c}$ + `arcosh(max(1+1e-6, ...))`（或等价切换 Lorentz 双曲面 $\mathbb{H}_c^8$），消灭 40+ 层深楼 WebGPU `f16` `NaN`；
+   - **`#8E`（P1 DOM）**：Content Script 采用递归 `.shadowRoot` 遍历 `<bili-comments>`，并将 `<img alt="[doge]">` 还原为规范表情标签、同步脱敏 `a[data-user-profile-id]`。
+
 ---
 
 ## 四、不可突破的伦理与工程红线（Non-Goals & Epistemic Red Lines）
@@ -153,4 +181,6 @@ flowchart TD
 | **`V7-R1`：跨模态 CMI + 抗投毒 `VideoFastMem` 双盲压测** | `100k+` 真实观众评论 vs 仅读标题/字幕 RAG Bot 双盲对照池；50% 水军攻屏投毒仿真对比朴素 Titans-$L_2$ vs `MIRAS-Huber` 有机门控。 | `<= 20` 字超短评 **`R@P95%` 较纯文本再升 `>= +8%`（`>= 80%`）**；50% 攻屏下 `TPR@1%FPR` 波动 **`<= 2.0%`**；创意真人误罚 **`== 0.0%`**。 |
 | **`V7-R2`：`HypSheaf-Thread` + `ACDL` 玩梗潮抗误杀压测** | `2,000` 屏真实 B 站高频玩梗潮（*“下次一定/泪目/接龙”*）vs `2,000` 屏零字面重叠（`Jaccard < 0.08`）多 Agent 改写水军簇，对比平面 `Thread-Graph` vs `HypSheaf + ACDL`。 | 真人玩梗潮 **FPR `< 0.05%`**；零重叠改写水军簇集群召回 **`>= 92%`**（超越平面图 `>= +15%` F1）。 |
 | **`V7-R3`：冻结 `EBT-MoR` + `READER` + `TinyScope` 证据卡对齐** | 灰区对比 `EBT-MoR` vs `v0.6` 2 探针各向同性微扰；评测 2026–2027 推理模型蒸馏短评与 5 类归因证据卡人类盲评。 | 灰区 **`TPR@0.01%FPR` 再涨 `>= +4%`** 且灰区延迟降 **`>= 35%`**；混写 **`Char-Span F1 >= 0.88`**；推理模型 **`TPR@0.1%FPR >= 70%`**；证据卡人类一致度 **`>= 90%`**。 |
-| **`V7-R4`：三层真实性账本 & 万分之一误杀封板** | 整合端侧 `Origin Lens / C2PA` + `SCoRE` E-Value + Mandap 全路径保形校准，于冻结 `MeguvizBench-v4`（严格嵌套 `v2 ⊂ v3 ⊂ v4`）与外部盲测集终审。 | `v2/v3` 全项零退化；全库 **`TPR@0.1%FPR >= 78%` / `TPR@0.01%FPR >= 45%`**；`@alpha=0.01` 灰区率 **`<= 8%`**；`FP16 -> 1.58/2-bit` 漂移 `|ΔAUROC| <= 0.0025`。 |
+| **`V7-R4`：三层真实性账本 & 万分之一误杀封板** | 整合端侧 `Origin Lens / C2PA` + `SCoRE` E-Value + Mandap 全路径保形校准，于冻结 `MeguvizBench-v4`（严格嵌套 `v2 ⊂ v3 ⊂ v4`）与外部盲测集终审，并过全套红队/MV3 混沌 CI。 | `v2/v3` 全项零退化；全库 **`TPR@0.1%FPR >= 78%` / `TPR@0.01%FPR >= 45%`**；`@alpha=0.01` 灰区率 **`<= 8%`**；`FP16 -> 1.58/2-bit` 漂移 `|ΔAUROC| <= 0.0025` 且 `Δ(TPR@0.01%FPR) >= -0.015`；通过 `CI-Sec-01..02`（`SilverSpeak` 掉点 `<=0.005`、三明治误早退 `0%`、`DeepSloth <=8.3ms`）、`CI-Long-03`（`2,048`-tok 中段召回 `>=95%`）、`CI-PII-04`（`@昵称` 扰动 `==0.0`）与 `CI-MV3-05`（DRM/15 页/`device.lost`/100 层 `0 NaN`/Ed25519 验签）。 |
+
+> 下一里程碑（严格零架构手术、冻结本版 `Bundle v4` 执行图、纯指标登顶）：参见 [roadmap-v0.8.0-zenith-metrics.md](roadmap-v0.8.0-zenith-metrics.md) 与外部零反重力额度一键数据工厂 [tools/gemini_v08_datafactory/README.md](../tools/gemini_v08_datafactory/README.md)。

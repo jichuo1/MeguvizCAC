@@ -275,10 +275,12 @@ def _modern_two_way_pauc_and_top_push(
     hard_hu_grps = (grp == struct_idx) | (grp == ml_idx) | (grp == dsh_idx) | (grp == lit_idx)
 
     pos_m = (y_sc >= 0.78) & (w > 0.0)
-    # CRITICAL (R2): Include ALL modern Bilibili humans (y<=0.18) PLUS borderline hard humans (dsh/struct/ml/lit <= 0.38)!
+    # CRITICAL (R3): Quarantine ambiguous mid-band rows (y > 0.28) OUT of Two-Way pAUC neg_m!
+    # Only clear modern humans (y<=0.18) and clear hard/pre_llm humans (y<=0.28) enter pAUC sorting;
+    # borderline 0.28 < y <= 0.55 humans are governed exclusively by Tier-2b upper-cap below!
     neg_m = (
         (y_sc <= 0.18)
-        | ((hard_hu_grps | (grp == pre_idx)) & (y_sc <= 0.38))
+        | ((hard_hu_grps | (grp == pre_idx)) & (y_sc <= 0.28))
     ) & (w > 0.0)
 
     loss_pauc = l_fp.sum() * 0.0
@@ -306,18 +308,74 @@ def _modern_two_way_pauc_and_top_push(
         loss_t1 = F.relu(p_fp[neg_m] - 0.12).pow(2).mean()
         loss_tp = 0.08 * loss_margin + 0.18 * loss_t1
 
-    # Tier-2a: Hard-group clear humans (y <= 0.30) must stay < 0.14
-    tier2 = hard_hu_grps & (y_sc <= 0.30) & (w > 0.0)
+    # Tier-2a: Hard-group clear humans (y <= 0.28) must stay < 0.12
+    tier2 = hard_hu_grps & (y_sc <= 0.28) & (w > 0.0)
     if tier2.any():
-        loss_tp = loss_tp + 0.20 * F.relu(p_fp[tier2] - 0.14).pow(2).mean()
+        loss_tp = loss_tp + 0.28 * F.relu(p_fp[tier2] - 0.12).pow(2).mean()
 
-    # Tier-2b (R2 key fix!): Mid-band borderline humans (0.30 < y <= 0.52, e.g. dsh_hard_slice score 42-48!)
-    # MUST NEVER climb above y + 0.08 into the 0.90+ high-precision AI zone!
-    tier_mid = hard_hu_grps & (y_sc > 0.30) & (y_sc <= 0.52) & (w > 0.0)
+    # Tier-2b (R3 tightened!): Mid-band borderline humans (0.28 < y <= 0.55, e.g. dsh_hard_slice score 42-48!)
+    # MUST NEVER climb above y + 0.05 into the 0.85+ high-precision AI zone!
+    tier_mid = hard_hu_grps & (y_sc > 0.28) & (y_sc <= 0.55) & (w > 0.0)
     if tier_mid.any():
-        loss_tp = loss_tp + 0.26 * F.relu(p_fp[tier_mid] - (y_sc[tier_mid] + 0.08)).pow(2).mean()
+        loss_tp = loss_tp + 0.40 * F.relu(p_fp[tier_mid] - (y_sc[tier_mid] + 0.05)).pow(2).mean()
 
     return loss_pauc, loss_tp
+
+
+def _subset_natural_prior_gold_guaranteed(items: list[dict], cap: int, seed_s: int = 20261126) -> tuple[list[dict], float]:
+    """R3 Fix: Preserve natural ~20% positive share & full modern-human density while guaranteeing 100% gold retention!
+
+    Fixes R2 Stage-2 collapse where 12-way group equalization exploded positive share 20% -> ~45% and starved
+    current_2026_real / general_real humans by ~10x.
+    """
+    rng = random.Random(seed_s)
+    if len(items) <= cap:
+        out = list(items)
+        rng.shuffle(out)
+        return out, 1.0
+
+    gold = [x for x in items if x["is_gold_tier"]]
+    non_gold = [x for x in items if not x["is_gold_tier"]]
+    selected = list(gold)
+    gold_ret = 1.0
+    if len(selected) >= cap:
+        rng.shuffle(selected)
+        selected = selected[:cap]
+        gold_ret = len(selected) / max(1, len(gold))
+        return selected, gold_ret
+
+    # Protect tiny rare human/borderline buckets up to a modest ceiling (<= 12k each) without distorting global prior!
+    protect_gids = {
+        GROUP_TO_IDX["structured_human_hard"],
+        GROUP_TO_IDX["multilingual_world_knowledge"],
+        GROUP_TO_IDX["dsh_hard_slice"],
+        GROUP_TO_IDX["literary_boundary"],
+    }
+    prot_by_g: dict[int, list[dict]] = {g: [] for g in protect_gids}
+    rest_non_gold: list[dict] = []
+    for x in non_gold:
+        g = x["group_idx"]
+        if g in protect_gids and x["y_score"] <= 0.55:
+            prot_by_g[g].append(x)
+        else:
+            rest_non_gold.append(x)
+
+    per_prot_cap = min(12000, max(2000, cap // 36))
+    for g in sorted(prot_by_g):
+        arr = prot_by_g[g]
+        rng.shuffle(arr)
+        take = min(len(arr), per_prot_cap)
+        selected.extend(arr[:take])
+        rest_non_gold.extend(arr[take:])
+
+    rem = max(0, cap - len(selected))
+    if rem > 0 and rest_non_gold:
+        rng.shuffle(rest_non_gold)
+        selected.extend(rest_non_gold[:rem])
+
+    rng.shuffle(selected)
+    assert gold_ret >= 0.98, f"Gold Retention violated: {gold_ret:.4f} < 0.98"
+    return selected[:cap], gold_ret
 
 
 def check_v06_release_gates(metrics: dict) -> dict:
@@ -977,11 +1035,27 @@ def train_and_export(args) -> None:
         beta_neg_end: float = 0.04,
         pauc_weight: float = 0.12,
         ema_teacher: MeguvizV06HyperLoopModel | None = None,
+        ema_alpha: float = 0.18,
         update_ema: bool = False,
         use_swa: bool = False,
         pife_noise_prob: float = 0.0,
         mohawk_only_new: bool = False,
+        use_dro: bool = True,
+        strong_gateguard: bool = False,
+        keep_best_val: bool = False,
     ):
+        def _val_eval_obj():
+            v_l, _ = predict_pt(mdl, val_enc, val_st)
+            v_p = expit(v_l)
+            m_v = {**compute_eval_metrics(val_scores, v_p), **compute_high_precision_metrics(val_scores, v_p)}
+            obj = (
+                0.45 * float(m_v["auroc"])
+                + 0.30 * float(m_v["pr_auc"])
+                + 0.15 * float(m_v["best_f05"])
+                + 0.10 * float(m_v["recall_at_p95"])
+            )
+            return obj, m_v
+
         mdl.set_qat_enabled(qat)
         loader = make_loader(items, pife_noise_prob=pife_noise_prob)
         steps_per_ep = max(1, len(loader))
@@ -999,12 +1073,21 @@ def train_and_export(args) -> None:
         swa_start = int(total_steps * 0.55)
         swa_every = max(15, min(60, total_steps // 40))
         log_every = max(40, total_steps // 12)
+        eval_every = max(250, min(450, total_steps // 3)) if (keep_best_val and not args.smoke_test) else 0
         t_p = time.monotonic()
         global_step = 0
         swa_state = None
         swa_count = 0
+        best_val_obj = -1.0
+        best_val_sd = None
+        if keep_best_val:
+            init_obj, m0 = _val_eval_obj()
+            print(f"[{phase_name} INIT_VAL] obj={init_obj:.4f} auroc={m0['auroc']} pr_auc={m0['pr_auc']} rp95={m0['recall_at_p95']} rp99={m0['recall_at_p99']} f05={m0['best_f05']}", flush=True)
+            if not qat:
+                best_val_obj = init_obj
+                best_val_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
 
-        print(f"[{phase_name}] items={len(items)} | bs={batch_size} | target_steps={total_steps} (~{num_epochs} ep) | pair_bs={pair_bs} | qat={qat} | eff_lr={eff_lr:.2e}", flush=True)
+        print(f"[{phase_name}] items={len(items)} | bs={batch_size} | target_steps={total_steps} (~{num_epochs} ep) | pair_bs={pair_bs} | qat={qat} | use_dro={use_dro} | eff_lr={eff_lr:.2e}", flush=True)
 
         for ep in range(num_epochs):
             mdl.train()
@@ -1039,13 +1122,15 @@ def train_and_export(args) -> None:
                     out = mdl(ids, mask, st, return_aux=True)
                     lg = out["logit"].float()
                     ps = torch.sigmoid(lg)
-                    y_eff = (0.72 * y_sc + 0.28 * ema_p) if ema_p is not None else y_sc
+                    y_eff = ((1.0 - ema_alpha) * y_sc + ema_alpha * ema_p) if ema_p is not None else y_sc
 
                     per_s = (0.75 * _skewed_kl(ps, y_eff) + 0.25 * F.smooth_l1_loss(ps, y_eff, beta=0.04, reduction="none")) * w
-                    # Zero-sync GPU GroupDRO weighting (exact v0.4-R3 balance across all 12 groups!)
-                    grp_w_t = dro_tracker.update(grp, per_s) * len(V04_GROUPS)
-                    dro_mult = grp_w_t[grp]
-                    loss_main = (per_s * dro_mult).mean()
+                    if use_dro:
+                        grp_w_t = dro_tracker.update(grp, per_s) * len(V04_GROUPS)
+                        dro_mult = grp_w_t[grp]
+                        loss_main = (per_s * dro_mult).mean()
+                    else:
+                        loss_main = per_s.mean()
 
                     # Mid-layer deep supervision + MIL span supervision + Parallel TopK-SAE
                     mid_p = torch.sigmoid(out["mid_logit"].float())
@@ -1053,7 +1138,7 @@ def train_and_export(args) -> None:
                     loss_mil = (F.binary_cross_entropy_with_logits(out["mil_peak"].float(), y_eff.clamp(1e-5, 1.0 - 1e-5), reduction="none") * w).mean()
                     loss_sae = out["sae_loss"]
 
-                    # Modern-Human Two-Way pAUC + Dual-Channel Top-Push (RTX 4060 Ti E3a + v0.4-R3!)
+                    # Modern-Human Two-Way pAUC + Dual-Channel Top-Push (R3 mid-band quarantined!)
                     loss_pauc, loss_tp = _modern_two_way_pauc_and_top_push(
                         lg, y_sc, w, grp, prog=prog, beta_start=beta_neg_start, beta_end=beta_neg_end
                     )
@@ -1082,11 +1167,12 @@ def train_and_export(args) -> None:
                     )
 
                     if qat and ema_p is not None:
-                        loss = loss + 0.10 * F.mse_loss(ps, ema_p)
+                        loss = loss + 0.18 * F.mse_loss(ps, ema_p)
 
-                    if pairs_pre:
+                    if pairs_pre and (not strong_gateguard or global_step % 2 == 0):
                         if pairs_gg_pre and pairs_gen_pre:
-                            n_gg = min(len(pairs_gg_pre), max(4, pair_bs // 2))
+                            gg_frac = 0.55 if strong_gateguard else 0.50
+                            n_gg = min(len(pairs_gg_pre), max(6, int(round(pair_bs * gg_frac))))
                             n_gen = min(len(pairs_gen_pre), max(1, pair_bs - n_gg))
                             p_batch = rng_p.sample(pairs_gg_pre, n_gg) + rng_p.sample(pairs_gen_pre, n_gen)
                         else:
@@ -1095,9 +1181,14 @@ def train_and_export(args) -> None:
                         l_ai_p, _, _, _ = mdl(ai_ids, ai_m, ai_st, return_aux=False)
                         l_hu_p, _, _, _ = mdl(hu_ids, hu_m, hu_st, return_aux=False)
                         l_ai_p, l_hu_p = l_ai_p.float(), l_hu_p.float()
-                        loss_simpo = (F.softplus(1.6 - (l_ai_p - l_hu_p)) * pw_t).mean()
-                        loss_pabs = ((F.relu(0.86 - torch.sigmoid(l_ai_p)).pow(2) + F.relu(torch.sigmoid(l_hu_p) - 0.14).pow(2)) * pw_t).mean()
-                        loss = loss + 0.26 * loss_simpo + 0.12 * loss_pabs
+                        if strong_gateguard:
+                            loss_simpo = (F.softplus(1.8 - (l_ai_p - l_hu_p)) * pw_t).mean()
+                            loss_pabs = ((F.relu(0.86 - torch.sigmoid(l_ai_p)).pow(2) + 1.4 * F.relu(torch.sigmoid(l_hu_p) - 0.12).pow(2)) * pw_t).mean()
+                            loss = loss + 0.22 * loss_simpo + 0.20 * loss_pabs
+                        else:
+                            loss_simpo = (F.softplus(1.6 - (l_ai_p - l_hu_p)) * pw_t).mean()
+                            loss_pabs = ((F.relu(0.86 - torch.sigmoid(l_ai_p)).pow(2) + F.relu(torch.sigmoid(l_hu_p) - 0.14).pow(2)) * pw_t).mean()
+                            loss = loss + 0.26 * loss_simpo + 0.12 * loss_pabs
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(mdl.parameters(), 1.0)
@@ -1125,15 +1216,34 @@ def train_and_export(args) -> None:
                 global_step += 1
                 if global_step % log_every == 0 or global_step == total_steps:
                     print(f"[{phase_name} step={global_step}/{total_steps} ep={ep+1}/{num_epochs}] loss={float(run_loss.item())/max(1,n_seen):.4f} elapsed={time.monotonic()-t_p:.1f}s", flush=True)
+                if eval_every > 0 and global_step % eval_every == 0 and global_step < total_steps:
+                    cur_obj, m_mid = _val_eval_obj()
+                    if cur_obj > best_val_obj:
+                        best_val_obj = cur_obj
+                        best_val_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
+                    print(f"[{phase_name} MID step={global_step}] obj={cur_obj:.4f} (best={best_val_obj:.4f}) auroc={m_mid['auroc']} pr_auc={m_mid['pr_auc']} rp95={m_mid['recall_at_p95']} f05={m_mid['best_f05']}", flush=True)
+                    mdl.train()
                 if global_step >= total_steps:
                     break
 
-            v_l, _ = predict_pt(mdl, val_enc, val_st)
-            v_p = expit(v_l)
-            m_ep = {**compute_eval_metrics(val_scores, v_p), **compute_high_precision_metrics(val_scores, v_p)}
-            print(f"[{phase_name} ep={ep+1} DONE] val: auroc={m_ep['auroc']} pr_auc={m_ep['pr_auc']} rp95={m_ep['recall_at_p95']} rp99={m_ep['recall_at_p99']} f05={m_ep['best_f05']} mae={m_ep['mae']}", flush=True)
+            cur_obj, m_ep = _val_eval_obj()
+            if keep_best_val and cur_obj > best_val_obj:
+                best_val_obj = cur_obj
+                best_val_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
+            print(f"[{phase_name} ep={ep+1} DONE] obj={cur_obj:.4f} val: auroc={m_ep['auroc']} pr_auc={m_ep['pr_auc']} rp95={m_ep['recall_at_p95']} rp99={m_ep['recall_at_p99']} f05={m_ep['best_f05']} mae={m_ep['mae']}", flush=True)
             if global_step >= total_steps:
                 break
+
+        if keep_best_val and best_val_sd is not None:
+            if swa_state is not None:
+                mdl.load_state_dict(swa_state, strict=True)
+                swa_obj, m_swa = _val_eval_obj()
+                print(f"[{phase_name} SWA_CHECK] swa_obj={swa_obj:.4f} (auroc={m_swa['auroc']} pr_auc={m_swa['pr_auc']} rp95={m_swa['recall_at_p95']}) vs best_obj={best_val_obj:.4f}", flush=True)
+                if swa_obj >= best_val_obj - 0.003:
+                    return swa_state
+            mdl.load_state_dict({k: v.to(device) for k, v in best_val_sd.items()}, strict=True)
+            print(f"[{phase_name} BEST_RESTORED] Kept best val snapshot (obj={best_val_obj:.4f}).", flush=True)
+            return None
         return swa_state
 
     # Stage 0 (MOHAWK): Align 2:2 Interleaved Split-Head Hybrid linear heads + DWT + SubLN + MIL smoothly!
@@ -1180,27 +1290,38 @@ def train_and_export(args) -> None:
     for p in ema_teacher.parameters():
         p.requires_grad_(False)
 
-    # Stage 2: Born-Again EMA + PIFE Adversarial + Modern+DSH Two-Way pAUC
-    stage2_items, gold_ret_s2 = subset_balanced_gold_guaranteed(train_items_raw, cap=args.stage2_cap, seed_s=20261126)
-    print(f"[Stage2] Subset={len(stage2_items)} | gold_retention={gold_ret_s2:.4f}", flush=True)
+    # Stage 2 (R3 Fixed!): Natural-prior gold-guaranteed sampling (preserves ~20% pos share & full modern humans!),
+    # zero mismatched style-only noise, stronger GateGuard trap boundary anchor, and best-val monotonic rollback lock!
+    stage2_items, gold_ret_s2 = _subset_natural_prior_gold_guaranteed(train_items_raw, cap=args.stage2_cap, seed_s=20261126)
+    s2_pos_share = sum(1 for x in stage2_items if x["y_score"] >= 0.70) / max(1, len(stage2_items))
+    print(f"[Stage2-R3] Subset={len(stage2_items)} | gold_retention={gold_ret_s2:.4f} | natural_pos_share={s2_pos_share:.4f}", flush=True)
     run_phase(
         stage2_items,
         target_steps=12 if args.smoke_test else int(args.stage2_steps),
         num_epochs_fallback=1,
         lr=args.refine_lr,
         qat=False,
-        phase_name="Stage2-EMA-pAUC-PIFE",
+        phase_name="Stage2-NaturalPrior-Refine",
         beta_neg_start=0.06,
         beta_neg_end=0.04,
-        pauc_weight=0.10,
+        pauc_weight=0.09,
         ema_teacher=ema_teacher,
+        ema_alpha=0.18,
         update_ema=True,
-        pife_noise_prob=0.08,
+        pife_noise_prob=0.0,
+        use_dro=False,
+        strong_gateguard=True,
+        keep_best_val=True,
     )
 
-    # Stage 3: Fixed-Step QAT + SWA
-    qat_items, gold_ret_s3 = subset_balanced_gold_guaranteed(train_items_raw, cap=args.qat_cap, seed_s=20261127)
-    print(f"[Stage3-QAT] Subset={len(qat_items)} | gold_retention={gold_ret_s3:.4f}", flush=True)
+    # Freeze Stage-2 winner as clean QAT distillation teacher
+    ema_teacher.load_state_dict(mdl.state_dict(), strict=True)
+    ema_teacher.eval()
+
+    # Stage 3 (R3 Fixed!): Natural-prior QAT + SWA with strict best-val guard
+    qat_items, gold_ret_s3 = _subset_natural_prior_gold_guaranteed(train_items_raw, cap=args.qat_cap, seed_s=20261127)
+    s3_pos_share = sum(1 for x in qat_items if x["y_score"] >= 0.70) / max(1, len(qat_items))
+    print(f"[Stage3-QAT-R3] Subset={len(qat_items)} | gold_retention={gold_ret_s3:.4f} | natural_pos_share={s3_pos_share:.4f}", flush=True)
     swa_sd = run_phase(
         qat_items,
         target_steps=12 if args.smoke_test else int(args.qat_steps),
@@ -1212,13 +1333,17 @@ def train_and_export(args) -> None:
         beta_neg_end=0.04,
         pauc_weight=0.08,
         ema_teacher=ema_teacher,
+        ema_alpha=0.22,
         update_ema=False,
         use_swa=not args.smoke_test,
-        pife_noise_prob=0.05,
+        pife_noise_prob=0.0,
+        use_dro=False,
+        strong_gateguard=True,
+        keep_best_val=True,
     )
     if swa_sd is not None:
         mdl.load_state_dict(swa_sd, strict=True)
-        print("[Stage3-QAT-SWA] Applied SWA weights.", flush=True)
+        print("[Stage3-QAT-SWA] Applied SWA weights (validated >= best snapshot).", flush=True)
 
     del ema_teacher
     mdl.set_sdpa(False)
