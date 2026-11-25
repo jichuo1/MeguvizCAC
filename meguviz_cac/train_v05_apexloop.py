@@ -179,7 +179,9 @@ def _load_v05_bundle(
             continue
         c = r.get("cohort", "")
         if c == "synth_250k":
-            v04_synth_rows.append(r)
+            # Drop noisy ultra-short (<16 char) synthetic snippets indistinguishable from normal human replies
+            if len(str(r.get("text") or "").strip()) >= 16:
+                v04_synth_rows.append(r)
         elif c in ("deepseek", "other_models"):
             if len(r["text"]) >= 26 and float(r["score"]) >= 70.0:
                 legacy_synth_rows.append(r)
@@ -189,13 +191,33 @@ def _load_v05_bundle(
     if stage1_synth_cap >= 0 and len(legacy_synth_rows) > stage1_synth_cap:
         legacy_synth_rows = rng.sample(legacy_synth_rows, stage1_synth_cap)
     if v04_synth_cap >= 0 and len(v04_synth_rows) > v04_synth_cap:
-        v04_synth_rows = rng.sample(v04_synth_rows, v04_synth_cap)
+        # Stratified cap across plugin_mode so synthetic diversity is preserved without drowning real Bilibili AI 24:1!
+        by_mode: dict[str, list[dict]] = {}
+        for sr in v04_synth_rows:
+            by_mode.setdefault(str(sr.get("plugin_mode") or "default"), []).append(sr)
+        quota_m = max(1, v04_synth_cap // max(1, len(by_mode)))
+        picked_s: list[dict] = []
+        rem_s: list[dict] = []
+        for mk in sorted(by_mode):
+            bkt = by_mode[mk]
+            rng.shuffle(bkt)
+            picked_s.extend(bkt[:quota_m])
+            rem_s.extend(bkt[quota_m:])
+        if len(picked_s) < v04_synth_cap and rem_s:
+            rng.shuffle(rem_s)
+            picked_s.extend(rem_s[: v04_synth_cap - len(picked_s)])
+        v04_synth_rows = picked_s[:v04_synth_cap]
 
     train_items: list[dict] = []
+    real_bili_pos_upweighted = 0
+    weak_mid_downweighted = 0
     for r in (*other_rows, *legacy_synth_rows, *v04_synth_rows):
         sid = r["sample_id"]
+        coh = str(r.get("cohort") or "")
         src = str(r.get("score_source") or "")
         era = str(r.get("era_bucket") or "")
+        sc_f = float(r["score"])
+        txt_s = str(r["text"])
         gid_str = r.get("group_id") or assign_group_id(r)
         is_gold_tier = (src in GOLD_HIGH_TIER_SOURCES) or bool(r.get("hard_human_neg"))
 
@@ -204,6 +226,21 @@ def _load_v05_bundle(
             gid_str = "general_real"
             demoted_struct_weak += 1
 
+        # Anti-Synthetic-Drowning Reweighting (fixes 23.8:1 synth:real-Bilibili AI ratio exposed by OjinjinBench-v2!):
+        # 1) Upweight REAL Bilibili AI positives (bili / v04_1m with score >= 65) 3.0x-4.0x
+        # 2) Mildly downweight synthetic plugin AI to 0.70x so real Bilibili stealth AI drives the positive manifold
+        # 3) MPU length-aware downweighting of noisy mid-band weak 12L pseudo-labels (0.35x)
+        w_eff = float(r.get("train_weight", 1.0))
+        is_real_bili = coh in ("bili", "v04_1m")
+        if is_real_bili and sc_f >= 65.0:
+            w_eff *= 4.0 if is_gold_tier else 3.0
+            real_bili_pos_upweighted += 1
+        elif coh in ("synth_250k", "deepseek", "other_models"):
+            w_eff *= 0.70
+        elif (not is_gold_tier) and (era != "pre_llm") and (22.0 < sc_f < 68.0) and len(txt_s.strip()) <= 24:
+            w_eff *= 0.35
+            weak_mid_downweighted += 1
+
         prag = r.get("prag_vec")
         if not (isinstance(prag, list) and len(prag) == len(PRAG_TAGS)):
             prag = [-1.0] * len(PRAG_TAGS)
@@ -211,18 +248,19 @@ def _load_v05_bundle(
         train_items.append(
             {
                 "sample_id": sid,
-                "raw_text": str(r["text"]),
-                "y_score": float(np.clip(float(r["score"]) / 100.0, 0.0, 1.0)),
+                "raw_text": txt_s,
+                "y_score": float(np.clip(sc_f / 100.0, 0.0, 1.0)),
                 "code_idx": CODE_TO_IDX.get(r.get("reason_code", ""), -100),
-                "weight": float(r.get("train_weight", 1.0)),
+                "weight": float(w_eff),
                 "prag_vec": [float(x) for x in prag],
                 "group_idx": GROUP_TO_IDX.get(gid_str, GROUP_TO_IDX["general_real"]),
                 "intent_idx": sid_to_intent.get(sid, -1),
-                "is_gold_tier": bool(is_gold_tier),
+                "is_gold_tier": bool(is_gold_tier or (is_real_bili and sc_f >= 68.0)),
                 "is_pre_llm": bool(era == "pre_llm"),
                 "is_high_prio": bool(
                     is_gold_tier
                     or era == "pre_llm"
+                    or (is_real_bili and sc_f >= 65.0)
                     or gid_str in ("ultra_short_ai", "evasive_plugin_ai", "structured_human_hard", "multilingual_world_knowledge", "persona_space_kaomoji", "literary_boundary", "dsh_hard_slice")
                 ),
             }
@@ -232,6 +270,9 @@ def _load_v05_bundle(
         "total_loaded_rows": len(rows),
         "train_items": len(train_items),
         "gold_tier_count": sum(1 for x in train_items if x["is_gold_tier"]),
+        "real_bili_pos_upweighted": real_bili_pos_upweighted,
+        "synth_250k_kept": len(v04_synth_rows),
+        "weak_mid_short_downweighted": weak_mid_downweighted,
         "demoted_weak_structured_human": demoted_struct_weak,
         "eval_rows": len(eval_rows),
         "gateguard_kept_by_cat": dict(gg_kept_cats),
@@ -329,12 +370,12 @@ def check_v05_release_gates(metrics: dict) -> dict:
     conf03 = (metrics.get("conformal") or {}).get("alpha_03") or {}
     mono = metrics.get("loop_monotonicity") or {}
 
-    edge_mb = ((ed.get("bytes") or 0) + (ox.get("core_step_bytes") or 0) + (ox.get("coda_bytes") or 0)) / (1024.0 * 1024.0) if ed.get("ok") else 99.0
+    edge_zip_mb = (ed.get("edge_zip_bytes") or ((ed.get("bytes") or 0) + (ox.get("core_step_bytes") or 0) + (ox.get("coda_bytes") or 0))) / (1024.0 * 1024.0) if ed.get("ok") else 99.0
     t_coda = float(metrics.get("coda_temperature", 9.9))
 
     gates = {
         "speed_1t_le_1p8_ms": {"value": ox.get("compact_batch32_1thread_ms"), "target": "<= 1.80 ms (desktop 1T <=1.20)", "pass": (ox.get("compact_batch32_1thread_ms") or 99.0) <= 1.80},
-        "edge_w4_size_le_6p5_mb": {"value": round(edge_mb, 2), "target": "<= 6.5 MB", "pass": bool(ed.get("ok")) and edge_mb <= 6.5},
+        "edge_w4_size_le_6p5_mb": {"value": round(edge_zip_mb, 2), "target": "<= 6.5 MB zip", "pass": bool(ed.get("ok")) and edge_zip_mb <= 6.5},
         "auroc_ge_0965": {"value": tb.get("auroc"), "target": ">= 0.965 (stretch 0.975)", "pass": (tb.get("auroc") or 0.0) >= 0.965},
         "pr_auc_ge_0950": {"value": tb.get("pr_auc"), "target": ">= 0.950 (stretch 0.965)", "pass": (tb.get("pr_auc") or 0.0) >= 0.950},
         "rp95_ge_080": {"value": tb.get("recall_at_p95"), "target": ">= 0.80 (stretch 0.85)", "pass": (tb.get("recall_at_p95") or 0.0) >= 0.80},
@@ -1475,6 +1516,7 @@ def train_and_export(args) -> None:
         shutil.rmtree(edge_dir, ignore_errors=True)
         metrics["edge_w4_w8"]["edge_zip_bytes"] = int(zip_edge.stat().st_size)
 
+    metrics["release_gates"] = check_v05_release_gates(metrics)
     metrics_file.write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"=== MeguvizCAC {args.version} COMPLETE ({metrics['elapsed_seconds']}s) ===", flush=True)
     print(

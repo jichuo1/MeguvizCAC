@@ -162,6 +162,11 @@ class ModernPreludeBlock(nn.Module):
         self.mlp_norm = RMSNorm(hidden_size, eps=eps)
         self.wi = QATLinear(hidden_size, 2 * intermediate_size, bias=False)
         self.wdown = QATLinear(intermediate_size, hidden_size, bias=False)
+        # Topic-invariant multi-scale local phrasing DWConv (k=3, 5, 7 — inspired by Nano cadence strength, <0.02 MB!)
+        self.dw3 = nn.Conv1d(hidden_size, hidden_size, kernel_size=3, padding=1, groups=hidden_size, bias=False)
+        self.dw5 = nn.Conv1d(hidden_size, hidden_size, kernel_size=5, padding=2, groups=hidden_size, bias=False)
+        self.dw7 = nn.Conv1d(hidden_size, hidden_size, kernel_size=7, padding=3, groups=hidden_size, bias=False)
+        self.dw_gate = nn.Parameter(torch.full((1, 1, hidden_size), -2.5))
         self.drop = nn.Dropout(drop_p)
         self.use_sdpa = False
 
@@ -180,9 +185,12 @@ class ModernPreludeBlock(nn.Module):
             self.wi.weight.copy_(layer.mlp.Wi.weight)
             self.wdown.weight.copy_(layer.mlp.Wo.weight)
 
-    def forward(self, x: torch.Tensor, attn_bias: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attn_bias: torch.Tensor, mask_f: torch.Tensor | None = None) -> torch.Tensor:
         b, l, _ = x.shape
         h = self.attn_norm(x)
+        # Local multi-scale DWConv cadence branch (zero self-attention overhead, masked cleanly)
+        ht = (h * mask_f if mask_f is not None else h).transpose(1, 2)
+        dw_out = ((self.dw3(ht) + self.dw5(ht) + self.dw7(ht)) / 3.0).transpose(1, 2)
         qkv = self.wqkv(h).view(b, l, 3, self.num_heads, self.head_dim)
         q = qkv[:, :, 0].transpose(1, 2)
         k = qkv[:, :, 1].transpose(1, 2)
@@ -201,7 +209,7 @@ class ModernPreludeBlock(nn.Module):
             att = self.drop(torch.softmax(sc, dim=-1))
             ctx = torch.matmul(att, v)
         ctx = ctx.transpose(1, 2).contiguous().view(b, l, self.hidden_size)
-        x = x + self.drop(self.wo(ctx))
+        x = x + self.drop(self.wo(ctx)) + torch.sigmoid(self.dw_gate).to(x.dtype) * dw_out
 
         h2 = self.mlp_norm(x)
         u, g = self.wi(h2).chunk(2, dim=-1)
@@ -439,9 +447,9 @@ class MeguvizV05ApexLoopModel(nn.Module):
             self.word_emb_P.weight.copy_(torch.from_numpy(p_mat.T))
             if hasattr(mmbert_model.embeddings, "norm") and hasattr(mmbert_model.embeddings.norm, "weight"):
                 self.emb_norm.weight.copy_(mmbert_model.embeddings.norm.weight)
-            # Layer 0 -> Prelude; Global Layer 9 (and 15 if core_layers==2) -> Core!
+            # Layer 0 -> Prelude; Global Layers 6 & 15 (if core_layers>=2) or 9 -> Core!
             self.prelude.load_from_mmbert_layer(mmbert_model.layers[0])
-            core_src_idxs = [9, 15] if self.core_layers >= 2 else [9]
+            core_src_idxs = [6, 15] if self.core_layers >= 2 else [9]
             for blk, s_idx in zip(self.core_blocks, core_src_idxs):
                 blk.load_from_mmbert_layer(mmbert_model.layers[min(s_idx, len(mmbert_model.layers) - 1)])
             if hasattr(mmbert_model, "final_norm") and hasattr(mmbert_model.final_norm, "weight"):
@@ -467,13 +475,13 @@ class MeguvizV05ApexLoopModel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         x = self.emb_drop(self.emb_norm(self.word_emb_P(self.word_emb_A(input_ids))))
         attn_bias = (1.0 - attention_mask[:, None, None, :].to(x.dtype)) * (-10000.0)
-        h_seq = self.prelude(x, attn_bias)
+        m_f = attention_mask.to(x.dtype).unsqueeze(-1)
+        h_seq = self.prelude(x, attn_bias, mask_f=m_f)
 
         st_vec = self.style_net(style_feats.to(x.dtype))
         if ctx_echo is not None:
             st_vec = st_vec + self.ctx_echo_net(ctx_echo.to(x.dtype))
 
-        m_f = attention_mask.to(h_seq.dtype).unsqueeze(-1)
         mean_h = (h_seq * m_f).sum(dim=1) / m_f.sum(dim=1).clamp(min=1.0)
         exit0_feat = self.exit0_norm(0.5 * h_seq[:, 0, :] + 0.5 * mean_h + 0.25 * st_vec)
         exit0_logit = self.exit0_head(exit0_feat).squeeze(-1) / self.exit0_temperature.to(h_seq.dtype).clamp(min=0.5)

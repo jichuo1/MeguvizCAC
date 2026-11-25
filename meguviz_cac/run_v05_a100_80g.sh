@@ -12,7 +12,7 @@ DRIVE_DIR="${DRIVE_DIR:-/content/drive/MyDrive/MeguvizCAC/v050_apexloop}"
 LOG_DRIVER="${LOG_DRIVER:-/content/log_v05_driver.txt}"
 LOG_TRAIN="${LOG_TRAIN:-/content/log_v05_full.txt}"
 DONE_JSON="${DONE_JSON:-/content/v05_done.json}"
-VERSION="${VERSION:-v0.5.0-apexloop-1x2-e128}"
+VERSION="${VERSION:-v0.5.0-apexloop-2x2-e128}"
 CAND_BS="${CAND_BS:-1024,896,768,640,512}"
 
 mkdir -p "$OUT_DIR" "$DRIVE_DIR"
@@ -46,6 +46,8 @@ echo "[$(date +%H:%M:%S)] PROBING worst-case seq=192 LoopQ QAT+EMA VRAM on candi
 PROBE_OUT="$(python3 -m meguviz_cac.train_v05_apexloop \
   --data "$DATA_FILE" \
   --gateguard-data "$REPO_DIR/meguviz_cac/data/v05-gateguard-pairs.jsonl" \
+  --core-layers 2 \
+  --vocab-size 24576 \
   --out "$OUT_DIR" \
   --probe-vram "$CAND_BS" 2>&1)"
 echo "$PROBE_OUT" | tee -a "$LOG_DRIVER"
@@ -74,7 +76,9 @@ python3 -u -m meguviz_cac.train_v05_apexloop \
   --backbone jhu-clsp/mmBERT-small \
   --vocab-size 24576 \
   --embed-dim 128 \
-  --core-layers 1 \
+  --core-layers 2 \
+  --stage1-synth-cap 10000 \
+  --v04-synth-cap 35000 \
   --optimizer muonclip \
   --rtd-steps 400 \
   --epochs 3 \
