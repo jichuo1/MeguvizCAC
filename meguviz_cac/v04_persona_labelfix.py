@@ -229,8 +229,8 @@ def run_labelfix(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="R3 post-merge persona label noise cleanup")
-    parser.add_argument("--in", dest="in_path", type=Path, required=True, help="Input v04-merged-1m4.jsonl.gz")
-    parser.add_argument("--out", dest="out_path", type=Path, default=None, help="Output cleaned .jsonl.gz")
+    parser.add_argument("--in", "--input", dest="in_path", type=Path, required=True, help="Input v04-merged-1m4.jsonl.gz")
+    parser.add_argument("--out", "--output", dest="out_path", type=Path, default=None, help="Output cleaned .jsonl.gz")
     parser.add_argument("--min-score", type=float, default=72.0)
     parser.add_argument("--target-weight", type=float, default=0.5)
     parser.add_argument("--max-modified", type=int, default=300)
