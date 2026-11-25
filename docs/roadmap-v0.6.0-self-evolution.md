@@ -10,14 +10,15 @@
 
 | 维度指标 | `v0.5.0-ApexLoop`（冻结端侧底座） | **`v0.6.0-HyperLoop`（下一代主线发布门槛）** |
 | :--- | :---: | :---: |
-| **手机端总模型增量体积** | `<= 5.0–6.5 MB`（`W4A16/W4A8` + `SegPQ`） | **`<= 2.8–3.5 MB`（`0.3 MB` 纳米草稿 + `ParetoQ/UPQ` 2-bit/1.58-bit + 无词表 `H-Net++`）** |
-| **手机端侧推理延迟** | ARM 中核 `<= 1.80 ms/row`；GPU `<= 0.35 ms/row` | **ARM `SME2/T-MAC` `<= 0.55 ms/row`；手机 NPU (`Hexagon/ANE/T-MAN`) `<= 0.15 ms/row`** |
-| **30 分钟持续刷评功耗** | `< 0.8 W` 零降频 | **`< 0.35 W`（`0.3 MB` 纳米草稿 + `L2D-FP` 拒识拦截 + NPU LUT，全 App 后台无感常驻）** |
-| **上下文与模态处理上限** | 单条 `<= 192` token + 页面流无梯度 TTA | **$O(N)$ 线性 Prelude 支持 `512–1,024` token 整楼对话树 + 整屏 `16–32` 条 `Thread-Graph` + 轻量 OCR 钩子** |
-| **全局精度目标** | `AUROC >= 0.975 / PR-AUC >= 0.965` | **`AUROC >= 0.985 / PR-AUC >= 0.978`** |
-| **极端低误报高召回红线** | `R@P95% >= 85% / R@P99% >= 60%` | **`R@P95% >= 92% / R@P99% >= 75% / TPR@1%FPR >= 90% / TPR@0.1%FPR >= 60%`（`Two-Way pAUC` + 分级绝对锚定）** |
+| **手机端总模型增量体积** | `<= 5.0–6.5 MB`（`24k SuperBPE + 1L Prelude(DWConv) + 2L Core` Edge-W4 实测 `~5.7 MB`） | **`<= 2.8–3.5 MB`（`0.3 MB` 纳米草稿 + `ParetoQ/UPQ` 2-bit/1.58-bit + 无词表 `H-Net++`）** |
+| **手机 / 桌面端推理延迟** | 1T CPU `<= 1.80 ms/row`；GPU `<= 0.35 ms/row` | **ARM `SME2/T-MAC` `<= 0.55 ms/row`；手机 NPU (`Hexagon/ANE/T-MAN`) `<= 0.15 ms/row`；浏览器 `WASM SIMD / WebGPU` `<= 0.40 ms/row`** |
+| **30 分钟持续刷评功耗** | `< 0.8 W` 零降频 | **`< 0.35 W`（`0.3 MB` 纳米草稿 + `L2D-FP` 拒识拦截 + NPU LUT，全 App/插件后台无感常驻）** |
+| **上下文与模态处理上限** | 单条 `<= 192` token + 可选 `4-d` 零 PII 回声槽 | **$O(N)$ 线性 Prelude 支持 `512–1,024` token 整楼对话树 + 整屏 `16–32` 条 `Thread-Graph` + 轻量 OCR 钩子（纯文本/零 PII 语境双轨解耦）** |
+| **全局精度目标** | `AUROC >= 0.965 (冲刺 0.975) / PR-AUC >= 0.950 (冲刺 0.965)` | **`AUROC >= 0.985 / PR-AUC >= 0.978`** |
+| **极端低误报高召回红线** | `R@P95% >= 80% (冲刺 85%) / R@P99% >= 50% (冲刺 60%)` | **`R@P95% >= 92% / R@P99% >= 75% / TPR@1%FPR >= 90% / TPR@0.1%FPR >= 60%`（`Two-Way pAUC` + 分级绝对锚定）** |
+| **野生真实 AI 独立召回门禁** | `v0.5` 修复 `23.8:1` 合成淹没（上限 `35k` + 真实 AI `3x–4x` 提权） | **独立考核 `Wild-Real-AI Recall@0.1%FPR >= 55%` 与 `Wild-Real-AI Recall@1%FPR >= 88%`（合成:真实野生正样本比硬锁 `<= 2:1`）** |
 | **深度外推尾部单调铁律** | `R = 2 -> 4 -> 6` 全指标（含 `R@P99%`）无回撤 | **`R = 2 -> 4 -> 6` 及 2 路微扰自洽须严保 `R@P99%` 与 `TPR@0.1%FPR` 逐轮单调增益（严禁 `v0.4 R1` 式尾部崩塌）** |
-| **校准与 `Split Conformal` 灰区率** | `@alpha=0.03 <= 18%`（`n>=1,500` Smooth PAVA, `T∈[0.9, 1.8]`） | **`@alpha=0.03 <= 10%`（`n>=3,000` 分长度×树深度 Smooth PAVA, `T∈[0.8, 1.6]` 直接烘焙，纯本地结案率 `>= 90%`）** |
+| **校准与 `Split Conformal` 灰区率** | `@alpha=0.03 <= 18%`（`n=2,400` Smooth PAVA, `T∈[0.9, 1.8]`） | **`@alpha=0.03 <= 10%`（`n>=3,000` 分长度×树深度 Smooth PAVA, `T∈[0.8, 1.6]` 直接烘焙，纯本地结案率 `>= 90%`）** |
 | **外部全封存盲测（`OjinjinBench-v2/v3`）** | 纯文本 `>= 0.90` / 零 PII 语境 `>= 0.93`（硬负 `0%`） | **纯文本 `Hard F0.5 >= 0.94` / 零 PII 整屏语境 `>= 0.96` 且硬负误杀 `= 0%`（全面超越 `OjinjinNet` 全系）** |
 | **短评 / 混写 / 误杀 / LOFO** | 结构化 `< 0.18 / M01–04 < 0.15 / LOFO >= 0.950` | **`ultra_short (<=20 字) R@P95% >= 72%` / 人机混写 `Char-Span F1 >= 0.85` / 结构化与多语真人 `< 0.10` / `LOFO >= 0.965`** |
 | **端云自学习与自进化** | 预留 `Bundle v2` 只读沙箱与特征导出接口 | **完全解耦可选模块（Feature-Flag / Opt-In），静态生产部署默认关闭、零强制绑定** |
@@ -98,7 +99,8 @@ flowchart LR
 | :--- | :--- | :--- | :--- |
 | **`DetectAnyLLM` (`DDL`/`MIRAGE`) & `Glimpse`** | 2025 – ACM MM（`arXiv:2509.14268`; ICLR 2025 *Glimpse*） | 指出常规微调极易过拟合表层词频，导致遇到新款大模型时 `TPR@1%FPR` 暴跌；**`DDL`（Direct Discrepancy Learning）** 直学跨越 17+ 模型家族的本质概率分布差异；**`Glimpse`** 让闭源 API 信号得以适配白盒统计对齐。 | **§6.2 `16-d` 多观测者概率谱核心**：强化跨未知模型家族（LOFO）及严格 `1% / 0.1% FPR` 工作点下的隐蔽 AI 召回。 |
 | **`Lastde / Lastde++` & `BiScope`** | 2024.10 – 2025（`arXiv:2410.08199`; NeurIPS *BiScope*） | **`Lastde++`** 将 Token 概率序列视为时间序列挖掘局部峰度/自相关动力学，强抗同义词与句式洗稿；**`BiScope`** 同时计算前向真实词交叉熵与**反向前驱词记忆交叉熵**，对短句续写与高拟真输出具备极高区分度。 | **离线集成进 `16-d` 蒸馏代理特征（§6.2）**：手机端 **0 额外因果大模型调用** 即可白嫖穿透洗稿与短句判别的前后向时间序列直觉。 |
-| **Two-Way Partial AUC (`pAUC`), Neyman-Pearson & `MIL` Span (*MixDetect*/*PaLD*)** | 2025 – 2026（*DACTYL* / NIST 2025–2026） | 全域 AUROC 掩盖高置信区崩溃，主张以 **Two-Way Partial AUC (`FPR <= 1% / 0.1%`)** 与 **Neyman-Pearson 似然比最优边界** 指导优化；对于人机混写长评，全局平均会严重稀释局部 20% AI 润色段，须用 **多实例学习（`MIL`）** 峰值聚合与 Span 定位。 | **§6.1 & §6.3 精度与召回核心双引擎**：损失焦点 100% 对准 `0.1%–1% FPR` 极端头部区，并靠 `MIL` 彻底解决“长评局部夹带 AI 润色”漏杀。 |
+| **Two-Way Partial AUC (`pAUC`), Neyman-Pearson & `MIL` Span (`Sci-SpanDet` / *MixDetect*)** | 2025 – 2026（`arXiv:2510.00890` *Sci-SpanDet*, *DACTYL* / NIST） | 全域 AUROC 掩盖高置信区崩溃，主张以 **Two-Way Partial AUC (`FPR <= 1% / 0.1%`)** 与 **Neyman-Pearson 似然比最优边界** 指导优化；*Sci-SpanDet* 将 **BIO-CRF / 指针边界解码 + 多层级对比学习** 引入混合文本，精准定位局部 AI 润色区间而非被全局平均稀释。 | **§6.1 & §6.3 精度与召回核心双引擎**：损失焦点 100% 对准 `0.1%–1% FPR` 极端头部区，并靠 `MIL + 轻量指针边界头` 彻底解决“长评局部夹带 AI 润色”漏杀。 |
+| **`READER` 推理模型指纹 & 跨领域词汇丰富度不变式** | 2026.05 – 2026.06（`arXiv:2605.25281` *READER*; `arXiv:2606.04177`, `2603.23146`） | **`READER`** 揭示测试时推理增强模型（DeepSeek-R1 / o3 / Qwen-Thinking 等）即便剥离 `<think>` 仍留下“结论前置+结构化对冲+语义密度陡跃”的隐性推理指纹；跨领域系统分析（`arXiv:2606.04177`）证实多数表层标点特征跨域会崩坏，而**词汇丰富度（TTR/MTLD）与局部节奏梯度**是最稳定的跨域不变量。 | **纳入 §3.4 `48-d` 零隐私文体槽与 §5 推理模型专项语料**：专门补齐对 2026+ 思维链蒸馏短评的召回，并用跨域稳定不变量替代易过拟合的表层捷径。 |
 | **`CORSAIR`, `DIVE + Minitron` & Disaggregated Labels** | 2025 – 2026 | **`CORSAIR`** 因果反事实最小编辑剥离学术词/格式捷径；**`DIVE`** 按梯度影响函数清理或反向修正污染尾部的脏伪标；**Disaggregated Labels** 用去聚合多视角软分布取代灰区粗暴硬二值标签。 | **§5 数据范式升维基石**：清洗 `5.0M+` 脏边界样本，让精度与灰区风险校准同时站上新台阶。 |
 
 ### 2.4 【可选模块前沿】自学习与自进化（Optional Track）
@@ -141,6 +143,31 @@ flowchart TD
 1. **整屏对话树图协同注意力（`Thread-Graph`）**：将同屏 `8–32` 条评论构建成回复关系、楼中楼祖先、秒级突发同质簇与跨评复读边矩阵，在 `256-d` 出口执行 **`32×32` 轻量图消息传递（`< 0.05 ms`）**——孤立的一句“支持！”若单独判几乎不可分，但一旦呈星状并发、脱离主楼语义流或毫秒级跨贴复读，图网络瞬间联合拉响警报。
 2. **多模态轻量语境钩子（Text-Image Consistency Hook, `< 0.3 MB`）**：直接读取客户端已有系统本地 OCR 与视频标签摘要——若评论与封面文字/视频实体发生典型视觉幻觉错位（如闭眼夸错主体），无需跑任何重型多模态大模型即可一击定位。
 
+### 3.4 可落地工程契约：`0.3 MB` 纳米草稿 × `MOHAWK` 实际迁移配方 × `48-d` 特征布局 × `Bundle v3` 双轨 ABI
+
+为让 `v0.6.0-HyperLoop` 在 `v0.5.0` 冻结后可直接进入代码实现（无架构歧义），冻结以下 4 份工程接口契约：
+
+1. **`0.3 MB` 纳米草稿 + `L2D-FP`（Learning-to-Defer with False-Positive Barrier）精确架构**：
+   - 吸取对标 `OjinjinNet-Nano (1.22 MB, 0.19 ms)` 的经验教训（极快但在 `H06` 评分表误报 `0.81`、在 `M05` 英文 AI 漏杀 `0.069`）：纳米草稿**绝不独立给高分报警，只负责安全早退明显纯人短句**。
+   - **网络拓扑**：`Byte-Hash N-gram (4096×32 INT8 = 128 KB)` + `Depthwise-Separable 1D Conv (k=3,5, C=64, INT8 = 48 KB)` + 拼接前 `32-d` 零隐私 PIFE 特征 → `2L MLP (96 -> 64 -> 2, INT8 = 18 KB)`，输出双头 `(p_draft, p_defer)`，总重 **`<= 0.28 MB`**，单线程 CPU **`<= 0.18 ms/row`**。
+   - **零误伤早退硬门控**：仅当 **`p_draft <= 0.03` 且 `p_defer < 0.15` 且无任何结构化/多语/人设/链接触发位（`style[struct_mask] == 0`）** 时才直接放行结案（覆盖约 `65%–70%` 日常人类吐槽/表情）；一切长评、结构化评测、英日韩代码评论、或疑似 AI 100% 转交 `HyperLoop` 主干。
+2. **从 `v0.5.0` 实际权重（`v05_stage1_ckpt.pt`：`1L RoPE+DWConv(3,5,7) Prelude + 16-Slot + 2L Core`）出发的 `MOHAWK` 三阶段精确配方**：
+   - **Step M-1（矩阵定向，占总算力 `~2%`）**：冻结 `v0.5` `16-Slot` 与 `2L Core`，以 `v0.5` `1L Prelude` 的自注意力矩阵 $A_{\text{v05}}$ 为监督，用 Frobenius 范数对齐 `2L` 双向 `Gated DeltaNet-2`（保留 `DWConv(k=3,5,7)` 局部短语旁路）的等效混合矩阵。
+   - **Step M-2（隐态与工作台对齐，占总算力 `~5%`）**：对齐 `Prelude` 出口 `z0 ∈ [B, 16, 384]`、序列特征与 `Exit-0` logit，采用 `0.6 * CosineLoss + 0.4 * SmoothL1`，确保下游 `2L Core` 零震荡无缝接管。
+   - **Step M-3（端到端 `UPQ -> BitDistill/ParetoQ` 步数恒定退火，占总算力 `~8%`）**：解锁全网，按 **`FP16 (1,500 步) -> W4 (2,000 步) -> ParetoQ 2-bit/1.58-bit + LoopVQ (3,500 步) + SWA`** 恒定优化器步数退火（全程启用 `v0.5` EMA 教师 + `SubLN` + `QuEST` Hadamard 缩放）。
+3. **前向兼容 `48-d` 零隐私特征槽布局（100% 保留 `v0.5` 前 `36` 维）**：
+   - **`[0..31]`（`32-d`）**：完全冻结继承 `v0.5` `extract_style_features_32d`（标点/换行/列点/颜文字/中英混排/零宽字符/同形字 PIFE 取证）。
+   - **`[32..35]`（`4-d`）**：完全继承 `v0.5` 可选零 PII 语境槽（`video_echo`、`root_echo`、`reply_depth_norm`、`benign_resource_link`；`pure_text` 模式置零）。
+   - **`[36..41]`（`6-d`）**：新增 `Thread-Graph` 零隐私局部拓扑特征（同屏最近邻余弦最大值、同屏 60 秒突发性密度、同楼句式熵比、回复与主楼论点偏移度、复读模板簇大小、楼层对话纵深比；`pure_text` 模式置零）。
+   - **`[42..47]`（`6-d`）**：新增跨域稳定不变量与推理/图文钩子（**`MTLD` 词汇丰富度、`READER` 结论前置/对冲密度比、局部句长方差梯度**、`OCR` 实体重合度、`OCR` 视觉错位惩罚、引号引用跨度占比）。
+   - **零 PII 硬铁律**：全 `48-d` 严禁出现任何用户名、UID、等级、粉丝数、IP 属地或发评历史，单元测试强断言“替换任意账号元数据输出漂移 `== 0.000000`”。
+4. **`Bundle v3` 双轨运行协议与浏览器 `WASM/WebGPU` 部署矩阵**：
+   - **双模式硬开关**：`infer_mode ∈ {"pure_text", "zero_pii_context"}`——基准评测与匿名 API 强锁 `pure_text`（与 `OjinjinBench` 严格公平对标），真实 B 站客户端/浏览器插件启用 `zero_pii_context` 释放整楼树图与视频回声红利。
+   - **全平台统一导出表**：
+     - **桌面浏览器插件（Chrome/Edge/Firefox）**：`ORT-Web WASM SIMD (INT8 + 纳米草稿)` 保底 `<= 0.60 ms/row`，支持 **`WebGPU (FP16/W4/2-bit LUT WGSL)`** 极速路径 `<= 0.30 ms/row`（纯本地零后端）；
+     - **Android / iOS 手机端**：`T-MAC (ARM SME2)` `<= 0.55 ms/row` + `T-MAN (Hexagon NPU / Apple ANE)` `<= 0.15 ms/row`；
+     - **JSON Schema 向下兼容**：`Bundle v3` `manifest.json` 保留 `Bundle v2` 全部字段（`prelude_file / core_step_file / coda_file / smooth_pava / conformal / prototype_bank_file`），仅追加可选 `nano_draft_file`、`thread_graph_file`、`span_head_enabled`、`npu_lut_artifact` 与 `enable_self_evolution: false`。
+
 ---
 
 ## 四、极致端侧性能与硬件协同（`ParetoQ / UPQ / BitDistill` × `T-MAC / T-MAN` × NPU/`SME2`）
@@ -168,11 +195,12 @@ flowchart TD
 2. **因果反事实最小编辑孪生对（Causal Minimal-Edit Twins & `CORSAIR`）**：针对技术评测、代码排错、评分表、文献引述等高误杀场景构造“同主题、同观点、同排版、仅切换人类自然韵律 vs LLM 生成因果路径”成对样本，强制模型只在同一对对照间拉大差值，彻底斩断“见列表/专业词就报 AI”的伪关联。
 3. **`DIVE` 梯度影响力估值清洗 + *Minitron* 协同剪枝蒸馏**：通过 **`DIVE`** 计算训练切片在 `LOFO` 与 `TPR@0.1%FPR` 上的梯度影响得分，直接剔除或反转修正会推高高分端误杀的脏伪标样本；配合 *Minitron* 启发式宽度/深度裁剪，把四教师知识高密度压入 `<= 3.5 MB` 学生核。
 4. **去聚合多视角软分布标签（Disaggregated Labels）+ 原生字符级 Span 真值**：对灰区短评停止强制 `0/1` 抹平，保留多教师/多人类视角分歧分布喂入尾部损失与 `Split Conformal`；全面升级提供**字符级精确人机协同切分 Span 区间真值**（如“人写 80% + AI 润色 20% 段落”）。
-5. **从 `v0.4 -> v0.5` 继承的四道反噪声污染数据铁律（`5.0M+` 放量必守防线）**：
+5. **从 `v0.4 -> v0.5` 继承的五道反污染与反合成淹没数据铁律（`5.0M+` 放量必守防线）**：
+   - **野生真实 AI 优先铁律（彻底根治 `v0.4-R3` `23.8:1` 合成淹没症）**：`v0.4-R3` 在 `OjinjinBench-v2` 上真人误报率 `0.0%`（`0/1,401`），却因训练池含 `280,776` 条合成插件 AI vs 仅 `11,792` 条真实 B 站 AI（`23.8:1`）导致真实线上隐蔽 AI 召回塌陷。`v0.6.0` 硬锁定 **合成 AI : 野生真实 AI 正样本比例 `<= 2:1`**，建立月度增量真实社区野生 AI（含 2026+ DeepSeek-R1/o3/Qwen-Thinking 思维链蒸馏短评与长驻 Agent 账号实录）回流管道，并将 `Wild-Real-AI Recall@0.1%FPR` 列为独立发布门禁；
    - **高权保护桶白名单准入**：`structured_human_hard`、`pre_llm_human` 与 `TPR@0.1%FPR` 零误杀锚定池**严禁任何单模型/弱伪标自动划入**（根治 `v0.4` 12L 伪标将 `本鱼` 塞进结构化保护组的反噬），仅限年代真值（`pre-2022`）或经 `DIVE` 复核的双金标入桶；
    - **全库 `Label-Pair` 语义冲突扫描**：入库前对 `5.0M+` 语料与 `CORSAIR` 因果最小编辑对跑跨库近邻冲突检测，自动揪出“与高置信 AI 对近邻极相似但主库软标 `< 60`”的隐藏噪声簇交由四教师仲裁，且清洗规则必须经过 `pre_llm` 全量假阳性回扫（杜绝 `西本鱼跃 / 九漏鱼本鱼` 类粗正则误伤）；
-   - **对比对非静默防泄漏审计**：所有反事实/最小编辑对强制经过 **精确 + `bge-m3 > 0.90` 余弦防泄漏双查**并输出逐类留存率报告（**严禁静默丢弃**，任一类别有效对 `< 20` 直接 fail-fast，杜绝 `v0.4 R2 A03` 静默减对回撤）；
-   - **`Gold Retention >= 99%` 跨阶段留存断言**：在 `MOHAWK`、`UPQ/BitDistill` 退火与 `Two-Way pAUC` 任一子采样阶段，硬断言金标、因果最小对与极端难负样留存率 `>= 99%`（根治 `v0.4` `f77deaf` 分层截断丢金标隐患）。
+   - **对比对非静默防泄漏审计**：所有反事实/最小编辑对强制经过 **精确 + 字符 3-gram Jaccard `>= 0.78` + `bge-m3 > 0.90` 余弦防泄漏三查**并输出逐类留存率报告（**严禁静默丢弃**，任一类别有效对 `< 20` 直接 fail-fast，杜绝 `v0.4 R2 A03` 静默减对回撤）；
+   - **`Gold Retention >= 99%` 跨阶段留存断言**：在 `MOHAWK`、`UPQ/BitDistill` 退火与 `Two-Way pAUC` 任一子采样阶段，硬断言金标、野生真实 AI 正样本、因果最小对与极端难负样留存率 `>= 99%`（根治 `v0.4` `f77deaf` 分层截断丢金标隐患）。
 
 ---
 
@@ -182,9 +210,11 @@ flowchart TD
 
 ### 6.1 极端低误报直优目标：`Two-Way Partial AUC (pAUC)` × 分级绝对锚定双通道
 - **根治梯度浪费与绝对校准残差**：`v0.4 R2/R3` 实证表明，纯排序/对比损失能拉大相对间距，却难以单独压平结构化真人（如评分表/词典引证）的最后 `~0.13` 绝对概率残差；而激进 `Top-Push` 若缺乏 logit 尺度正则，还会把校准温度推爆至 `T > 3.5` 导致 Conformal 灰区暴涨。
-- **双通道聚焦极端工作点**：
-  1. **排序/似然比通道**：主目标切换为 **`Two-Way Partial AUC` 损失**（将惩罚权重聚焦于 `FPR ∈ [0, 0.01]` 及 `0.1% FPR` 极端区）+ 近似 **Neyman-Pearson `Top-Push` 约束**，精准把 `TPR@1%FPR` 推上 **`>= 88%`**、`TPR@0.1%FPR >= 55%`、`R@P99% >= 72%`；
-  2. **分级绝对锚定与温度健康锁**：并行施加两档主损失绝对压制（确证真人 `y <= 0.15` 强压 `relu(p - 0.10)^2` + 白名单结构化/技术/外语真人边界 `y <= 0.35` 柔压 `relu(p - 0.18)^2`）与轻量 logit 范数正则，确保模型在 `TPR@0.1%FPR` 拉高的同时维持健康温度 $T \in [0.8, 2.0]$ 与结构化真人得分 `< 0.15`。
+- **双通道聚焦极端工作点（含可微目标形式化定义）**：
+  1. **排序/似然比通道（`Two-Way Partial AUC` 代理损失）**：设批内高置信正样本集 $\mathcal{P}=\{i : y_i \ge 0.85\}$、高危负样本集 $\mathcal{N}=\{j : y_j \le 0.15 \lor (\text{group}_j \in \{\text{struct,pre\_llm,ml}\} \land y_j \le 0.22)\}$，令 $\mathcal{N}_{\text{top-}k}$ 为负样本中 logit 最高的 Top-$\beta$（$\beta \in \{0.05, 0.01\}$ 退火）极难负例、$\mathcal{P}_{\text{bot-}m}$ 为正样本中最难捞起的 Bottom-$\alpha$（$\alpha = 0.25$）野生隐蔽 AI，最小化可微双边偏 AUC 损失：
+     $$\mathcal{L}_{\text{pAUC}} = \frac{1}{|\mathcal{P}_{\text{bot-}m}|\cdot|\mathcal{N}_{\text{top-}k}|}\sum_{i \in \mathcal{P}_{\text{bot-}m}} \sum_{j \in \mathcal{N}_{\text{top-}k}} \log\!\left(1 + \exp\!\big(\gamma \cdot (m_0 - (z_i - z_j))\big)\right)$$
+     将几乎全部排序梯度精确注入 `FPR ∈ [0, 0.01]` 及 `0.1% FPR` 极端头部区，推动 `TPR@1%FPR >= 90%`、`TPR@0.1%FPR >= 60%`、`R@P99% >= 75%`；
+  2. **分级绝对锚定与温度健康锁**：并行施加两档主损失绝对压制（确证真人 $y \le 0.15$ 强压 $\text{ReLU}(p - 0.08)^2$ + 白名单结构化/技术/外语真人边界 $y \le 0.35$ 柔压 $\text{ReLU}(p - 0.15)^2$）与轻量 logit 范数正则 $\text{ReLU}(|z| - 4.2)^2$，确保模型在 `TPR@0.1%FPR` 拉高的同时维持健康烘焙温度 $T \in [0.8, 1.6]$ 与结构化/多语真人得分 `< 0.10`。
 
 ### 6.2 离线 `16` 维多观测者概率谱蒸馏（继承并扩展 `v0.5` `6-d` -> `16-d`，端侧 0 大模型调用）
 - **完全兼容接力**：保留 `v0.5` 离线的 `6` 维惊奇度代理曲率作为前 6 维基础槽，云端训练前再用参考因果模型组（与多家族外部教师日志）为全量 `5.0M+` 语料额外离线提取 **10 维顶尖防漏杀特征**（合并组成 **`16-d` 离线概率谱向量**），蒸馏注入线性前缀与 `LOTUS` 槽位：
@@ -272,9 +302,14 @@ flowchart TD
 | 阶段 | 重点验证与两代迁移/精度/性能对比实验 | 定量晋级（Go/No-Go）门槛 |
 | :--- | :--- | :--- |
 | **Stage M0：NPU `T-MAN` LUT 与 `SME2` 真机先验微基准（先测速后重训）** | 吸取 `v0.4 R1` 1T 超标教训：用合成权重在真机 Hexagon NPU / Apple ANE / Armv9 `SME2` 实测 `Gated DeltaNet-2` 线性 Prelude、`ParetoQ 2-bit T-MAN` 两级查表核与 `0.3 MB` 纳米草稿，验证零 FP16 隐性反量化回退与静态分桶整图零抖动。 | **先验证 ARM CPU `<= 0.55 ms/row`、手机 NPU `<= 0.15 ms/row`、纳米草稿 `< 0.25 ms`、总包 `<= 3.5 MB` 且 30 分钟功耗 `< 0.35 W`** 后，方可启动百万级 `MOHAWK` 迁移训练！ |
-| **Stage M1：线性 Prelude 迁移 + 无词表 `H-Net++` 消融** | 对比 **`MOHAWK / LoLCATs` 从 `v0.5 RoPE` 迁移的双向 `Gated DeltaNet-2 / Mamba-3`** vs 从零训练线性块 vs `Softmax Prelude`（`512–1,024` token）；评审 `H-Net++ / Fast-BLT` 转正；验证静态分桶整图编译（`fullgraph=True`）+ `--probe-vram` 满载训练效率。 | **`MOHAWK` 迁移以 `< 15%` 预算追平或反超重训；`1,024` token 线性 Prelude 较 Softmax 提速 `>= 3x`**；无词表分支删词表后跨语/混写超越 `SuperBPE >= +0.5% PR-AUC`；A100/H100 训练 GPU 利用率稳定 `>= 85%`。 |
+| **Stage M1：线性 Prelude 迁移 + 无词表 `H-Net++` 消融** | 对比 **`MOHAWK / LoLCATs` 从 `v0.5 RoPE` 迁移的双向 `Gated DeltaNet-2 / Mamba-3`** vs 从零训练线性块 vs `Softmax Prelude`（`512–1,024` token）；评审 `H-Net++ / Fast-BLT` 转正；验证静态分桶整图编译（`fullgraph=True`）+ `--probe-vram` 满载训练效率。 | **`MOHAWK` 迁移以 `< 15%` 预算追平或反超重训；`1,024` token 线性 Prelude 较 Softmax 提速 `>= 3x`**；无词表分支删词表后跨语/混写超越 `SuperBPE >= +0.5% PR-AUC`；A100/H100/G4 训练 GPU 利用率稳定 `>= 85%`。 |
 | **Stage M2：`UPQ/BitDistill` 步数恒定退火 + `L2D-FP` 纳米级联压测** | 从 `v0.5` 同构 Checkpoints 经 **`UPQ + BitDistill (SubLN) + QuEST`** 按固定总 STE 步数预算渐进退火至 **`ParetoQ 2-bit / 1.58-bit` + `LoopVQ`**；在 `n >= 3,000` 独立验证集标定 `0.3 MB` 纳米草稿 + `L2D-FP` 拒识阈值（考卷封存）。 | **渐进降比特相对 `v0.5 FP16` 精度漂移 `< 0.003`**；全模型 **`<= 3.5 MB`**；纳米草稿拦截率 `~70%` 且高风险漏拦截率 `< 0.1%`；`R = 2 -> 4 -> 6` 外推 `R@P99%` 与 `TPR@0.1%FPR` 严格单调无回撤。 |
-| **Stage M3：低误报高召回专攻 + `5.0M+` 反污染合库与盲测封板** | 执行四道反污染数据铁律（`Gold Retention >= 99%`、非静默防泄漏、保护桶白名单、`Label-Pair` 冲突扫描）+ `DIVE / CORSAIR` + **`Two-Way pAUC × 两档绝对锚定`** + `16-d` 离线谱蒸馏 + `MIL` 峰值 + `3%–5%` 灰区 `R=4–6` 自洽 + 整屏 `Thread-Graph` & 零 PII 视频回声/OCR + `n >= 3,000` Smooth PAVA 校准，于 `MeguvizBench-v3` 与全封存 **`OjinjinBench-v2/v3`** 终审封板。 | 全面零退化通过 **`MeguvizBench-v2`** 全部门禁，且达成：**`AUROC >= 0.985` / `PR-AUC >= 0.978` / `R@P95% >= 92%` / `R@P99% >= 75%` / `TPR@1%FPR >= 90%` / `TPR@0.1%FPR >= 60%` / `@alpha=0.03` 灰区率 `<= 10%` / `OjinjinBench-v2/v3` 纯文本 `Hard F0.5 >= 0.94`（零 PII 语境 `>= 0.96`，硬负误杀 `= 0%`） / `ultra_short R@P95% >= 72%` / `Char-Span F1 >= 0.85` / 结构化与多语真人 `< 0.10` / `LOFO >= 0.965`**。 |
+| **Stage M3：低误报高召回专攻 + `5.0M+` 反污染合库与盲测封板** | 执行五道反污染与反合成淹没数据铁律（`Wild-Real-AI` 优先 `<= 2:1`、`Gold Retention >= 99%`、非静默防泄漏、保护桶白名单、`Label-Pair` 冲突扫描）+ `DIVE / CORSAIR` + **`Two-Way pAUC × 两档绝对锚定`** + `16-d` 离线谱蒸馏 + `MIL` 峰值 + `3%–5%` 灰区 `R=4–6` 自洽 + 整屏 `Thread-Graph` & 零 PII 视频回声/OCR + `n >= 3,000` Smooth PAVA 校准，于 `MeguvizBench-v3` 与全封存 **`OjinjinBench-v2/v3`** 终审封板。 | 全面零退化通过 **`MeguvizBench-v2`** 全部门禁，且达成：**`AUROC >= 0.985` / `PR-AUC >= 0.978` / `R@P95% >= 92%` / `R@P99% >= 75%` / `TPR@1%FPR >= 90%` / `TPR@0.1%FPR >= 60%` / `Wild-Real-AI Recall@0.1%FPR >= 55%` / `@alpha=0.03` 灰区率 `<= 10%` / `OjinjinBench-v2/v3` 纯文本 `Hard F0.5 >= 0.94`（零 PII 语境 `>= 0.96`，硬负误杀 `= 0%`） / `ultra_short R@P95% >= 72%` / `Char-Span F1 >= 0.85` / 结构化与多语真人 `< 0.10` / `LOFO >= 0.965`**。 |
+
+> **Stage M0 桌面 1T CPU / CUDA 实测预验结果（2026-11-25 本地实跑通过）**：
+> - **`Nano-Draft + L2D-FP`（ONNX INT8）**：模型体积仅 **`154.5 KB`（`0.15 MB`）**（仅为 `0.30 MB` 预算上限的一半、较 `OjinjinNet-Nano` 小 `8×`）；单线程 CPU 延迟 `bs=1, seq=32` 为 **`0.1035 ms/row`**、`bs=32, seq=32` 为 **`0.0470 ms/row`**、`bs=32, seq=64` 为 **`0.0533 ms/row`**。
+> - **`2L` 线性 `Gated DeltaNet-2` 代理 vs Softmax（`d=384`, 1T CPU）**：`seq=128` 基本持平（`3.68 vs 3.53 ms`, `0.96×`）；`seq=512` 提速 **`1.70×`**（`13.91 vs 23.64 ms`）；`seq=1024` 整楼对话树提速 **`3.05×`**（`29.71 vs 90.47 ms`，直接达成 Stage M1 `>= 3×` 提速门槛）。
+> - **`Two-Way Partial AUC`（`beta_neg=0.01`）+ `MIL LogSumExp` 梯度稳定性**：CUDA 实测全部梯度严格有限（`grads_finite=True`），无 NaN/下溢风险。
 
 ### 8.2 【可选自进化模块】独立验证阶段（Track O — Optional Self-Evolution, 不阻塞主线发布）
 
