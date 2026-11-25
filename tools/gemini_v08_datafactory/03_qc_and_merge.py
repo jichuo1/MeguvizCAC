@@ -227,6 +227,76 @@ def audit_canaries(
     }
 
 
+def audit_anti_cheat_forensics(
+    vault_entries: list[dict[str, Any]],
+    fused_by_sid: dict[str, tuple[dict[str, Any], str]],
+    cf_raw: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Automated 4-signal anti-cheat detector catching Python regex/f-string scripted fake labels!
+
+    Signals:
+      1. Repeated-canary 100% bit-exact determinism across waves (`>= 98%` identical on `>= 10` repeated texts).
+      2. Hardcoded `(score, confidence)` script constants (top-2 conf > 68% OR top-1 (score,conf) > 20% on >= 2000 rows).
+      3. Queue C mechanical template splicing (any 6-char prefix/suffix repeating > 3.5% on >= 200 rewrites).
+    """
+    reasons: list[str] = []
+
+    # 1. Repeated val_gold text exact determinism across waves
+    by_orig: dict[str, list[int]] = {}
+    for c in vault_entries:
+        bsid = c["blind_sample_id"]
+        if bsid in fused_by_sid:
+            by_orig.setdefault(str(c["orig_val_sample_id"]), []).append(int(fused_by_sid[bsid][0]["score"]))
+    rep_lists = [v for v in by_orig.values() if len(v) >= 2]
+    rep_same = sum(1 for v in rep_lists if len(set(v)) == 1)
+    rep_ratio = (rep_same / len(rep_lists)) if rep_lists else 0.0
+    if len(rep_lists) >= 10 and rep_ratio >= 0.98:
+        reasons.append(f"SCRIPTED_ZERO_VARIANCE_CANARIES({rep_same}/{len(rep_lists)}={rep_ratio:.1%})")
+
+    # 2. (score, confidence) entropy collapse check (real Wave-1 has top2_conf=41.4% vs scripted 76.9%!)
+    n_sc = len(fused_by_sid)
+    conf_cnt = Counter(int(v[0].get("confidence", -1)) for v in fused_by_sid.values())
+    sc_cf_cnt = Counter((int(v[0]["score"]), int(v[0].get("confidence", -1))) for v in fused_by_sid.values())
+    top2_conf_share = (sum(c for _, c in conf_cnt.most_common(2)) / n_sc) if n_sc > 0 else 0.0
+    top1_pair_share = (sc_cf_cnt.most_common(1)[0][1] / n_sc) if (n_sc > 0 and sc_cf_cnt) else 0.0
+    if n_sc >= 2000 and (top2_conf_share > 0.65 or (top2_conf_share > 0.58 and top1_pair_share > 0.22)):
+        reasons.append(f"HARDCODED_SCRIPT_CONSTANTS(top2_conf={top2_conf_share:.1%},top1_pair={top1_pair_share:.1%})")
+
+    # 3. Queue C mechanical template splicing detector (strip normal Bili [emoji] tags before suffix check!)
+    import re as _re
+    n_cf = len(cf_raw)
+    pref6 = Counter()
+    suff6 = Counter()
+    for it in cf_raw:
+        rew = str(it.get("rewritten_text") or "").strip()
+        if len(rew) >= 6:
+            pref6[rew[:6]] += 1
+        rew_no_em = _re.sub(r"(?:\[[^\]]{1,12}\]|\s)+$", "", rew)
+        if len(rew_no_em) >= 6:
+            suff6[rew_no_em[-6:]] += 1
+    top_pref_share = (pref6.most_common(1)[0][1] / n_cf) if (n_cf > 0 and pref6) else 0.0
+    top_suff_share = (suff6.most_common(1)[0][1] / n_cf) if (n_cf > 0 and suff6) else 0.0
+    if n_cf >= 200 and (top_pref_share > 0.025 or top_suff_share > 0.025):
+        p_tok = pref6.most_common(1)[0] if pref6 else ("", 0)
+        s_tok = suff6.most_common(1)[0] if suff6 else ("", 0)
+        reasons.append(f"QUEUE_C_TEMPLATE_SPLICING(pref={p_tok[0]!r}:{top_pref_share:.1%},suff={s_tok[0]!r}:{top_suff_share:.1%})")
+
+    return {
+        "passed": len(reasons) == 0,
+        "flags": reasons,
+        "metrics": {
+            "n_scoring": n_sc,
+            "repeated_canary_groups": len(rep_lists),
+            "repeated_canary_identical_share": round(rep_ratio, 4),
+            "top2_conf_share": round(top2_conf_share, 4),
+            "top1_score_conf_share": round(top1_pair_share, 4),
+            "n_counterfactual": n_cf,
+            "cf_top_prefix6_share": round(top_pref_share, 4),
+            "cf_top_suffix6_share": round(top_suff_share, 4),
+        },
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--work-dir", type=Path, default=REPO_ROOT / "v08-datafactory-work")
@@ -251,11 +321,23 @@ def main() -> None:
         sid: fuse_tier1_tier2(p1_map.get(sid), p2_map.get(sid)) for sid in all_sids
     }
 
-    # 1. Hidden Canary QA Audit
+    # 1. Hidden Canary QA Audit + 4-Signal Anti-Cheat Forensic Gate
     vault_path = work_dir / "canary_vault.json"
     vault_entries = json.loads(vault_path.read_text(encoding="utf-8")).get("canaries", []) if vault_path.is_file() else []
     canary_sids = {c["blind_sample_id"] for c in vault_entries}
     canary_report = audit_canaries(vault_entries, fused_by_sid, args.min_auroc, args.min_spearman, args.max_abs_bias)
+    cf_raw = _load_cf_preds(work_dir / "outputs_tier1")
+    anticheat_report = audit_anti_cheat_forensics(vault_entries, fused_by_sid, cf_raw)
+
+    if not anticheat_report["passed"] and not args.allow_warn:
+        (release_dir / "v08_qc_report_ANTICHEAT_BLOCKED.json").write_text(
+            json.dumps({"anti_cheat": anticheat_report, "canary_audit": canary_report}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        raise SystemExit(
+            f"[ANTI-CHEAT FAIL-FAST] Scripted/template fake labeling detected: {json.dumps(anticheat_report, ensure_ascii=False)}\n"
+            "REJECTED to protect v0.8.0 training quality! Re-run via genuine Gemini Batch API or smaller shell-disabled Agent micro-waves."
+        )
 
     if vault_entries and not canary_report.get("passed", False) and not args.allow_warn:
         (release_dir / "v08_qc_report_FAILED.json").write_text(json.dumps(canary_report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -328,8 +410,7 @@ def main() -> None:
             source_dist[score_source] += 1
             era_dist[out_rec["era_bucket"]] += 1
 
-    # 3. Export Counterfactual Minimal Pairs & Hybrid Spans (Queue C)
-    cf_raw = _load_cf_preds(work_dir / "outputs_tier1")
+    # 3. Export Counterfactual Minimal Pairs & Hybrid Spans (Queue C — already loaded for anti-cheat audit)
     cf_out_path = release_dir / "v08-gemini-counterfactual-pairs.jsonl"
     cf_exported = 0
     cf_blocked = 0
@@ -368,6 +449,7 @@ def main() -> None:
 
     qc_report = {
         "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "anti_cheat_audit": anticheat_report,
         "canary_audit": canary_report,
         "anti_leakage_reaudit": {
             "canaries_stripped": stripped_canaries,
