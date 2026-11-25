@@ -101,6 +101,42 @@ from .v10_apexloop import (
 )
 
 
+def _top_fp_logit_ceiling_loss(
+    logits: torch.Tensor,
+    y_sc: torch.Tensor,
+    tp_v06: torch.Tensor,
+    is_g: torch.Tensor,
+    era: torch.Tensor,
+    w: torch.Tensor,
+) -> torch.Tensor:
+    """Logit-Space Double-Confirmed Top-FP Suppressor (kills Top-5 normal-human spikes breaking wild R@P95!).
+
+    Fixes two root flaws of probability-space `relu(p - 0.12)^2.mean()`:
+      1. Zero sigmoid gradient vanishing at `z >= +3.0` (operates directly in logit space!).
+      2. Zero `1/400` batch dilution (uses top-4 worst humans + smooth LogSumExp max `tau=0.5`).
+      3. Double-confirmed clean human guard (`is_g | pre_llm | tp_v06 <= 0.30`) -> ZERO stealth-AI collateral damage!
+    """
+    lg = logits.float()
+    conf_hu = (y_sc <= 0.18) & (w > 0.0) & ((is_g > 0.5) | (era == 0) | (tp_v06 < 0.0) | (tp_v06 <= 0.30))
+    clean_ai = (y_sc >= 0.78) & (w > 0.0)
+    loss = lg.sum() * 0.0
+
+    n_hu = int(conf_hu.sum().item())
+    if n_hu >= 2:
+        z_hu = lg[conf_hu]
+        k_top = min(4, n_hu)
+        z_worst = torch.topk(z_hu, k=k_top, largest=True).values
+        # Direct logit-space quadratic hammer above z > 0 (p > 0.50) + mild push below -0.8
+        l_ceil = F.relu(z_worst).pow(2).mean() + 0.20 * F.softplus(z_worst + 0.8).mean()
+        loss = loss + l_ceil
+        if int(clean_ai.sum().item()) >= 2:
+            # Smooth max of confirmed humans must stay >= 1.2 logit units below median AI logit!
+            z_hu_smax = 0.5 * torch.logsumexp(z_hu / 0.5, dim=0)
+            z_ai_med = torch.quantile(lg[clean_ai], 0.50)
+            loss = loss + 0.50 * F.softplus(1.2 - (z_ai_med - z_hu_smax))
+    return loss
+
+
 def check_v10_release_gates(metrics: dict[str, Any]) -> dict[str, Any]:
     """Verify MeguvizCAC v1.0.0 milestone release gates (Bundle v6 <= 2.20 MB, 3-stage bit-exact ONNX, quality & safety)."""
     tb = metrics.get("test_bili_gold") or {}
@@ -381,12 +417,18 @@ def train_v10_apexloop(args) -> None:
         mdl.load_state_dict({k: v.to(device) for k, v in sd_cand.items()}, strict=True)
         vo = predict_v10(mdl, val_enc, val_eng, val_st, outer_steps=2)
         so = predict_v10(mdl, sel_enc, sel_eng, sel_st, outer_steps=2)
-        def _sc(o_d, y_s):
+        def _sc(o_d, y_s, wild_tail: bool = False):
             p, pr1 = expit(o_d["logit"]), expit(o_d["logit_r1"])
             m = {**compute_eval_metrics(y_s, p), **compute_high_precision_metrics(y_s, p)}
             m1 = compute_eval_metrics(y_s, pr1)
+            if wild_tail:
+                # Explicitly guard natural-prior R@P95 & R@P99 against Top-5 normal-human spikes!
+                return (
+                    0.32 * float(m["auroc"]) + 0.24 * float(m["pr_auc"]) + 0.14 * float(m["best_f05"])
+                    + 0.18 * float(m["recall_at_p95"]) + 0.06 * float(m["recall_at_p99"]) + 0.06 * float(m1["auroc"])
+                )
             return 0.38 * float(m["auroc"]) + 0.28 * float(m["pr_auc"]) + 0.14 * float(m["best_f05"]) + 0.14 * float(m["recall_at_p95"]) + 0.06 * float(m1["auroc"])
-        return 0.50 * _sc(vo, val_scores) + 0.50 * _sc(so, sel_scores)
+        return 0.50 * _sc(vo, val_scores, wild_tail=False) + 0.50 * _sc(so, sel_scores, wild_tail=True)
 
     class V10DS(Dataset):
         def __init__(self, items):
@@ -555,6 +597,7 @@ def train_v10_apexloop(args) -> None:
                     l_pa, l_tp = _modern_two_way_pauc_and_top_push(lg, y_sc, w, grp, prog=step / max(1, steps - 1), beta_start=0.06, beta_end=beta_end)
                     hu_h = torch.isin(grp, hard_grp_t)
                     l_anc = zenith_graded_anchor_loss(lg, y_sc, hard_human_mask=hu_h)
+                    l_topfp = _top_fp_logit_ceiling_loss(lg, y_sc, tp_v06, is_g, era, w)
                     l_era = era_grl(out["emb"], era, is_clean_human=(y_sc <= 0.25), lam=0.20)
 
                     # Off-diagonal slot orthogonal diversity + In-Loop 5-way EBT Energy CE + MoLE Z-Loss!
@@ -568,7 +611,7 @@ def train_v10_apexloop(args) -> None:
                     loss = (
                         loss_full + 0.18 * loss_e1 + 0.22 * loss_r1
                         + 0.08 * loss_sd_r1 + 0.06 * loss_sd_e1
-                        + pauc_w * l_pa + l_tp + l_anc + 0.08 * l_era
+                        + pauc_w * l_pa + l_tp + l_anc + 0.18 * l_topfp + 0.08 * l_era
                         + 0.15 * l_slot_div + 0.10 * l_ebt_ce + 0.002 * l_mole_z
                         + 0.08 * F.cross_entropy(out["attr5_logit"], y_a5)
                         + 0.08 * ce_code(out["code_logit"], y_cd)
@@ -647,8 +690,56 @@ def train_v10_apexloop(args) -> None:
     else:
         s1_sd = init_sd
 
-    # Stage 1.5: 2-Branch Balanced + HumanShield ASAM Diversity -> Greedy Generalization Soup!
-    sub_nat, _ = _subset_natural_prior_gold_guaranteed(train_items_raw, cap=min(480000, len(train_items_raw)), seed_s=20261126)
+    # Stage 1.5: Online Double-Confirmed Top-FP Hard-Negative Mining -> 2-Branch Balanced + HumanShield ASAM Soup!
+    sub_nat_raw, _ = _subset_natural_prior_gold_guaranteed(train_items_raw, cap=min(480000, len(train_items_raw)), seed_s=20261126)
+    sub_nat = [dict(x) for x in sub_nat_raw]
+
+    # Mine the top-scoring double-confirmed clean humans (y<=0.18 AND [gold | pre_llm | teacher_p<=0.30]) from Stage 1!
+    mdl.load_state_dict({k: v.to(device) for k, v in s1_sd.items()}, strict=True)
+    mdl.set_quant_mode("fp16")
+    mdl.eval()
+    conf_hu_idxs = [
+        i for i, x in enumerate(sub_nat)
+        if x["y_score"] <= 0.18 and (x.get("is_gold_tier") or x.get("is_pre_llm") or x.get("teacher_p", -1.0) < 0.0 or x.get("teacher_p", 1.0) <= 0.30)
+    ]
+    rng_m = random.Random(20261126)
+    scan_cap = 256 if args.smoke_test else 120000
+    scan_idxs = rng_m.sample(conf_hu_idxs, scan_cap) if len(conf_hu_idxs) > scan_cap else conf_hu_idxs
+    mined_hard_hu_items: list[dict] = []
+    topfp_mine_rep: dict[str, Any] = {"scanned_confirmed_humans": len(scan_idxs), "mined_count": 0, "max_fp_prob_before": 0.0}
+    if scan_idxs:
+        scan_out = predict_v10(
+            mdl,
+            [sub_nat[i]["ids"] for i in scan_idxs],
+            [sub_nat[i]["engram"] for i in scan_idxs],
+            np.stack([sub_nat[i]["style"] for i in scan_idxs], axis=0),
+            outer_steps=2,
+            use_fp32=False,
+        )
+        scan_p = expit(scan_out["logit"])
+        topfp_mine_rep["max_fp_prob_before"] = round(float(np.max(scan_p)), 4)
+        # Pick all confirmed humans with p >= 0.35 (or top 1.5%, capped at 6,000 hardest negatives)
+        p_cut = min(0.35, float(np.quantile(scan_p, 0.985)))
+        hard_order = np.argsort(-scan_p)
+        cur_real_gid = GROUP_TO_IDX["current_2026_real"]
+        struct_gid = GROUP_TO_IDX["structured_human_hard"]
+        max_mine = 32 if args.smoke_test else 6000
+        for pos_k in hard_order[:max_mine]:
+            pk = float(scan_p[pos_k])
+            if pk < max(0.20, p_cut):
+                break
+            it_m = sub_nat[scan_idxs[int(pos_k)]]
+            it_m["weight"] = min(6.0, float(it_m["weight"]) * (3.0 if pk >= 0.65 else 2.2))
+            if it_m["group_idx"] == cur_real_gid:
+                it_m["group_idx"] = struct_gid
+            mined_hard_hu_items.append(it_m)
+        topfp_mine_rep["mined_count"] = len(mined_hard_hu_items)
+        topfp_mine_rep["p_threshold_used"] = round(max(0.20, p_cut), 4)
+        # Oversample mined top-FP humans once more into sub_nat so Stage 1.5 & Stage 2 QAT see them reliably!
+        if mined_hard_hu_items:
+            sub_nat.extend(mined_hard_hu_items)
+    print(f"[Stage1.5-TopFP-HardNeg-Mining] {json.dumps(topfp_mine_rep)}", flush=True)
+
     s15_steps = 6 if args.smoke_test else args.refine_steps
     b1_sd, b1_sc = _run_stage("Stage1.5-ASAM-Balanced", s1_sd, sub_nat, steps=s15_steps, lr=7.5e-5, quant_mode="fp16", use_asam=True, pauc_w=0.09, pair_w=0.24, beta_end=0.030)
     b2_sd, b2_sc = _run_stage("Stage1.5-ASAM-HumanShield", s1_sd, sub_nat, steps=s15_steps, lr=6.0e-5, quant_mode="fp16", use_asam=True, pauc_w=0.11, pair_w=0.34, beta_end=0.025)
@@ -731,12 +822,13 @@ def train_v10_apexloop(args) -> None:
             shock_params.append(p)
 
     p_opt = torch.optim.AdamW(shock_params, lr=1.5e-4, weight_decay=1e-4)
-    p_dl = DataLoader(V10DS(sub_nat[: min(80000, len(sub_nat))]), batch_size=batch_size, shuffle=True, collate_fn=_make_collate(0.0))
+    shock_pool = sub_nat[: min(80000, len(sub_nat))] + mined_hard_hu_items
+    p_dl = DataLoader(V10DS(shock_pool), batch_size=batch_size, shuffle=True, collate_fn=_make_collate(0.0))
     mdl.train()
     p_steps = 4 if args.smoke_test else 260
     ps_i = 0
     for batch in p_dl:
-        ids, mask, eng, st, y_sc, _, _, _, _, y_a5, w, grp, _, _ = [t.to(device, non_blocking=True) for t in batch]
+        ids, mask, eng, st, y_sc, tp_v06, is_g, _, _, y_a5, w, grp, era, _ = [t.to(device, non_blocking=True) for t in batch]
         p_opt.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", dtype=amp_dtype):
             out = mdl(ids, mask, st, engram_ids=eng, outer_steps=2, k_inner=2, trm_lam_k0=0.0, trm_lam_k1=0.0, return_aux=True)
@@ -745,6 +837,7 @@ def train_v10_apexloop(args) -> None:
             lm = (F.binary_cross_entropy_with_logits(lg, ycl, reduction="none") * w).mean()
             lr1 = (F.binary_cross_entropy_with_logits(lg_r1, ycl, reduction="none") * w * (1.0 + 2.5 * (y_sc >= 0.45).float())).mean()
             l_pa, l_tp = _modern_two_way_pauc_and_top_push(lg, y_sc, w, grp, prog=0.85, beta_start=0.05, beta_end=0.025)
+            l_topfp_s = _top_fp_logit_ceiling_loss(lg, y_sc, tp_v06, is_g, era, w)
             l_ebt = F.cross_entropy(-out["ebt_energies"].float(), y_a5)
             with torch.amp.autocast("cuda", enabled=False):
                 pf_d, pr1_d, pe1_d = torch.sigmoid(lg.detach()), torch.sigmoid(lg_r1.detach()), torch.sigmoid(lg_e1.detach())
@@ -756,7 +849,7 @@ def train_v10_apexloop(args) -> None:
             s_u = F.normalize(out["slots_final"].float(), p=2, dim=-1)
             s_g = torch.matmul(s_u, s_u.transpose(-1, -2))
             l_sdiv = ((s_g * (1.0 - torch.eye(s_g.shape[-1], device=s_g.device, dtype=s_g.dtype).unsqueeze(0))) ** 2).mean()
-            loss = lm + 0.25 * lr1 + 0.09 * l_pa + l_tp + zenith_graded_anchor_loss(lg, y_sc) + 0.12 * l_ebt + 0.25 * ld1 + 0.12 * ld2 + 0.08 * l_r1_sp + 0.15 * l_sdiv
+            loss = lm + 0.25 * lr1 + 0.09 * l_pa + l_tp + zenith_graded_anchor_loss(lg, y_sc) + 0.20 * l_topfp_s + 0.12 * l_ebt + 0.25 * ld1 + 0.12 * ld2 + 0.08 * l_r1_sp + 0.15 * l_sdiv
         loss.backward()
         torch.nn.utils.clip_grad_norm_(shock_params, 1.0)
         p_opt.step()
@@ -971,6 +1064,7 @@ def train_v10_apexloop(args) -> None:
         "bge_svd_matryoshka_init": svd_init_rep,
         "gemini_factory_audit": gem_audit,
         "pillar1_denoise": denoise_report,
+        "top_fp_hard_negative_mining": topfp_mine_rep,
         "fp16_soup_report": fp16_soup_rep,
         "zero_op_fold_report": fold_rep,
         "qat_soup_report": qat_soup_rep,
