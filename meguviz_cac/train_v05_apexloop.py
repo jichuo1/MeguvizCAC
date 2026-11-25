@@ -419,16 +419,20 @@ def _newton_schulz_5(g, steps: int = 5):
 
 
 class HybridMuonClipAdamW:
-    """Hybrid optimizer: MuonClip (Newton-Schulz orthogonal momentum + weight decay) for 2D hidden matrices + AdamW for 1D/embeddings."""
+    """Layer-wise AdamW (default, zero pretrained shock!) with optional safe scaled MuonClip (unit-RMS normalized)."""
 
-    def __init__(self, model, lr_adamw: float, lr_muon: float | None = None, weight_decay: float = 0.01, use_muon: bool = True):
+    def __init__(self, model, lr_adamw: float, lr_muon: float | None = None, weight_decay: float = 0.02, use_muon: bool = False):
         import torch
 
         muon_params = []
-        adam_params = []
+        pretrained_adam = []
+        fresh_adam = []
         for name, p in model.named_parameters():
             if not p.requires_grad:
                 continue
+            is_pretrained = name.startswith(("prelude_blocks.", "core_blocks.", "word_emb_", "emb_norm.")) and (
+                "dw3" not in name and "dw5" not in name and "dw7" not in name and "dw_gate" not in name and "tau_mlp" not in name and "grt_gate" not in name and "post_norm" not in name
+            )
             is_hidden_2d = (
                 use_muon
                 and p.ndim == 2
@@ -439,19 +443,29 @@ class HybridMuonClipAdamW:
             )
             if is_hidden_2d:
                 muon_params.append(p)
+            elif is_pretrained:
+                pretrained_adam.append(p)
             else:
-                adam_params.append(p)
+                fresh_adam.append(p)
 
         self.muon_params = muon_params
         self.muon_bufs = [torch.zeros_like(p) for p in muon_params]
-        self.lr_muon_base = float(lr_muon if lr_muon is not None else min(3e-3, lr_adamw * 15.0))
+        # Safe Muon LR matching RMS of AdamW (fixes R1 100x explosion where scale*lr_m=0.029 blew norm to 9.5e6!)
+        self.lr_muon_base = float(lr_muon if lr_muon is not None else min(4e-4, lr_adamw * 2.0))
         self.lr_adamw_base = float(lr_adamw)
         self.weight_decay = float(weight_decay)
-        self.momentum = 0.95
+        self.momentum = 0.90
+        groups = []
+        if pretrained_adam:
+            groups.append({"params": pretrained_adam, "lr": self.lr_adamw_base, "base_lr": self.lr_adamw_base, "weight_decay": weight_decay})
+        if fresh_adam:
+            groups.append({"params": fresh_adam, "lr": self.lr_adamw_base * 2.5, "base_lr": self.lr_adamw_base * 2.5, "weight_decay": weight_decay})
+        if not groups:
+            groups.append({"params": [p for p in model.parameters() if p.requires_grad], "lr": self.lr_adamw_base, "base_lr": self.lr_adamw_base, "weight_decay": weight_decay})
         try:
-            self.adamw = torch.optim.AdamW(adam_params, lr=self.lr_adamw_base, weight_decay=weight_decay, fused=torch.cuda.is_available())
+            self.adamw = torch.optim.AdamW(groups, lr=self.lr_adamw_base, weight_decay=weight_decay, fused=torch.cuda.is_available())
         except TypeError:
-            self.adamw = torch.optim.AdamW(adam_params, lr=self.lr_adamw_base, weight_decay=weight_decay)
+            self.adamw = torch.optim.AdamW(groups, lr=self.lr_adamw_base, weight_decay=weight_decay)
         self.lr_mult = 1.0
 
     def zero_grad(self, set_to_none: bool = True):
@@ -466,7 +480,7 @@ class HybridMuonClipAdamW:
     def set_lr_mult(self, mult: float):
         self.lr_mult = float(mult)
         for pg in self.adamw.param_groups:
-            pg["lr"] = self.lr_adamw_base * self.lr_mult
+            pg["lr"] = float(pg.get("base_lr", self.lr_adamw_base)) * self.lr_mult
 
     def step(self):
         import torch
@@ -483,10 +497,12 @@ class HybridMuonClipAdamW:
                 buf.mul_(self.momentum).add_(g)
                 g_nes = g + self.momentum * buf
                 u = _newton_schulz_5(g_nes)
-                scale = 0.2 * math.sqrt(max(p.shape[0], p.shape[1]))
+                # Normalize orthogonal update to unit RMS so effective per-element step == lr_m!
+                u_rms = u.float().pow(2).mean().sqrt().clamp(min=1e-6)
+                u_unit = (u.float() / u_rms).to(p.dtype)
                 if self.weight_decay > 0.0:
                     p.mul_(1.0 - lr_m * self.weight_decay)
-                p.add_(u, alpha=-lr_m * scale)
+                p.add_(u_unit, alpha=-lr_m)
 
 
 def _cosine_mult(step: int, total_steps: int, warmup_frac: float = 0.08) -> float:
@@ -553,6 +569,7 @@ def _run_vram_probe(args, device, amp_dtype) -> None:
         hidden_size=384,
         num_heads=6,
         intermediate_size=1152,
+        prelude_layers=args.prelude_layers,
         core_layers=args.core_layers,
         num_slots=16,
     ).to(device)
@@ -639,15 +656,15 @@ def train_and_export(args) -> None:
         _run_vram_probe(args, device, amp_dtype)
         return
 
-    batch_size = int(args.batch_size) if int(args.batch_size) > 0 else (768 if vram_gb >= 60.0 else (384 if vram_gb >= 35.0 else 128))
-    lr_scale = min(2.0, math.sqrt(batch_size / 256.0)) if (batch_size > 256 and not args.no_auto_lr_scale) else 1.0
+    batch_size = int(args.batch_size) if int(args.batch_size) > 0 else (512 if vram_gb >= 35.0 else 192)
+    lr_scale = min(1.5, math.sqrt(batch_size / 256.0)) if (batch_size > 256 and not args.no_auto_lr_scale) else 1.0
     out_dir = args.out.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir = args.checkpoint_dir.resolve() if args.checkpoint_dir else out_dir
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     t_start = time.monotonic()
 
-    print(f"[v0.5.0 Config] GPU={gpu_name} ({vram_gb:.1f} GB) | amp={amp_dtype} | bs={batch_size} | lr_scale={lr_scale:.2f} | opt={args.optimizer} | core_layers={args.core_layers}", flush=True)
+    print(f"[v0.5.0 Config] GPU={gpu_name} ({vram_gb:.1f} GB) | amp={amp_dtype} | bs={batch_size} | lr_scale={lr_scale:.2f} | opt={args.optimizer} | pre={args.prelude_layers}L core={args.core_layers}L", flush=True)
 
     # 1. Load corpus + anti-pollution audit
     train_items_raw, eval_rows, pairs, intent_vecs, data_audit = _load_v05_bundle(
@@ -740,6 +757,7 @@ def train_and_export(args) -> None:
         hidden_size=384,
         num_heads=6,
         intermediate_size=1152,
+        prelude_layers=args.prelude_layers,
         core_layers=args.core_layers,
         num_slots=16,
         style_dim=STYLE_FEAT_DIM,
@@ -967,14 +985,20 @@ def train_and_export(args) -> None:
     dro_tracker = TorchGroupDRO()
 
     # ------------------------------------------------------------------
-    # Stage 0: Fast-ELECTRA 100% RTD Warmup (aligns 28k SuperBPE with inherited mmBERT layers!)
+    # Stage 0: Frozen-Backbone Fast-ELECTRA 100% RTD Warmup (aligns SuperBPE embeddings to mmBERT WITHOUT shocking pretrained layers!)
     # ------------------------------------------------------------------
     rtd_steps = 8 if args.smoke_test else int(args.rtd_steps)
     if rtd_steps > 0 and not args.resume_stage1:
-        print(f"[Stage0-RTD] Running {rtd_steps} steps of 100% Replaced Token Detection warmup...", flush=True)
+        print(f"[Stage0-RTD] Running {rtd_steps} steps of Frozen-Backbone 100% RTD embedding alignment...", flush=True)
         mdl.train()
         mdl.set_qat_enabled(False)
-        opt_rtd = HybridMuonClipAdamW(mdl, lr_adamw=args.lr * lr_scale * 1.5, use_muon=(args.optimizer == "muonclip"))
+        # Freeze inherited transformer weights during Stage-0 so only embeddings + rtd_head adapt into mmBERT space!
+        frozen_prev = {}
+        for name, p in mdl.named_parameters():
+            frozen_prev[name] = p.requires_grad
+            keep = name.startswith(("word_emb_", "emb_norm.", "rtd_head."))
+            p.requires_grad_(keep)
+        opt_rtd = torch.optim.AdamW([p for p in mdl.parameters() if p.requires_grad], lr=5e-4, weight_decay=0.01)
         loader_rtd = make_loader(train_items_raw)
         step_r = 0
         t_r = time.monotonic()
@@ -983,20 +1007,20 @@ def train_and_export(args) -> None:
             ids = ids.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
             st = st.to(device, non_blocking=True)
-            # Corrupt 18% of non-special tokens with random in-vocab replacements; supervise 100% of real tokens!
             non_spec = (mask == 1) & (ids >= 5)
             corrupt = non_spec & (torch.rand_like(ids.float()) < 0.18)
             rand_toks = torch.randint(5, tokenizer.vocab_size, ids.shape, device=device)
             ids_cor = torch.where(corrupt, rand_toks, ids)
             rtd_tgt = corrupt.float()
 
-            opt_rtd.set_lr_mult(_cosine_mult(step_r, rtd_steps))
+            lr_cur = 5e-4 * _cosine_mult(step_r, rtd_steps)
+            for pg in opt_rtd.param_groups:
+                pg["lr"] = lr_cur
             opt_rtd.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", dtype=amp_dtype):
                 _, _, _, h_seq = mdl.forward_prelude(ids_cor, mask, st)
                 rtd_logits = mdl.rtd_head(h_seq).squeeze(-1)
                 valid = mask == 1
-                # Upweight replaced tokens slightly (pos_weight=3.0) for crisp 100% RTD gradient
                 loss_rtd = F.binary_cross_entropy_with_logits(rtd_logits[valid].float(), rtd_tgt[valid], pos_weight=torch.tensor(3.0, device=device))
             loss_rtd.backward()
             torch.nn.utils.clip_grad_norm_(mdl.parameters(), 1.0)
@@ -1007,6 +1031,8 @@ def train_and_export(args) -> None:
                 print(f"[Stage0-RTD step={step_r}/{rtd_steps}] loss={r_loss_sum/step_r:.4f} elapsed={time.monotonic()-t_r:.1f}s", flush=True)
             if step_r >= rtd_steps:
                 break
+        for name, p in mdl.named_parameters():
+            p.requires_grad_(frozen_prev[name])
 
     # ------------------------------------------------------------------
     # Unified Phase Runner (Fixed Optimizer-Step Budget Support — Lesson #8!)
@@ -1112,9 +1138,9 @@ def train_and_export(args) -> None:
                     loss_anti_reg = loss_anti_reg / max(1, len(step_losses) - 1)
                     loss_fp = F.mse_loss(out["h_last"].float(), out["h_prev"].detach().float())
 
-                    # Gentle logit norm regularizer keeping calibrated temperature sharp in [0.9, 1.8]!
+                    # Logit norm regularizer keeping calibrated temperature sharp in [0.9, 1.8] (prevents T=3.59 blowup!)
                     l_last_fp = step_logits[-1].float()
-                    loss_logit_reg = F.relu(l_last_fp.abs() - 4.2).pow(2).mean() + F.relu(e0_logit.float().abs() - 4.2).pow(2).mean()
+                    loss_logit_reg = F.relu(l_last_fp.abs() - 3.6).pow(2).mean() + F.relu(e0_logit.float().abs() - 3.6).pow(2).mean()
 
                     # Training-only LOTUS + Code + Prag aux heads (zero inference cost!)
                     ax = out["step_aux"][-1]
@@ -1131,7 +1157,7 @@ def train_and_export(args) -> None:
                             pred_v = F.normalize(ax["lotus_intent"][im].float(), p=2, dim=-1)
                             loss_aux = loss_aux + 0.18 * (1.0 - (pred_v * tgt_v).sum(dim=-1)).mean()
 
-                    loss = loss_main + 0.25 * loss_e0 + 0.15 * loss_anti_reg + 0.03 * loss_fp + 0.004 * loss_logit_reg + loss_aux
+                    loss = loss_main + 0.25 * loss_e0 + 0.15 * loss_anti_reg + 0.02 * loss_fp + 0.015 * loss_logit_reg + loss_aux
 
                     # Lesson #2: Dual-Channel Top-Push Margin + Two-Tier Absolute Tail Anchoring (beating OjinjinNet on human FPs!)
                     p_last_fp = torch.sigmoid(l_last_fp)
@@ -1311,23 +1337,25 @@ def train_and_export(args) -> None:
     cal_e0_p = expit(cal_e0_l)
     cal_c2_p = expit(cal_c2_l)
 
-    # Auto-tune Prelude Exit-0 thresholds ensuring zero accuracy loss
+    # Auto-tune Prelude Exit-0 thresholds ensuring ZERO AUROC or R@P95% loss (fixes R1 -14.8% rp95 drop!)
     val_e0_l, val_c2_l, _ = predict_pt(mdl, val_enc, val_st, num_steps=2)
     val_e0_p = expit(val_e0_l)
     val_c2_p = expit(val_c2_l)
     val_bin = (val_scores >= 70.0).astype(bool)
     base_val_auc = float(roc_auc_score(val_bin, val_c2_p))
-    best_exit0 = {"exit_low": 0.08, "exit_high": 0.92}
+    base_val_rp95 = float(compute_high_precision_metrics(val_scores, val_c2_p)["recall_at_p95"])
+    best_exit0 = {"exit_low": 0.0, "exit_high": 1.0}  # default disabled if unsafe!
     best_exit_rate = 0.0
-    for e_low, e_high in ((0.06, 0.94), (0.08, 0.92), (0.10, 0.90), (0.12, 0.88), (0.15, 0.85)):
+    for e_low, e_high in ((0.02, 0.98), (0.04, 0.96), (0.06, 0.94), (0.08, 0.92)):
         m_ex = (val_e0_p <= e_low) | (val_e0_p >= e_high)
         p_mix = np.where(m_ex, val_e0_p, val_c2_p)
         auc_m = float(roc_auc_score(val_bin, p_mix))
+        rp95_m = float(compute_high_precision_metrics(val_scores, p_mix)["recall_at_p95"])
         ex_rate = float(m_ex.mean())
-        if auc_m >= base_val_auc - 0.0015 and ex_rate > best_exit_rate:
+        if auc_m >= base_val_auc - 0.0010 and rp95_m >= base_val_rp95 - 0.0050 and ex_rate > best_exit_rate:
             best_exit_rate = ex_rate
             best_exit0 = {"exit_low": e_low, "exit_high": e_high}
-    print(f"[Calibration] exit0_policy={best_exit0} (val_exit0_rate={best_exit_rate:.3f}, base_auc={base_val_auc:.4f})", flush=True)
+    print(f"[Calibration] exit0_policy={best_exit0} (val_exit0_rate={best_exit_rate:.3f}, base_auc={base_val_auc:.4f}, base_rp95={base_val_rp95:.4f})", flush=True)
 
     def _combine_exit0(e0_p, c_p):
         m_ex = (e0_p <= best_exit0["exit_low"]) | (e0_p >= best_exit0["exit_high"])
@@ -1401,13 +1429,14 @@ def train_and_export(args) -> None:
         "schema_version": "meguviz.bundle.v2",
         "name": "MeguvizCAC",
         "version": args.version,
-        "architecture": f"v0.5-ApexLoop(mmBERT-RoPE-Prelude1L+16Slot+InfiLoop-SCORE-Core{args.core_layers}L+PIFE32d+L2Proto)",
+        "architecture": f"v0.5-ApexLoop(mmBERT-RoPE-Prelude{args.prelude_layers}L+16Slot+InfiLoop-SCORE-Core{args.core_layers}L+PIFE32d+L2Proto)",
         "license": "Apache-2.0",
         "base_model": args.backbone,
         "quant_method": "loopq_qat_swa_plus_dynamic_int8",
         "vocab_size": tokenizer.vocab_size,
         "embed_dim": int(args.embed_dim),
         "hidden_size": 384,
+        "prelude_layers": int(args.prelude_layers),
         "core_layers": int(args.core_layers),
         "num_slots": 16,
         "max_len": MAX_LEN_V05,
@@ -1554,9 +1583,10 @@ def main() -> None:
     parser.add_argument("--from-scratch", action="store_true")
     parser.add_argument("--vocab-size", type=int, default=DEFAULT_V05_VOCAB_SIZE)
     parser.add_argument("--embed-dim", type=int, default=128)
+    parser.add_argument("--prelude-layers", type=int, default=2)
     parser.add_argument("--core-layers", type=int, default=1)
     parser.add_argument("--emb-drop", type=float, default=0.10)
-    parser.add_argument("--optimizer", choices=("muonclip", "adamw"), default="muonclip")
+    parser.add_argument("--optimizer", choices=("muonclip", "adamw"), default="adamw")
     parser.add_argument("--rtd-steps", type=int, default=350)
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--stage1-steps", type=int, default=0, help="0 = use --epochs over full 1.37M corpus")

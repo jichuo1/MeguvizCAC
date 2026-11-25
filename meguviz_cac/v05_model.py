@@ -66,22 +66,23 @@ class QATLinear(nn.Module):
         return F.linear(x, w, self.bias)
 
 
-class RMSNorm(nn.Module):
-    """1-pass RMSNorm (single-scale option for OSP outlier suppression)."""
+class NoBiasLayerNorm(nn.Module):
+    """Exact mmBERT-compatible mean-centered LayerNorm without bias (ONNX-friendly, zero init mismatch)."""
 
-    def __init__(self, dim: int, eps: float = 1e-5, single_scale: bool = False):
+    def __init__(self, dim: int, eps: float = 1e-5):
         super().__init__()
         self.eps = float(eps)
-        self.single_scale = bool(single_scale)
-        self.weight = nn.Parameter(torch.ones(1 if single_scale else dim))
+        self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        inv_rms = torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps).to(x.dtype)
-        return x * inv_rms * self.weight
+        xf = x.float()
+        mean = xf.mean(dim=-1, keepdim=True)
+        var = (xf - mean).pow(2).mean(dim=-1, keepdim=True)
+        return ((xf - mean) * torch.rsqrt(var + self.eps)).to(x.dtype) * self.weight
 
 
 class AdaRMSNorm(nn.Module):
-    """Zero-LoRA-MatMul step-modulated RMSNorm driven by continuous budget progress tau."""
+    """Zero-LoRA-MatMul step-modulated LayerNorm driven by continuous budget progress tau (mmBERT-compatible)."""
 
     def __init__(self, dim: int, eps: float = 1e-5):
         super().__init__()
@@ -89,8 +90,11 @@ class AdaRMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor, scale_delta: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
-        inv_rms = torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps).to(x.dtype)
-        return x * inv_rms * (self.weight + scale_delta) + shift
+        xf = x.float()
+        mean = xf.mean(dim=-1, keepdim=True)
+        var = (xf - mean).pow(2).mean(dim=-1, keepdim=True)
+        normed = ((xf - mean) * torch.rsqrt(var + self.eps)).to(x.dtype)
+        return normed * (self.weight + scale_delta) + shift
 
 
 class QKNorm(nn.Module):
@@ -144,39 +148,48 @@ def build_tau_features(tau: float, dt: float, device: torch.device, dtype: torch
 
 
 class ModernPreludeBlock(nn.Module):
-    """Single Modern RoPE + RMSNorm + GeGLU + QK-Norm Prelude layer (directly inherits mmBERT-small layer 0)."""
+    """Modern RoPE + NoBiasLayerNorm + GeGLU + DWConv Prelude layer (zero-mismatch mmBERT-small inheritance)."""
 
-    def __init__(self, hidden_size: int = 384, num_heads: int = 6, intermediate_size: int = 1152, max_len: int = MAX_LEN_V05, eps: float = 1e-5, drop_p: float = 0.08):
+    def __init__(
+        self,
+        hidden_size: int = 384,
+        num_heads: int = 6,
+        intermediate_size: int = 1152,
+        max_len: int = MAX_LEN_V05,
+        eps: float = 1e-5,
+        drop_p: float = 0.08,
+        skip_attn_norm: bool = False,
+        rope_theta: float = 160000.0,
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         self.scale = 1.0 / math.sqrt(self.head_dim)
+        self.skip_attn_norm = bool(skip_attn_norm)
 
-        self.attn_norm = RMSNorm(hidden_size, eps=eps)
+        self.attn_norm = nn.Identity() if skip_attn_norm else NoBiasLayerNorm(hidden_size, eps=eps)
         self.wqkv = QATLinear(hidden_size, 3 * hidden_size, bias=False)
         self.wo = QATLinear(hidden_size, hidden_size, bias=False)
-        self.q_norm = QKNorm(num_heads, self.head_dim)
-        self.k_norm = QKNorm(num_heads, self.head_dim)
 
-        self.mlp_norm = RMSNorm(hidden_size, eps=eps)
+        self.mlp_norm = NoBiasLayerNorm(hidden_size, eps=eps)
         self.wi = QATLinear(hidden_size, 2 * intermediate_size, bias=False)
         self.wdown = QATLinear(intermediate_size, hidden_size, bias=False)
-        # Topic-invariant multi-scale local phrasing DWConv (k=3, 5, 7 — inspired by Nano cadence strength, <0.02 MB!)
+        # Topic-invariant multi-scale local phrasing DWConv (k=3, 5, 7 — <0.02 MB, near-zero init to preserve mmBERT!)
         self.dw3 = nn.Conv1d(hidden_size, hidden_size, kernel_size=3, padding=1, groups=hidden_size, bias=False)
         self.dw5 = nn.Conv1d(hidden_size, hidden_size, kernel_size=5, padding=2, groups=hidden_size, bias=False)
         self.dw7 = nn.Conv1d(hidden_size, hidden_size, kernel_size=7, padding=3, groups=hidden_size, bias=False)
-        self.dw_gate = nn.Parameter(torch.full((1, 1, hidden_size), -2.5))
+        self.dw_gate = nn.Parameter(torch.full((1, 1, hidden_size), -3.5))
         self.drop = nn.Dropout(drop_p)
         self.use_sdpa = False
 
-        cos, sin = precompute_rope(max_len, self.head_dim, theta=160000.0)
+        cos, sin = precompute_rope(max_len, self.head_dim, theta=rope_theta)
         self.register_buffer("rope_cos", cos)
         self.register_buffer("rope_sin", sin)
 
     def load_from_mmbert_layer(self, layer) -> None:
         with torch.no_grad():
-            if hasattr(layer, "attn_norm") and hasattr(layer.attn_norm, "weight"):
+            if (not self.skip_attn_norm) and hasattr(layer, "attn_norm") and hasattr(layer.attn_norm, "weight"):
                 self.attn_norm.weight.copy_(layer.attn_norm.weight)
             self.wqkv.weight.copy_(layer.attn.Wqkv.weight)
             self.wo.weight.copy_(layer.attn.Wo.weight)
@@ -198,8 +211,8 @@ class ModernPreludeBlock(nn.Module):
 
         cos = self.rope_cos[:, :, :l, :].to(q.dtype)
         sin = self.rope_sin[:, :, :l, :].to(q.dtype)
-        q = self.q_norm(apply_rope_half(q, cos, sin))
-        k = self.k_norm(apply_rope_half(k, cos, sin))
+        q = apply_rope_half(q, cos, sin)
+        k = apply_rope_half(k, cos, sin)
 
         if self.use_sdpa:
             ctx = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias.to(q.dtype), dropout_p=self.drop.p if self.training else 0.0)
@@ -235,7 +248,7 @@ class StaticSlotCompressor(nn.Module):
         self.o_proj = QATLinear(hidden_size, hidden_size, bias=False)
         self.q_norm = QKNorm(num_heads, self.head_dim)
         self.k_norm = QKNorm(num_heads, self.head_dim)
-        self.out_norm = RMSNorm(hidden_size, eps=eps)
+        self.out_norm = NoBiasLayerNorm(hidden_size, eps=eps)
         self.drop = nn.Dropout(drop_p)
         self.use_sdpa = False
 
@@ -257,7 +270,7 @@ class StaticSlotCompressor(nn.Module):
 
 
 class ApexCoreBlock(nn.Module):
-    """Zero-LoRA-MatMul Shared Core running ONLY on fixed [B, 16, 384] with AdaRMSNorm + SCORE + OperLoop + GRT + Orthogonal Injection."""
+    """Contractive Shared Core running on fixed [B, 16, 384] with AdaLayerNorm + SCORE + Post-Norm stability lock."""
 
     def __init__(self, hidden_size: int = 384, num_heads: int = 6, intermediate_size: int = 1152, eps: float = 1e-5, drop_p: float = 0.08):
         super().__init__()
@@ -269,20 +282,18 @@ class ApexCoreBlock(nn.Module):
         self.attn_norm = AdaRMSNorm(hidden_size, eps=eps)
         self.wqkv = QATLinear(hidden_size, 3 * hidden_size, bias=False)
         self.wo = QATLinear(hidden_size, hidden_size, bias=False)
-        self.q_norm = QKNorm(num_heads, self.head_dim)
-        self.k_norm = QKNorm(num_heads, self.head_dim)
 
         self.mlp_norm = AdaRMSNorm(hidden_size, eps=eps)
         self.wi = QATLinear(hidden_size, 2 * intermediate_size, bias=False)
         self.wdown = QATLinear(intermediate_size, hidden_size, bias=False)
+        self.post_norm = NoBiasLayerNorm(hidden_size, eps=eps)
 
-        # Continuous budget progress tau = t/T_budget -> AdaRMSNorm mods + OperLoop decay/eta + GRT gate
+        # Continuous budget progress tau = t/T_budget -> AdaLayerNorm mods + OperLoop decay/eta + GRT gate
         self.tau_mlp = nn.Sequential(
             nn.Linear(8, 64),
             nn.SiLU(),
             nn.Linear(64, 4 * hidden_size + 3),
         )
-        # Initialize last layer near zero so step 0 starts close to pretrained mmBERT weights!
         nn.init.normal_(self.tau_mlp[-1].weight, mean=0.0, std=0.01)
         nn.init.zeros_(self.tau_mlp[-1].bias)
 
@@ -306,19 +317,19 @@ class ApexCoreBlock(nn.Module):
             self.wdown.weight.copy_(layer.mlp.Wo.weight)
 
     def forward(self, h: torch.Tensor, z0: torch.Tensor, tau_feat: torch.Tensor) -> torch.Tensor:
-        """One contractive SCORE + OperLoop + GRT step on fixed [B, 16, D] (FP16 residual highway)."""
+        """One strictly norm-bounded contractive SCORE + OperLoop + GRT step on fixed [B, 16, D]."""
         b, n_slots, d = h.shape
         mods = self.tau_mlp(tau_feat)
         s1, sh1, s2, sh2 = mods[: 4 * d].chunk(4)
-        s1 = 0.25 * torch.tanh(s1)
-        sh1 = 0.25 * torch.tanh(sh1)
-        s2 = 0.25 * torch.tanh(s2)
-        sh2 = 0.25 * torch.tanh(sh2)
+        s1 = 0.20 * torch.tanh(s1)
+        sh1 = 0.20 * torch.tanh(sh1)
+        s2 = 0.20 * torch.tanh(s2)
+        sh2 = 0.20 * torch.tanh(sh2)
 
         dt_in = tau_feat[1]  # explicit 1 / T_budget SCORE contractive step size
-        eta = (0.65 + 0.70 * torch.sigmoid(mods[4 * d])) * dt_in
-        decay = 0.20 * torch.sigmoid(mods[4 * d + 1]) * dt_in
-        orth_w = 0.25 * torch.sigmoid(mods[4 * d + 2])
+        eta = (0.35 + 0.45 * torch.sigmoid(mods[4 * d])) * dt_in
+        decay = 0.15 * torch.sigmoid(mods[4 * d + 1]) * dt_in
+        orth_w = 0.20 * torch.sigmoid(mods[4 * d + 2])
 
         # Orthogonal Prelude Input Injection (arXiv:2610.06833): strip component parallel to h
         h_f = h.float()
@@ -328,8 +339,8 @@ class ApexCoreBlock(nn.Module):
 
         u = self.attn_norm(h + orth_w * e_orth, s1, sh1)
         qkv = self.wqkv(u).view(b, n_slots, 3, self.num_heads, self.head_dim)
-        q = self.q_norm(qkv[:, :, 0].transpose(1, 2))
-        k = self.k_norm(qkv[:, :, 1].transpose(1, 2))
+        q = qkv[:, :, 0].transpose(1, 2)
+        k = qkv[:, :, 1].transpose(1, 2)
         v = qkv[:, :, 2].transpose(1, 2)
 
         if self.use_sdpa:
@@ -341,14 +352,14 @@ class ApexCoreBlock(nn.Module):
             ctx = torch.matmul(att, v)
         ctx = ctx.transpose(1, 2).contiguous().view(b, n_slots, d)
 
-        # Residual highway kept in high precision (LoopQ anti-Feedback-Exposure)
         h_mid = h + (eta * self.drop(self.wo(ctx)))
 
         u2 = self.mlp_norm(h_mid, s2, sh2)
         a, g = self.wi(u2).chunk(2, dim=-1)
         ff_delta = self.drop(self.wdown(F.gelu(a) * g))
         grt_g = torch.sigmoid(self.grt_gate(torch.cat([h_mid, z0], dim=-1)))
-        h_next = (1.0 - decay) * h_mid + grt_g * (eta * ff_delta)
+        # Post-step NoBiasLayerNorm guarantees state norm stays strictly O(1) across R=2/4/6!
+        h_next = self.post_norm((1.0 - decay) * h_mid + grt_g * (eta * ff_delta))
         return h_next
 
 
@@ -362,6 +373,7 @@ class MeguvizV05ApexLoopModel(nn.Module):
         hidden_size: int = 384,
         num_heads: int = 6,
         intermediate_size: int = 1152,
+        prelude_layers: int = 2,
         core_layers: int = 1,
         num_slots: int = 16,
         style_dim: int = STYLE_FEAT_DIM,
@@ -379,18 +391,32 @@ class MeguvizV05ApexLoopModel(nn.Module):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.intermediate_size = intermediate_size
-        self.core_layers = core_layers
+        self.prelude_layers = int(prelude_layers)
+        self.core_layers = int(core_layers)
         self.num_slots = num_slots
         self.style_dim = style_dim
 
         # Factorized W4-ready embedding
         self.word_emb_A = QATEmbedding(vocab_size, embed_dim)
         self.word_emb_P = QATLinear(embed_dim, hidden_size, bias=False)
-        self.emb_norm = RMSNorm(hidden_size, eps=eps)
+        self.emb_norm = NoBiasLayerNorm(hidden_size, eps=eps)
         self.emb_drop = nn.Dropout(emb_drop_p)
 
-        # Prelude (1L Modern RoPE + RMSNorm + GeGLU)
-        self.prelude = ModernPreludeBlock(hidden_size, num_heads, intermediate_size, max_len=MAX_LEN_V05, eps=eps)
+        # Multi-layer Modern RoPE + NoBiasLayerNorm + GeGLU + DWConv Prelude (inherits mmBERT L0 + L3 global!)
+        self.prelude_blocks = nn.ModuleList(
+            [
+                ModernPreludeBlock(
+                    hidden_size,
+                    num_heads,
+                    intermediate_size,
+                    max_len=MAX_LEN_V05,
+                    eps=eps,
+                    skip_attn_norm=(i == 0),
+                    rope_theta=160000.0,
+                )
+                for i in range(self.prelude_layers)
+            ]
+        )
 
         # 32-d Zero-PII Native Stylometric + PIFE Forensics Branch
         self.style_net = nn.Sequential(
@@ -407,8 +433,8 @@ class MeguvizV05ApexLoopModel(nn.Module):
         nn.init.zeros_(self.ctx_echo_net[-1].weight)
         nn.init.zeros_(self.ctx_echo_net[-1].bias)
 
-        # Prelude Fast Exit-0 Head (~50-60% clear comments exit before Core!)
-        self.exit0_norm = RMSNorm(hidden_size, eps=eps)
+        # Prelude Fast Exit-0 Head (runs after full 2L Prelude — only exits ultra-confident comments!)
+        self.exit0_norm = NoBiasLayerNorm(hidden_size, eps=eps)
         self.exit0_head = QATLinear(hidden_size, 1, bias=True)
         self.register_buffer("exit0_temperature", torch.tensor(1.0, dtype=torch.float32))
 
@@ -426,7 +452,7 @@ class MeguvizV05ApexLoopModel(nn.Module):
         self.infiloop_decay = nn.Parameter(torch.tensor(0.35))
 
         # Coda Readout + 256-d L2 Embedding Export for L2 Prototype/Mahalanobis OOD
-        self.coda_norm = RMSNorm(hidden_size, eps=eps)
+        self.coda_norm = NoBiasLayerNorm(hidden_size, eps=eps)
         self.coda_proj = QATLinear(2 * hidden_size, 256, bias=True)
         self.ai_head = QATLinear(256, 1, bias=True)
         self.register_buffer("coda_temperature", torch.tensor(1.0, dtype=torch.float32))
@@ -447,16 +473,19 @@ class MeguvizV05ApexLoopModel(nn.Module):
             self.word_emb_P.weight.copy_(torch.from_numpy(p_mat.T))
             if hasattr(mmbert_model.embeddings, "norm") and hasattr(mmbert_model.embeddings.norm, "weight"):
                 self.emb_norm.weight.copy_(mmbert_model.embeddings.norm.weight)
-            # Layer 0 -> Prelude; Global Layers 6 & 15 (if core_layers>=2) or 9 -> Core!
-            self.prelude.load_from_mmbert_layer(mmbert_model.layers[0])
-            core_src_idxs = [6, 15] if self.core_layers >= 2 else [9]
+            # Inherit mmBERT-small global layers: Prelude -> [0, 3], Core -> [9] (or [6, 15] if 2L core)
+            pre_src_idxs = [0, 3, 6][: self.prelude_layers]
+            for blk, s_idx in zip(self.prelude_blocks, pre_src_idxs):
+                blk.load_from_mmbert_layer(mmbert_model.layers[min(s_idx, len(mmbert_model.layers) - 1)])
+            core_src_idxs = [9] if self.core_layers == 1 else [9, 15][: self.core_layers]
             for blk, s_idx in zip(self.core_blocks, core_src_idxs):
                 blk.load_from_mmbert_layer(mmbert_model.layers[min(s_idx, len(mmbert_model.layers) - 1)])
             if hasattr(mmbert_model, "final_norm") and hasattr(mmbert_model.final_norm, "weight"):
                 self.coda_norm.weight.copy_(mmbert_model.final_norm.weight)
 
     def set_sdpa(self, enabled: bool) -> None:
-        self.prelude.use_sdpa = bool(enabled)
+        for blk in self.prelude_blocks:
+            blk.use_sdpa = bool(enabled)
         self.compressor.use_sdpa = bool(enabled)
         for blk in self.core_blocks:
             blk.use_sdpa = bool(enabled)
@@ -476,7 +505,9 @@ class MeguvizV05ApexLoopModel(nn.Module):
         x = self.emb_drop(self.emb_norm(self.word_emb_P(self.word_emb_A(input_ids))))
         attn_bias = (1.0 - attention_mask[:, None, None, :].to(x.dtype)) * (-10000.0)
         m_f = attention_mask.to(x.dtype).unsqueeze(-1)
-        h_seq = self.prelude(x, attn_bias, mask_f=m_f)
+        h_seq = x
+        for blk in self.prelude_blocks:
+            h_seq = blk(h_seq, attn_bias, mask_f=m_f)
 
         st_vec = self.style_net(style_feats.to(x.dtype))
         if ctx_echo is not None:
