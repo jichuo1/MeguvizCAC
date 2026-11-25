@@ -86,18 +86,23 @@ def build_agent_pack_zip(
     out_zip: Path,
     stamp: str,
     max_batches_per_queue: dict[str, int] | None = None,
+    slice_ranges: dict[str, tuple[int, int]] | None = None,
 ) -> dict:
-    """Pack sanitized offline_pack_tier1 prompts + empty replies/ dirs + README into a portable ZIP."""
+    """Pack sanitized offline_pack_tier1 prompts + empty replies/ dirs + README into a portable ZIP.
+
+    Supports BOTH `max_batches_per_queue` (legacy single wave) AND `slice_ranges` (`{queue: (start_idx, end_idx)}`)
+    for disjoint parallel multi-wave dispatching across multiple external Gemini agents!
+    """
     pack_root = work_dir / "offline_pack_tier1"
     queues_dir = work_dir / "queues"
     if not pack_root.is_dir():
         raise FileNotFoundError(f"Missing {pack_root}; run 02_run_gemini_factory.py --mode pack first.")
 
     q_meta = {
-        "A_noise_surgery": ("噪声手术（灰区/硬组清洗）", "gemini-2.5-flash -> pro"),
-        "B_wild_hard_mining": ("2026现代野生难例（破年代捷径）", "gemini-2.5-flash -> pro"),
+        "A_noise_surgery": ("噪声手术（灰区/硬组清洗）", "gemini-2.5-flash -> pro 复核"),
+        "B_wild_hard_mining": ("2026现代野生难例（破年代捷径）", "gemini-2.5-flash -> pro 复核"),
         "C_counterfactual_spans": ("反事实最小对 & 三明治混写Span", "gemini-2.5-pro 推荐"),
-        "D_thread_context": ("楼中楼与视频标题上下文裁决", "gemini-2.5-flash -> pro"),
+        "D_thread_context": ("楼中楼与视频标题上下文裁决", "gemini-2.5-flash -> pro 复核"),
     }
 
     root_name = out_zip.stem
@@ -112,7 +117,10 @@ def build_agent_pack_zip(
             if not pdir.is_dir():
                 continue
             pfiles = sorted(pdir.glob("*.txt"))
-            if max_batches_per_queue and qname in max_batches_per_queue:
+            if slice_ranges and qname in slice_ranges:
+                lo, hi = slice_ranges[qname]
+                pfiles = pfiles[lo:hi]
+            elif max_batches_per_queue and qname in max_batches_per_queue:
                 pfiles = pfiles[: max_batches_per_queue[qname]]
             if not pfiles:
                 continue
@@ -137,7 +145,12 @@ def build_agent_pack_zip(
             total_rows += q_rows
             desc, mdl = q_meta[qname]
             table_lines.append(f"| `{qname}` | {desc} | {len(pfiles)} | {q_rows:,} | {mdl} |")
-            stats[qname] = {"batches": len(pfiles), "rows": q_rows}
+            stats[qname] = {
+                "batches": len(pfiles),
+                "rows": q_rows,
+                "first_batch": pfiles[0].stem,
+                "last_batch": pfiles[-1].stem,
+            }
 
         readme = AGENT_README_TEMPLATE.format(
             stamp=stamp,
@@ -152,6 +165,73 @@ def build_agent_pack_zip(
         "total_prompt_files": total_files,
         "total_rows": total_rows,
         "queues": stats,
+        "canary_vault_excluded": True,
+    }
+
+
+def build_parallel_multiwave_zips(
+    work_dir: Path,
+    num_waves: int,
+    stamp: str,
+    waves_subdir: str = "waves",
+) -> dict:
+    """Slice ALL 4 queues into `num_waves` 100% disjoint, balanced parallel Wave ZIPs (ZERO overlap!)."""
+    pack_root = work_dir / "offline_pack_tier1"
+    waves_dir = work_dir / waves_subdir
+    waves_dir.mkdir(parents=True, exist_ok=True)
+
+    q_names = ("A_noise_surgery", "B_wild_hard_mining", "C_counterfactual_spans", "D_thread_context")
+    q_counts = {q: len(sorted((pack_root / q / "prompts").glob("*.txt"))) if (pack_root / q / "prompts").is_dir() else 0 for q in q_names}
+
+    wave_infos: list[dict] = []
+    md_rows: list[str] = []
+    grand_rows = 0
+    grand_shards = 0
+
+    for wi in range(num_waves):
+        ranges: dict[str, tuple[int, int]] = {}
+        for q, n_tot in q_counts.items():
+            if n_tot <= 0:
+                continue
+            lo = (wi * n_tot) // num_waves
+            hi = ((wi + 1) * n_tot) // num_waves
+            ranges[q] = (lo, hi)
+
+        w_tag = f"wave{wi + 1:02d}"
+        out_zip = waves_dir / f"meguviz-v08-{stamp}-{w_tag}.zip"
+        info = build_agent_pack_zip(work_dir, out_zip, f"{stamp}-{w_tag}", slice_ranges=ranges)
+        info["wave_id"] = w_tag
+        wave_infos.append(info)
+        grand_rows += info["total_rows"]
+        grand_shards += info["total_prompt_files"]
+        qs = info["queues"]
+        md_rows.append(
+            f"| `{w_tag}` | `{out_zip.name}` | {info['zip_bytes']/1024/1024:.2f} MB | {info['total_prompt_files']} | {info['total_rows']:,} | "
+            f"A:{qs.get('A_noise_surgery',{}).get('rows',0):,} / B:{qs.get('B_wild_hard_mining',{}).get('rows',0):,} / "
+            f"C:{qs.get('C_counterfactual_spans',{}).get('rows',0):,} / D:{qs.get('D_thread_context',{}).get('rows',0):,} |"
+        )
+
+    dispatch_md = (
+        f"# MeguvizCAC v0.8.0 并行多 Wave 外部 Gemini 派发总表（{num_waves} Waves · 总计 {grand_rows:,} 条 / {grand_shards:,} 分片）\n\n"
+        "- **严格互不重叠**：20 个 Wave 间分片 100% 互斥，且与已回收的 Wave-1（4,110 条）100% 互斥。\n"
+        "- **并行派发方式**：每个外部 Gemini 会话分发 1 个 `meguviz-v08-...-waveXX.zip`；可同时开 4~20 个外部 Gemini 并行跑，跑完打包 `replies/`（可选附带 `tier2_pro_adjudication_manifest.jsonl`）发回即可。\n"
+        "- **每波独立质检**：每个 Wave 均内置 ~20–40 条匿名隐藏 `val_gold` 金丝雀，回收时 `05_collect_multiwave_replies.py` 自动逐波验收 AUROC/Spearman/Bias 并 100% 剥离。\n\n"
+        "| Wave | 压缩包 | 体积 | 分片数 | 总条数 | 队列构成 (A / B / C / D) |\n"
+        "| :--- | :--- | ---: | ---: | ---: | :--- |\n"
+        + "\n".join(md_rows)
+        + "\n"
+    )
+    (waves_dir / "ALL_WAVES_DISPATCH.md").write_text(dispatch_md, encoding="utf-8")
+    (waves_dir / "waves_manifest.json").write_text(
+        json.dumps({"stamp": stamp, "num_waves": num_waves, "grand_rows": grand_rows, "grand_shards": grand_shards, "waves": wave_infos}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "waves_dir": str(waves_dir),
+        "num_waves": num_waves,
+        "grand_rows": grand_rows,
+        "grand_shards": grand_shards,
+        "dispatch_md": str(waves_dir / "ALL_WAVES_DISPATCH.md"),
         "canary_vault_excluded": True,
     }
 
@@ -204,13 +284,17 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--work-dir", type=Path, required=True)
     ap.add_argument("--stamp", type=str, default=time.strftime("%Y%m%d-%H%M"))
-    ap.add_argument("--agent-wave-batches", type=int, default=50, help="Max prompt files per queue in the Agent Wave-1 ZIP (0 = all)")
+    ap.add_argument("--agent-wave-batches", type=int, default=50, help="Max prompt files per queue in single Agent Wave-1 ZIP (0 = all)")
+    ap.add_argument("--num-waves", type=int, default=0, help="If > 0, slice ALL queues into N disjoint parallel Wave ZIPs under waves/")
+    ap.add_argument("--skip-batch-zip", action="store_true", help="Skip packing batch_api_tier1 ZIP")
     args = ap.parse_args()
 
     work_dir = args.work_dir.resolve()
     out_summary: dict = {"stamp": args.stamp, "work_dir": str(work_dir)}
 
-    if (work_dir / "offline_pack_tier1").is_dir():
+    if args.num_waves > 0 and (work_dir / "offline_pack_tier1").is_dir():
+        out_summary["multiwave_packs"] = build_parallel_multiwave_zips(work_dir, args.num_waves, args.stamp)
+    elif (work_dir / "offline_pack_tier1").is_dir():
         caps = None
         if args.agent_wave_batches > 0:
             caps = {
@@ -222,8 +306,8 @@ def main() -> None:
         agent_zip = work_dir / f"meguviz-v08-gemini-agent-wave1-{args.stamp}.zip"
         out_summary["agent_pack_zip"] = build_agent_pack_zip(work_dir, agent_zip, args.stamp, max_batches_per_queue=caps)
 
-    if (work_dir / "batch_api_tier1").is_dir():
-        batch_zip = work_dir / f"meguviz-v08-gemini-batch-api-100k-{args.stamp}.zip"
+    if not args.skip_batch_zip and (work_dir / "batch_api_tier1").is_dir():
+        batch_zip = work_dir / f"meguviz-v08-gemini-batch-api-{args.stamp}.zip"
         out_summary["batch_api_zip"] = build_batch_api_zip(work_dir, batch_zip, args.stamp)
 
     print(json.dumps(out_summary, ensure_ascii=False, indent=2))

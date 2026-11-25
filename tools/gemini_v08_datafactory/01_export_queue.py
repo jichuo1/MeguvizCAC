@@ -315,8 +315,8 @@ def mine_queue_a_noise_surgery(
                 bucket_key, mine_reason = "midband_weak", "midband_weak"
             elif sc >= 70.0 and coh in ("bili", "v04_1m"):
                 bucket_key, mine_reason = "high_ai_weak_verify", "real_bili_weak_pos_audit"
-            elif 18.0 <= sc <= 68.0 and len(txt) <= 18:
-                bucket_key, mine_reason = "short_ambig", "short_ambig"
+            elif 12.0 <= sc <= 68.0 and (len(txt) <= 20 or STRUCTURED_TECH_RE.search(txt)):
+                bucket_key, mine_reason = "short_ambig", "short_or_struct_ambig"
             else:
                 continue
 
@@ -497,12 +497,17 @@ def mine_queue_b_and_d_from_sqlite(
             if len(queue_b) >= limit_b:
                 break
 
-    # Finalize Queue D (prefer rows with resolved parent_text, fall back to video_title reply context)
+    # Finalize Queue D (stratify 35% AI-suspect/structured replies + 65% general parent-linked replies!)
     queue_d: list[dict[str, Any]] = []
     if limit_d > 0 and d_candidates:
         rng.shuffle(d_candidates)
-        d_candidates.sort(key=lambda c: 0 if (c["parent_id"] and c["parent_id"] in top_text_by_sid) else 1)
-        for cand in d_candidates:
+        d_ai_struct = [c for c in d_candidates if AI_SUSPECT_WILD_RE.search(c["text"]) or STRUCTURED_TECH_RE.search(c["text"])]
+        d_other = [c for c in d_candidates if not (AI_SUSPECT_WILD_RE.search(c["text"]) or STRUCTURED_TECH_RE.search(c["text"]))]
+        for arr in (d_ai_struct, d_other):
+            arr.sort(key=lambda c: 0 if (c["parent_id"] and c["parent_id"] in top_text_by_sid) else 1)
+        q_prio = int(limit_d * 0.35)
+        ordered_d = d_ai_struct[: q_prio * 2] + d_other
+        for cand in ordered_d:
             ptxt = top_text_by_sid.get(cand["parent_id"], "") if cand["parent_id"] else ""
             n = normalize_text(cand["text"])
             if n in seen_norms or is_near_dup_traps(cand["text"], forbidden_exact, trap_trigrams, trap_inv=trap_inv):
@@ -515,6 +520,7 @@ def mine_queue_b_and_d_from_sqlite(
             queue_d.append(cand)
             if len(queue_d) >= limit_d:
                 break
+        rng.shuffle(queue_d)
 
     return queue_b, queue_d
 
@@ -580,42 +586,69 @@ def inject_hidden_canaries(
     rng: random.Random,
     queue_name: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Blind-mix ~2% val_gold canaries into scoring queues; gold ground truth stays ONLY in local vault."""
+    """Blind-mix ~1-2% balanced val_gold canaries evenly across scoring queues (supports 200k+ multi-wave!)."""
     if canary_rate <= 0.0 or not rows or not val_gold_pool:
         return rows, []
     n_can = max(20 if len(rows) >= 500 else max(2, int(len(rows) * canary_rate)), int(len(rows) * canary_rate))
-    n_can = min(n_can, len(val_gold_pool), max(1, len(rows) // 5))
-    chosen = rng.sample(val_gold_pool, n_can)
-    vault_entries: list[dict[str, Any]] = []
-    mixed = list(rows)
+    n_can = min(n_can, max(1, len(rows) // 5))
+    # Cap at 800 per queue (plenty for 20+ balanced canaries per wave across 20 waves!)
+    n_can = min(n_can, 800)
 
-    for idx, c in enumerate(chosen):
-        # Use opaque blinded ID so Gemini cannot recognize canary vs train row!
-        blind_hash = hashlib.sha256(f"canary|{queue_name}|{c['sample_id']}|{idx}".encode("utf-8")).hexdigest()[:12]
-        blind_sid = f"V8Q_{blind_hash}"
-        mixed.append(
-            {
-                "sample_id": blind_sid,
-                "text": c["text"],
-                "lang_tag": c["lang_tag"],
-                "queue": queue_name,
-                "prior_score": None,
-                "era_bucket": "canary_blind",
-                "mine_reason": "blind_audit",
-            }
-        )
-        vault_entries.append(
-            {
-                "blind_sample_id": blind_sid,
-                "orig_val_sample_id": c["sample_id"],
-                "queue": queue_name,
-                "gold_score": c["gold_score"],
-                "gold_code": c["gold_code"],
-                "score_source": c["score_source"],
-                "group_id": c["group_id"],
-            }
-        )
-    rng.shuffle(mixed)
+    # Balanced sampling across pos (>=70) and neg (<=30) so every parallel wave gets solid binary AUROC!
+    pos_pool = [c for c in val_gold_pool if float(c["gold_score"]) >= 70.0]
+    neg_pool = [c for c in val_gold_pool if float(c["gold_score"]) <= 30.0]
+    mid_pool = [c for c in val_gold_pool if 30.0 < float(c["gold_score"]) < 70.0]
+    chosen: list[dict[str, Any]] = []
+    if n_can <= len(val_gold_pool):
+        chosen = rng.sample(val_gold_pool, n_can)
+    else:
+        n_pos = int(n_can * 0.45)
+        n_neg = int(n_can * 0.45)
+        n_mid = n_can - n_pos - n_neg
+        for pool, k in ((pos_pool, n_pos), (neg_pool, n_neg), (mid_pool or val_gold_pool, n_mid)):
+            if pool and k > 0:
+                while k > 0:
+                    take = min(k, len(pool))
+                    chosen.extend(rng.sample(pool, take))
+                    k -= take
+        rng.shuffle(chosen)
+
+    vault_entries: list[dict[str, Any]] = []
+    # Distribute canaries uniformly across the shuffled queue so every wave slice receives balanced probes!
+    base_rows = list(rows)
+    rng.shuffle(base_rows)
+    mixed: list[dict[str, Any]] = []
+    stride = max(1, len(base_rows) // max(1, len(chosen)))
+    ci = 0
+    for ri, r in enumerate(base_rows):
+        mixed.append(r)
+        if ci < len(chosen) and (ri + 1) % stride == 0:
+            c = chosen[ci]
+            blind_hash = hashlib.sha256(f"canary|{queue_name}|{c['sample_id']}|{ci}".encode("utf-8")).hexdigest()[:12]
+            blind_sid = f"V8Q_{blind_hash}"
+            mixed.append(
+                {
+                    "sample_id": blind_sid,
+                    "text": c["text"],
+                    "lang_tag": c["lang_tag"],
+                    "queue": queue_name,
+                    "prior_score": None,
+                    "era_bucket": "canary_blind",
+                    "mine_reason": "blind_audit",
+                }
+            )
+            vault_entries.append(
+                {
+                    "blind_sample_id": blind_sid,
+                    "orig_val_sample_id": c["sample_id"],
+                    "queue": queue_name,
+                    "gold_score": c["gold_score"],
+                    "gold_code": c["gold_code"],
+                    "score_source": c["score_source"],
+                    "group_id": c["group_id"],
+                }
+            )
+            ci += 1
     return mixed, vault_entries
 
 
