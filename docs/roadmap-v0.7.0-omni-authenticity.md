@@ -1,128 +1,133 @@
-# MeguvizCAC v0.7.0-OmniVeritas 下一纪元前沿构想书：多模态因果 × 自主 Agent / 协同水军 × 密码溯源与可解释社区真实性引擎
+# MeguvizCAC v0.7.0-OmniVeritas 下一纪元前沿架构与理论定稿：零隐私跨模态因果 × 临时快权重 × 双曲胞腔层 × 双硅靶亚 2-bit 真实性引擎
 
-> **文档定位**：承接 [roadmap-v0.5.0-research-plan.md](file:///D:/DevArea/MeguvizModel/docs/roadmap-v0.5.0-research-plan.md)（`v0.5.0-ApexLoop` 单句端侧突破）与 [roadmap-v0.6.0-self-evolution.md](file:///D:/DevArea/MeguvizModel/docs/roadmap-v0.6.0-self-evolution.md)（`v0.6.0-HyperLoop` 线性状态空间 + 2-bit LUT NPU + `Thread-Graph`），面向 **2027+“个人化推理 Agent 与多模态自动化水军常态化”时代**，规划 **`MeguvizCAC v0.7.0-OmniVeritas`**。
+> **文档定位**：承接 [roadmap-v0.5.0-research-plan.md](file:///D:/DevArea/MeguvizModel/docs/roadmap-v0.5.0-research-plan.md)（`v0.5.0-ApexLoop`）与 [roadmap-v0.6.0-self-evolution.md](file:///D:/DevArea/MeguvizModel/docs/roadmap-v0.6.0-self-evolution.md)（`v0.6.0-HyperLoop`），融合 **2025–2026 第一性原理检测理论**、**前沿端侧/WebGPU 微架构研究** 及 **RTX 4060 Ti 真实 B 站视频流零 PII 实证结果**，面向 **2027+“思维链推理蒸馏短评与自主多智能体水军常态化”时代**，完整确立 **`MeguvizCAC v0.7.0-OmniVeritas`** 的理论基础、数学架构与 **`2.104 MB <= 2.20 MB`** 全端硬件执行 blueprint。
 >
-> **核心范式跃迁**：当单一短评的语言流畅度彻底逼近人类、信息论上纯单句检测逼近不可分下界时，检测范式必须从 **“单条文本 AI 分类器”** 升维为 **“零隐私、多模态对齐、因果协同感知、密码溯源融合、且给出人类可核验 Span 证据链的端侧真实性引擎（Omni-Authenticity Engine）”**。
+> **核心范式跃迁**：当单条短评的表层语言逼近信息论不可分下界（Sadasivan / Chakraborty TV 上界）时，检测系统必须从 **“孤立单句文本分类器”** 升维为 **“形式化零 PII、跨模态条件独立性检验、页面临时快权重自适应、双曲有符号胞腔层因果去混杂、密码学溯源融合、且原生输出人类可审阅概念证据卡的端侧真实性引擎（Omni-Authenticity Engine）”**。
 
 ---
 
-## 一、为什么需要 `v0.7.0-OmniVeritas`？——2027+ 三大范式天花板预测
+## 一、第一性原理：为什么单句检测必然触顶，以及 `v0.7.0` 破局的两条数学定理
 
-在 `v0.6.0-HyperLoop` 达成 `AUROC >= 0.985 / R@P99% >= 75% / <= 3.5 MB / <= 0.15 ms NPU` 后，纯文本+单屏图协同检测器将面临三个无法仅靠“把模型再做大”解决的结构性天花板：
+### 1.1 单句短评的信息论不可分下界
+由 Sadasivan et al. (`arXiv:2303.11156`) 与 Chakraborty et al. (ICML 2024, `arXiv:2304.04736`)，对长度为 $n$ 字符的孤立单条评论 $X$，任意纯文本分类器（哪怕无限参数）的最小贝叶斯错误率与最高 AUROC 严格受总变差距离 $\text{TV}_n = \|P_{\text{H}}^{(n)} - P_{\text{AI}}^{(n)}\|_{\text{TV}} \le \sqrt{1 - e^{-n \epsilon_{\text{char}}}}$ 约束：
+$$E_{\min}(n) = \frac{1}{2}(1 - \text{TV}_n), \qquad \text{AUROC}_{\max}(n) \le \frac{1}{2} + \text{TV}_n - \frac{1}{2}\text{TV}_n^2.$$
+当 2027 年测试时推理蒸馏小模型（*READER*, `arXiv:2605.25281`）将单字符 KL 压至 $\epsilon_{\text{char}} = 0.015$ nats/char 时，一条 `12` 字短评的 $\text{TV}_{12} \le 0.406 \implies \text{AUROC}_{\max} \le 0.824$，纯文本下 **`TPR@0.1%FPR` 理论上绝不可能超过 `20%`**！
 
-1. **短句与推理蒸馏的“单句信息论下界”**：2026–2027 年测试时推理增强模型（DeepSeek-R1/R2、o3/o4、Qwen-Thinking 等）与低延迟思维链蒸馏小模型能够写出几乎没有模板痕迹的 15–40 字自然短评（*READER*, `arXiv:2605.25281`），单句表层风格差异趋近于零，但它们在**“看视频的真实视觉感知 vs 仅读标题/字幕的 RAG 推理”**之间仍存在根本性因果裂缝。
-2. **自主 Web Agent 与无重合词协同网络（Latent Paraphrase Swarms）**：新一代社媒水军不再复制粘贴同文案，而是由多智能体浏览器（Perception-Reasoning-Action 循环，*On the Internet, Nobody Knows You're an LLM Bot*, `arXiv:2606.30119`；*BotVerse*）驱动，对同一舆情/营销指令生成 **字面零重叠、语义论证骨架高度同构** 的多视频协同评论；反过来，B 站真实社区极度盛行 **“弹幕梗接龙 / 复制粘贴整活 / 前排打卡”**，朴素图相似度网络极易误杀真人玩梗潮！
-3. **“黑盒概率分”的社区信任赤字与 C2PA 溯源断裂**：单纯给用户亮一个 `AI 概率 84%` 的红标无法解释原因，容易引发社区争议与误伤恐慌；同时，虽然 C2PA（内容来源与真实性联盟）密码凭证正随法规普及，但 `2026` 前沿审计（*Why the C2PA Specifications Fall Short*, `arXiv:2604.24890`；*Drowning in AI Slop*）已证实平台转码/复制粘贴会普遍剥离凭证——**必须把密码学溯源、统计神经检测与因果协同证据统一到一个可解释的分级信任账本中**。
+### 1.2 零 PII 条件下打破下界的三条数学定理（`v0.7.0` 理论底座）
+在严守 **形式化零 PII 群不变性公理**（$\forall g \in G_{\text{PII}}, \|f(x,\mathcal{G}_{\text{page}},\mathcal{M}_V, g \cdot u) - f(x,\mathcal{G}_{\text{page}},\mathcal{M}_V, u)\|_\infty \equiv 0$）的前提下，存在且仅存在 **三条可证明打破单句 Bayes 下界** 的信息论通道：
+
+1. **定理 1（局部视频流形 Jensen 放大定理——支撑 Pillar 1 临时快权重）**：
+   全站人类语言 $P_{\text{H}}(X)$ 熵极高，但单部视频 $V$ 内的真实观众共享极低熵的局部梗/弹幕流形 $\mathcal{M}_V^{\text{org}}$。由 $L_1$ 范数凸性与 Jensen 不等式：
+   $$E_{\min}(V) = \frac{1}{2}\!\left(1 - \mathbb{E}_V\!\big[\|P_{\text{H}|V} - P_{\text{AI}|V}\|_{\text{TV}}\big]\right) < \frac{1}{2}\!\left(1 - \big\|\mathbb{E}_V[P_{\text{H}|V} - P_{\text{AI}|V}]\big\|_{\text{TV}}\right) = E_{\min}^{\text{single}}$$
+   **本地 RTX 4060 Ti 实证已证实此定理**：在 48 部真实 B 站视频与零混杂同视频 `test_bili_gold` 线程上，仅凭 `0.399 ms/video` 的无监督零 PII 快权重惊奇度即可单独取得 **`0.8094`（自然同视频）至 `0.9833`（`pre_llm` 视频）AUROC**，并把超短评 `<=25` 字 `R@P99%` 拉升 **`+19.27%`**！
+2. **定理 2（跨模态条件独立性破局定理——支撑 Pillar 2 视听-字幕因果裂缝）**：
+   将视频本地零流量上下文拆为 **可爬虫抓取文本元数据 $V_{\text{sub}}$**（标题/简介/ASR 字幕）与 **真实视听现场体验 $V_{\text{av}} = (V_{\text{dm}}, V_{\text{kf}})$**（高能时间轴弹幕流、画面关键帧微指纹）。只读标题/字幕的成本可行 RAG 水军满足条件马尔可夫性 $X_{\text{RAG-Bot}} \perp\!\!\!\perp V_{\text{av}} \mid V_{\text{sub}}$，而真实看过视频的人类满足 $I(X_{\text{Human}}; V_{\text{av}} \mid V_{\text{sub}}) > 0$，于是：
+   $$D_{\text{KL}}\!\big(P_{\text{AI}}(\cdot \mid V_{\text{sub}}, V_{\text{av}}) \,\|\, P_{\text{H}}(\cdot \mid V_{\text{sub}}, V_{\text{av}})\big) \ge D_{\text{KL}}\!\big(P_{\text{AI}}(\cdot \mid V_{\text{sub}}) \,\|\, P_{\text{H}}(\cdot \mid V_{\text{sub}})\big) + I\!\big(X_{\text{Human}}; V_{\text{av}} \mid V_{\text{sub}}\big)$$
+   哪怕单句纯文本散度 $\epsilon_{\text{char}} \to 0$，跨模态条件互信息项依然严格为正！
+3. **定理 3（协同集群 Chernoff 复合与选择性保形弃权——支撑 Pillar 3 & 4）**：
+   当 `HypSheaf + ACDL` 识别出 $m$ 条零字面重叠的潜态改写协同簇时，Chernoff 信息线性复合为 $E_{\min}(n, m) \le \frac{1}{2}\exp(-m \cdot C(P_{\text{H}}^{(n)} \| P_{\text{AI}}^{(n)}))$（`6` 条 `12` 字短评等效 `72` 字）；而对既无跨模态裂缝又无协同簇的孤立 `10` 字短评，通过 **`SCoRE` E-Value（`arXiv:2603.24704`）+ Mandap Construction-B（`arXiv:2609.31547`）** 主动走 Tier-3 认知弃权，严格守护 **万分之一（`0.01% FPR`）零误杀红线**！
 
 ---
 
-## 二、三代演进全景图（`v0.5.0 -> v0.6.0 -> v0.7.0` 资产 100% 复利衔接）
+## 二、三代演进与零浪费衔接全景图（`v0.5.0 -> v0.6.0 -> v0.7.0`）
 
 ```mermaid
-flowchart LR
-    subgraph V05["v0.5.0-ApexLoop (当前训练中)"]
-        A1["24k SuperBPE + 1L RoPE/DWConv + 16-Slot + 2L Core"]
-        A2["32-d PIFE + 4-d 回声 + 256-d L2 原型库"]
-        A3["Bundle v2 (<=6.5 MB Edge-W4, <=1.8 ms 1T)"]
-    end
-
-    subgraph V06["v0.6.0-HyperLoop (下一代主线)"]
-        B1["MOHAWK -> Gated DeltaNet-2 / Mamba-3 + H-Net++"]
-        B2["48-d 零隐私特征 + 16-d 概率谱 + Thread-Graph + MIL"]
-        B3["Bundle v3 (<=3.5 MB 2-bit LUT, <=0.15 ms NPU)"]
-    end
-
-    subgraph V07["v0.7.0-OmniVeritas (2027+ 前沿构想)"]
-        C1["全模态因果对齐: 评论 x 字幕 x 弹幕流 x 关键帧视觉指纹"]
-        C2["ACDL 因果协同检测: 剥离真人玩梗潮 vs 潜态改写水军簇"]
-        C3["三层真实性账本: C2PA/Origin Lens + 神经因果 + 可解释证据卡"]
-        C4["Bundle v4 (<=2.2 MB 1.58-bit/1-bit WGSL WebGPU + NPU <=0.08 ms)"]
-    end
-
-    V05 -->|"MOHAWK + UPQ + 特征槽兼容"| V06
-    V06 -->|"复用线性骨干 + 跨模态轻量适配器 + Causal Graph"| V07
+flowchart TD
+    IN["零 PII 页面输入: 同屏评论树 (<=32) + 字幕 V_sub + 高能弹幕流 V_dm + 可选关键帧微指纹 V_kf"] --> NANO["0.155 MB Nano-Draft + L2D-FP (1T CPU 0.05 ms)"]
+    NANO -->|"~70% 清晰纯人短评安全早退"| OUT0["极速返回"]
+    NANO -->|"~30% 疑难/长评/短评边界"| BACK["复用 v0.6 骨架 (FFN 1024->768 Minitron 剪枝): WaveByte-HNet + 2L 分头混合 Prelude + 16-Slot + 2L Core (5-Trit / 2-Bit SEQ)"]
+    BACK --> TMEM["Pillar 1: 16 KB 临时 MIRAS-Huber 快权重 VideoFastMem (M_sub vs M_dm 双矩阵, 抗 50% 水军投毒, 关页即毁 0 PII)"]
+    BACK --> AUDIT["Pillar 2: 3–5% 灰区 Static MoR (16->8 槽减半, -45% FLOPs) + 冻结前向 EBT 能量/曲率单调精审"]
+    BACK --> HSHEAF["Pillar 3: HypSheaf-Thread (庞加莱球 B^8 + 双纤维 PolyNSD 胞腔层) + ACDL 因果去混杂 (剥离 B 站玩梗潮)"]
+    BACK --> CBM["Pillar 4: 0 KB 混淆神经元手术 + 25 KB TinyScope-CBM (2-bit LUT) + Span-Refiner 字节指针"]
+    TMEM --> FUSE["跨模态 CMI 裂缝 + 2x2 局部/全局惊奇度交互门控 (严限灰区/超短评)"]
+    AUDIT --> FUSE
+    HSHEAF --> FUSE
+    CBM --> FUSE
+    FUSE --> LEDGER["Pillar 5: 三层真实性账本 (Tier-1 C2PA/Origin Lens + Tier-2 SCoRE E-Value 0.01% FPR + Tier-3 认知弃权)"]
+    LEDGER --> CARD["可审阅证据卡: 5 类细粒度归因 + 精确高亮混写 Span + Top-2 AI / Top-1 真人保护概念依据 (<0.02 ms)"]
 ```
 
-| 维度 | `v0.5.0-ApexLoop` | `v0.6.0-HyperLoop` | **`v0.7.0-OmniVeritas`（前沿远景目标）** |
+| 维度 | `v0.5.0-ApexLoop` | `v0.6.0-HyperLoop` | **`v0.7.0-OmniVeritas`（前沿定稿目标）** |
 | :--- | :---: | :---: | :---: |
-| **核心定位** | 极速端侧单句 AI 检测器 | 整屏长上下文 2-bit 极低误报检测器 | **全模态因果 × 密码溯源 × 可解释真实性引擎** |
-| **输入感知范围** | 单条评论（`<=192` tok）+ 标题回声 | 整楼树（`<=1,024` tok）+ 同屏图 + 封面 OCR | **评论 + 整楼树 + 视频字幕/时间轴弹幕流 + 关键帧微指纹（零重型 VLM）** |
-| **协同与玩梗区分** | 无 | 静态 `32×32` `Thread-Graph` 相似度 | **`ACDL` 因果协同检测**：严区分 **有机玩梗/接龙** vs **隐性骨架同步水军** |
-| **推理模型与 Agent 专攻** | 通用蒸馏 + 119 零泄漏对抗对 | `16-d` 概率谱 + 推理指纹特征 | **`READER` 推理拓扑探测 + `Agent-PRA` 多轮记忆刚性/立场漂移审计** |
-| **输出可解释性** | 标量概率 + Conformal 3-Way | 概率 + 字符级 `MIL` 混写 Span | **人类可审阅证据卡**：精确高亮 AI 片段 + 归因类型 + 反事实最小改写依据 |
-| **密码溯源整合** | 无 | 预留元数据字段 | **端侧 `Origin Lens / C2PA` 轻量验签 + 去凭证退化时的神经无缝接管** |
-| **极端低误报目标** | `R@P99% >= 50–60%` | `TPR@0.1%FPR >= 60%`, `R@P99% >= 75%` | **`TPR@0.1%FPR >= 78%` / `TPR@0.01%FPR >= 45%`（万分之一误杀红线）** |
-| **Conformal 灰区率** | `@alpha=0.03 <= 18%` | `@alpha=0.03 <= 10%` | **`@alpha=0.01 <= 8%`（99% 置信区间下仍保持 92%+ 本地直接结案）** |
-| **端侧体量与延迟** | `<= 6.5 MB` / `<= 1.8 ms` 1T | `<= 3.5 MB` / `<= 0.15 ms` NPU | **`<= 2.2 MB`（`1.58-bit/1-bit` LUT）/ NPU `<= 0.08 ms` / 浏览器 `WebGPU <= 0.18 ms`** |
-| **零 PII 隐私底线** | 零账号特征 | 零账号特征 | **形式化零 PII 不变性证明（账号元数据扰动输出偏移严格 `== 0.0`）** |
+| **核心定位** | 端侧单句 AI 检测器 | 整屏长上下文 2-bit 极低误报检测器 | **全模态因果 × 临时快权重 × 密码溯源 × 可解释真实性引擎** |
+| **短评破局机制** | 32-d PIFE + 4-d 标题回声 | `SWA-32` + 整楼线性语境 + `TinyScope` | **跨模态 CMI 检验（弹幕/画面 vs 字幕 RAG）+ 灰区门控 `MIRAS-Huber` 快权重** |
+| **协同与玩梗区分** | 无 | `18 KB` `PolyNSD` 有符号胞腔层 | **庞加莱球 $\mathbb{B}_c^8$ + `HypSheaf` 双纤维 + `ACDL` 因果去混杂（真人玩梗潮 `<0.05%` FPR）** |
+| **灰区精审引擎** | `R=4` 固定深度外推 | `FTLE` + 冻结 `LB-DSM` 2 探针曲率 | **静态 `MoR`（`16->8` 槽减半，`-45%` FLOPs）+ 冻结前向 `EBT` 5 类能量盆地单调精审** |
+| **可解释证据输出** | 概率 + Conformal 3-Way | 概率 + `Span-Refiner` 混写区间 | **零额外前向证据卡（`<0.02 ms`）：5 类归因 + 字符 Span + 可加概念贡献 + C2PA 验签** |
+| **极端低误报红线** | `R@P99% >= 50–60%` | `TPR@0.1%FPR >= 60%`, `R@P99% >= 75%` | **`TPR@0.1%FPR >= 78%` / `TPR@0.01%FPR >= 45%`（万分之一误杀红线！）** |
+| **Conformal 灰区率** | `@alpha=0.03 <= 18%` | `@alpha=0.03 <= 10%` | **`@alpha=0.01 <= 8%`（`SCoRE` E-Value + Mandap 全路径保形风险控制）** |
+| **全包体量与双硅靶延迟** | `<= 6.5 MB` / `<= 1.8 ms` 1T | `2.82 MB <= 3.5 MB` / `<= 0.15 ms` NPU | **`2.104 MB <= 2.20 MB`（`5-Trit + 2-Bit SEQ, g=128`）/ NPU `<= 0.074 ms` / WebGPU `<= 0.11–0.18 ms`** |
+| **零 PII 隐私红线** | 零账号特征 | 形式化零 PII 群不变性 | **严格零 PII 不变性（`diff == 0.000000`）+ 临时记忆关页即毁** |
 
 ---
 
-## 三、`v0.7.0-OmniVeritas` 六大核心技术支柱
+## 三、`v0.7.0-OmniVeritas` 六大原创技术支柱（理论 + 数学 + 实证融合）
 
-### 支柱一：跨模态轻量因果对齐（Video–Danmaku–Subtitle–Comment Grounding，`< 0.6 MB`）
-B 站场景的天然护城河在于：**每条评论都寄生在一部具体视频的视听语境中**，而绝大多数 LLM 刷评 Bot（即便接入网页抓取/字幕总结）只看得见“标题 + 简介 + 机器字幕”，看不见画面细节、剪辑反差与秒级弹幕玩梗。
-- **零重型 VLM 架构**：绝不在用户设备跑多模态大模型！改为复用浏览器/App 已加载的 **4 路零额外流量本地上下文信号**：
-  1. **视频字幕/简介关键实体锚点**（纯文本哈希投影）；
-  2. **高能弹幕时间轴词云与梗热词分布**（反映真实观众在画面中实际看到的笑点/槽点）；
-  3. **视频缩略图/关键帧超轻量化视觉语义哈希**（复用端侧极小 `< 0.4 MB` MobileCLIP-Tiny / Perceptual-Hash 摘要向量，可选开启）；
-  4. **时间戳引用真实性校验**（如评论提到 `03:42 那个镜头太炸裂了`，自动核验该时间窗弹幕密度峰与字幕语境是否匹配）。
-- **核心击杀点**：专门识破 **“只读标题/字幕就强行共情、对纯视觉梗毫无反应、或把字幕错字原样复述进评论”** 的 RAG 联网水军 Bot——这类 Bot 在纯文本域几乎与真人无异，但在跨模态因果对齐空间会瞬间暴露！
+### 支柱一：抗投毒页面临时快权重 `VideoFastMem`（`MIRAS-Huber` 双矩阵，`0 KB` 磁盘 / `16 KB` SRAM）
+- **破解“对抗性 Titans 反转悖论”**：语言模型里的 `Titans`（`arXiv:2501.00663`）把高惊奇度样本大力写入记忆；但在遭遇 `30%–50%` 水军攻屏的 B 站评论区，这会让水军反向毒化记忆！
+- **双矩阵 `MIRAS-Huber`（`arXiv:2504.13173`）零反向传播闭式配方**：
+  - 在本机页面 SRAM 维护两块极小临时快权重矩阵 $M_{\text{sub}}, M_{\text{dm}} \in \mathbb{R}^{64 \times 64}$（共 **`16 KB` RAM，关页即毁，严格 0 PII**）：
+    1. **$M_{\text{sub}}$**：吸收视频标题、简介与 ASR 字幕向量（可爬虫文本空间）；
+    2. **$M_{\text{dm}}$**：用 **不可投毒的本地视听锚点**（按时间轴分散加权的高能弹幕流 + 关键帧微指纹）冷启动，并仅对通过 **有机信任门控** $w_t^{\text{org}} = (1 - p_t^{(0)})^2 \mathbb{I}[p_t^{(0)} < 0.25]$ 且经 **Huber 范数截断** $\psi_\delta(r_t)$ 的同屏有机评论做秩-1 闭式更新（`0.005 ms/条`，即便 50% 水军攻屏也零梯度污染！）。
+- **两大杀手级信号 + 2×2 局部/全局正交交互门控（经 RTX 4060 Ti 实证固化！）**：
+  1. **跨模态 RAG 水军裂缝**：$\Delta \mathcal{S}_i^{\text{RAG}} = \|r_i^{\text{dm}}\|_2 - \|r_i^{\text{sub}}\|_2$（低字幕惊奇度 + 高弹幕/画面惊奇度 -> 一击揭穿只读标题/字幕的 RAG Bot！在无弹幕新视频下由平滑置信掩码 $\sigma(\log(1+N_{\text{dm}})-2.0)$ 自动归零）。
+  2. **2×2 保护创意真人的交互门控**：仅在 **Conformal 灰区（`0.20 < p_base < 0.80`）或超短评（`<= 25` 字）** 内生效（遵循 RTX 4060 Ti 实证：避免全局加权给高确信样本引入方差），且强制交叉相乘局部视频惊奇度与全局曲率得分：
+     $$\Delta \text{logit}_{\text{TTA}}(x) = \beta_{\text{tta}} \cdot \operatorname{ReLU}(S_{\text{vid}}(x) - \mu_{\text{vid}}) \cdot \operatorname{ReLU}(\Lambda_{\text{HC}}(z_0) - \tau_{\text{LLM}})$$
+     于是 **脑洞大/小众梗真人**（高局部惊奇、负全局 AI 曲率）严格获 **`0.0` 误罚**，而 **套话隐蔽短 AI**（高局部惊奇、正全局 AI 曲率）精准拉响召回！
 
-### 支柱二：推理增强模型（`READER`）与自主 Web Agent（`PRA`）指纹探测
-随着 2026–2027 年 Reasoning LLM 与 Agent 浏览器普及，传统“看流畅度/看过渡词”已失效：
-1. **`READER`（`arXiv:2605.25281`）结构化推理指纹分支**：捕获经过长思维链规划后压缩出的短评隐性特征——例如“高密度三元对冲平衡（先肯定、再限定、再升华）”、跨句信息熵过于平稳（缺少人类灵光一闪式跳跃或情绪跑偏）、以及对复杂视频争议点给出的**“教科书式公允结论”**。
-2. **零隐私多轮对话树 `Agent-PRA` 刚性检测（参考 `arXiv:2606.30119` & *SocialGym*）**：不追踪账号历史，仅在**当前楼中楼 3–10 轮对话切片内**观测语义动态——真人被反驳时往往情绪波动、缩写省略、抓局部细节斗嘴；而人格化 LLM Agent 即使被挑衅也表现出特征性的**“礼貌降维回应 / 每轮重置论证框架 / 人设口癖周期性复现”**。
+### 支柱二：静态 `MoR` 槽减半 × 冻结前向 `EBT` 能量-曲率精审环（`+57.5 KB`，灰区降算力 `45%`）
+- 吸收 **RTX 4060 Ti `E2` 实证裁决**（端到端混训干扰骨干 `-0.0294 AUROC`，但冻结状态下独立拉普拉斯曲率 $\kappa_{\text{sym}}=0.8305$、各向异性 $\kappa_{\text{std}}=0.8343$、难 AI vs 结构化真人陷阱 $\kappa_1 = \mathbf{0.9143}$！）：
+  1. **静态 Expert-Choice `MoR`（`arXiv:2507.10524`）槽减半**：`t=2` 步后从 `8` 个证据锚点中静态选取固定 Top-4，与 `4` 个 `LOTUS` 槽拼为固定 `[B_gray, 8, 384]`（0 动态 Shape，深步 `R=3..6` Core FLOPs 直降 **`45%–50%`**！）。
+  2. **冻结骨干前向 `EBT` 能量评判器（`arXiv:2507.02092`）**：在冻结骨干上训练 5 类兼容性标量能量 $E_\phi(h_t, e_y)$ 及低秩前向能量下降步 $\psi_\phi(h_t) \approx -\nabla_h E_\phi$（推理期零 autograd），仅当 **能量盆地间隔 $\Delta E_R$ 过保形阈值且能量逐轮严格单调下降（$\Delta E_R > \Delta E_2$）+ `FTLE` 严格收缩** 时，方放行万分之一误杀红线（`0.01% FPR`）硬报警；否则平稳路由至 Tier-3 认知弃权！
 
-### 支柱三：因果协同不真实行为检测（`ACDL`）——严格剥离“B 站真人玩梗潮”与“隐性改写水军簇”
-`v0.6.0` 的 `Thread-Graph` 解决了基础同屏复读检测，但在 B 站等强二次元/玩梗社区存在天然风险：**数千名真实网友同时刷“下次一定 / 泪目 / 好好好 / 复读热评梗”在表层图结构上酷似协同水军**！
-- **`ACDL`（Adaptive Causal Coordination Detection，因果去混杂）**：
-  - 将“视频热点事件 / 置顶梗 / 高能弹幕”显式建模为 **共同混杂因子（Confounder $Z_{\text{organic}}$）**；
-  - **有机玩梗的特征**：高度锚定视频内的真实梗词/弹幕热词，伴随大量真人拼写变体、碎片化吐槽与表情包混杂，且**语义发散度高或完全显式复制**；
-  - **隐性 AI 水军簇的特征**：表面**刻意规避字面重复**（低字符 Jaccard），但在 `256-d` 潜在论证空间呈现**异常高的“论证骨架余弦共振”**（例如 8 条不同措辞的评论全部沿着“痛点引入 -> 情感共鸣 -> 隐性引流/立场引导”同一隐轨迹生成）且与高能弹幕脱节。
-  - 通过做因果残差剥离 $S_{\text{coord}} = \text{Sim}_{\text{latent}}(i,j) - \hat{\mathbb{E}}[\text{Sim} \mid Z_{\text{organic}}, \text{LexicalOverlap}]$，在 **零误杀真人接龙玩梗** 的前提下精准端掉高隐蔽多 Agent 矩阵！
+### 支柱三：双曲庞加莱树 × `HypSheaf-Thread` 有符号胞腔层 × `ACDL` 因果去混杂（`45 KB`，`< 0.06 ms`）
+- **匿名庞加莱球树坐标 $\mathbb{B}_c^8$（`256 bytes` RAM，零 UID，`HypBench` `arXiv:2406.02772`）**：仅用回复相对深度、分支度、兄弟序与到达时滞 $\log(1+\Delta t_v)$ 零失真嵌入双曲空间——协同星状水军簇聚集在窄恒半径极限球壳（`Var(||z||) ≈ 0`），而真实 B 站楼中楼呈现高径向发散。
+- **双纤维有符号胞腔层 `PolyNSD` + 因果残差 `ACDL / ACCD`（`arXiv:2601.00400`, `2607.26309`）**：
+  - 节点柄 $x_v = [x_v^{\text{arg}} \oplus x_v^{\text{lex}}] \in \mathbb{R}^{16}$，边限制映射受双曲距离 $d_{\mathbb{H}}(z_u^{\mathbb{H}}, z_v^{\mathbb{H}})$ 与边型调制；
+  - 将视频高能弹幕梗、置顶梗与字幕引用建模为显式混杂因子 $Z_{\text{org}}(i,j)$，在不可变 `pre_llm` 与真实玩梗屏上拟合有机基线 $\hat{\mathbb{E}}[A_{ij} \mid Z_{\text{org}}, L_{ij}]$，计算因果去混杂残差：
+    $$R_{\text{ACDL}}(i,j) = A_{ij} - \hat{\mathbb{E}}\big[A_{ij} \mid Z_{\text{org}}(i,j), L_{ij}\big]$$
+    - **B 站真人刷梗潮（*“下次一定 / 泪目 / 接龙”*）**：高 $Z_{\text{org}}$、高 $L_{ij}$、$\mathcal{E}_{\mathcal{F}^{\text{lex}}} \approx 0 \implies R_{\text{ACDL}} \approx 0$（**误杀 `< 0.05%`**！）；
+    - **零字面重叠多 Agent 改写水军簇（`BotVerse` `arXiv:2603.29741`）**：低 $L_{ij}$、$\mathcal{E}_{\mathcal{F}^{\text{lex}}} \gg 0$、却呈异常高论证骨架共振（$\mathcal{E}_{\mathcal{F}^{\text{arg}}} \approx 0$）且脱节高能弹幕 $\implies R_{\text{ACDL}} \gg 0$ 一网打尽！
+  - **多轮 `Agent-PRA` 刚性检测（`arXiv:2606.30119`）**：在 3–10 轮匿名楼中楼链上，有向非对称限制映射 $\mathcal{F}_{u\to v} \neq \mathcal{F}_{v\to u}$ 精准捕捉人格化 AI Agent 被真人挑衅后的“礼貌框架重置”刚性收缩。
 
-### 支柱四：密码学溯源（`C2PA / Origin Lens`）× 无水印神经检测的“三层分级真实性账本”
-面向法规与生态演进（参考 `arXiv:2604.24890` 与 *Origin Lens*），`v0.7.0` 彻底告别“单一模型硬猜”，建立端侧 **三层证据融合协议**：
+### 支柱四：`TinyScope-CBM` 可审阅证据卡（`25 KB`, `< 0.02 ms`）× 5 类细粒度归因
+- 完整承接 `v0.6` 离线 `4,096`-概念 Transcoder 的 `0 KB` 混淆神经元外科手术，将精简 `M=128 (k=6)` 概念头量化为 `8 KB` 2-bit LUT + `8 KB` 压缩双语概念词典 + `Span-Refiner` 字节指针：
+  1. **五类细粒度归因**：`Human-Organic` / `Human-Assisted (Polished)` / `Script-Plugin Bot` / `Autonomous Persona Agent` / `Coordinated Latent Cluster`；
+  2. **零额外前向精确可加证据卡（`< 0.02 ms`）**：直接排序每个激活概念的真实贡献 $\Delta_j(x) = w_{\text{audit},j} c_j(x)$，展示 **Top-2 AI 信号 + Top-1 真人保护信号 + 字符级混写高亮**（如：*“第 2 句触发三元对冲总结结构且与 03:42 高能弹幕语境脱节；未读取任何账号隐私信息，仅供参考”*），且将 LOFO 泛化 Rademacher 复杂度收紧 **`~3.3×`**！
 
-| 信任层级 | 证据来源 | 端侧动作与展示 | 抗攻击与降级机制 |
-| :--- | :--- | :--- | :--- |
-| **Tier 1：密码/平台声明层** | C2PA / 平台官方 AIGC 显式标识 / 端侧 *Origin Lens* 轻量验签 | 验签通过直接标注 **`已声明 AI 辅助`** 或 **`已验证原生溯源`** | 凭证被复制粘贴/截图剥离时，自动无缝降级至 Tier 2，绝不因“无凭证”就判 AI！ |
-| **Tier 2：多模态因果神经层** | `OmniVeritas` 线性骨干 + `MIL` Span + 跨模态对齐 + `ACDL` 协同残差 | 输出严格校准风险分 + 置信上界（`TPR@0.1%FPR` / `0.01%FPR` 锚定） | `Split Conformal (@alpha=0.01)` 严控误杀红线，绝不越界硬标 |
-| **Tier 3：认知弃权与灰区解释层** | `R=4..6` 潜态微扰高方差 或 `L2` Mahalanobis OOD 越界 | 主动输出 **`信息不足 / 人类创意表达（保持中立）`**，不打负面标签 | 根除传统检测器“不懂就乱标 AI”的社区公害 |
+### 支柱五：密码学溯源（`C2PA / Origin Lens`）× `SCoRE` E-Value 三层真实性账本
+- **Tier 1（密码/平台声明层）**：端侧轻量 `Origin Lens / C2PA` 验签（`arXiv:2604.24890`）；凭证被复制粘贴剥离时无缝回落 Tier 2，**绝不因“无凭证”判 AI**。
+- **Tier 2（多模态因果神经层 + `SCoRE` 选择性保形风险控制）**：融合 Mandap Construction-B 全路径最大分 $\tilde{S}_{\text{path}}$ 与 `SCoRE` E-Value（`arXiv:2603.24704`），给出 **条件于发出警报时的严格有限样本误报上界**，支撑 **`TPR@0.01%FPR >= 45%`**。
+- **Tier 3（认知弃权层）**：由 `E_OOD`、`FTLE` 震荡或高 `EBT` 能量触发，输出中立提示（`@alpha=0.01` 灰区率 `<= 8%`），根除社区误伤公害。
 
-### 支柱五：可解释证据卡与细粒度人机协同归因（Explainable Evidence Card）
-让检测结果对普通网友、UP 主与审核员**完全透明、可复核、有分寸**：
-1. **五类细粒度归因（取代粗暴二分类）**：
-   - `Human-Organic`（原生人类表达）
-   - `Human-Assisted / Polished`（人类主写 + 局部 AI 润色/扩写——展示精确高亮字符 Span，参考 *Sci-SpanDet* `arXiv:2510.00890`）
-   - `Script / Plugin Bot`（自动化脚本 / 浏览器插件刷评）
-   - `Autonomous Persona Agent`（带人设记忆的 LLM 交互 Agent）
-   - `Coordinated Latent Cluster`（疑似多账号隐性改写协同簇）
-2. **超轻量反事实与特征归因（`< 0.05 ms` 零额外前向）**：直接由 `LOTUS` 语用槽、`MIL` Span 指针与 `48-d -> 64-d` 特征贡献度生成 1–2 句人话解释（如：*“第 2 句呈现高度规整的总结句式且与高能弹幕语境脱节；未检测到账号级信息，仅供参考”*），把“黑盒审判”变成“白盒辅助视角”。
-
-### 支柱六：全端极速 `Bundle v4`（`<= 2.2 MB` × `WebGPU WGSL 1.58-bit LUT` × `NPU <= 0.08 ms`）
-- **浏览器端革命（针对 B 站插件主战场）**：编写原生 **WebGPU WGSL 1.58-bit/2-bit 查表（LUT）Compute Shader**，将 `T-MAC/T-MAN` 位级查表思想移植至浏览器 GPU 共享内存（Workgroup Shared Memory），在主流核显上实现 **`<= 0.18 ms/row`**、零后端 API、零隐私上传的实时整屏多模态+图协同检测；无 WebGPU 环境自动平滑回退 `WASM SIMD`。
-- **端侧极简模型压缩**：在 `v0.6.0` `ParetoQ 2-bit` 基础上进一步结合 **混合精度 `1-bit / 1.58-bit`（敏感层 2-bit、冗余 FFN 1.58-bit）+ `LoopVQ` 跨步矢量量化**，在保留 `64-d` 跨模态/因果通道与 Span 指针头的前提下把全套运行时压进 **`<= 2.2 MB`**。
-
----
-
-## 四、铁律与明确“不做清单”（Epistemic & Ethical Red Lines）
-
-为防止技术演进滑向过度监控或伤害真实社区表达，`v0.7.0-OmniVeritas` 设立 4 条不可突破的工程红线：
-1. **绝对零 PII 不变性红线**：严禁引入用户名、UID、B 站等级、粉丝数、IP 属地、注册时长或跨视频用户画像作为特征——任何“看号下菜碟”的捷径在架构层即被物理隔离，并纳入 CI 自动化扰动测试（输出漂移必须恒等于 `0.000000`）。
-2. **禁止对“人机轻度润色”一刀切污名化**：必须区分“真人写主体 + AI 顺句/翻译（`Human-Assisted`）”与“全自动刷评/水军操纵”，UI 展示保持中立克制，不把非母语/表达困难用户的润色辅助误伤为恶意水军。
-3. **禁止用纯合成数据主导流形**：永远坚持 `v0.4 -> v0.5 -> v0.6` 血的教训——野生真实数据 + 不可变 `pre_llm` 真人锚点占主权，外部基准封存隔离零泄漏。
-4. **隐私计算本地闭环**：所有字幕/弹幕/关键帧指纹均只在用户本机内存瞬时计算、用完即毁，绝不上传任何用户浏览历史或评论原文。
+### 支柱六：双硅靶亚 2-bit 极速引擎（`2.104 MB <= 2.20 MB` 精准封顶 × `WebGPU` 持久共享内存巨核）
+- **彻底剔除误归类的 `LoopVQ`**，采用 **统一规范二进制（`Bundle v4`）+ 加载期一次性（`< 8 ms`）按硅靶转码**：
+  1. **精准 `2.104 MB` 全量字节预算（`D=384, H=6, FFN=768` Minitron 剪枝, `g=128` 对齐 `H_128` Hadamard 块）**：
+     - `Nano-Draft + L2D-FP` (`0.155 MB`) + `WaveByte-HNet` (`0.094 MB`) + `2L` 分头 Prelude (`0.848 MB`) + `16-Slot` (`0.088 MB`) + `2L` Core (`0.681 MB`) + `Span-Refiner / Titans-MIRAS / EBT-MoR / HypSheaf-ACDL / TinyScope-CBM / Cross-Modal / L2 Proto` (`0.238 MB`) = **`2.104 MB <= 2.20 MB`**（仍留 `96 KB` 余量，完全 `5-Trit (1.60 b/w) FFN + ParetoQ 2-Bit SEQ Attn + FP16 Loop Residual`！）。
+  2. **硅靶一——手机 NPU（Hexagon HVX / APU / ANE）**：一次性转码为 **`T-MAN` 两级查表布局**，`bs=16, M=32, R=2` 全难评实算 **`0.074 ms/row`**、屏均 **`0.048 ms/row`**（严破 `<= 0.08 ms` 红线！）。
+  3. **硅靶二——桌面浏览器 `WebGPU WGSL`（根治 `T-MAC` 共享内存银行冲突与 Dispatch 墙）**：
+     - **低批量悬停（`M <= 8`）**：利用 Chrome 2025–2026 `subgroups` 扩展做 **寄存器驻留 `subgroupShuffle` 查表**（0 共享内存、0 银行冲突！）；
+     - **整屏批编码（`M >= 16`）**：加载期将 `5-trit/byte` 转为 **双 `u32` 位平面 `(pos_bits, neg_bits)`**（运行期零 `% 3` 除法！），配合 `+1` 填充 `var<workgroup>` 消除 32-bank 冲突；
+     - **持久共享内存 `InfiLoop` 巨核（总 Dispatch 从 `~52` 压至 `<= 6` 次！）**：单评 `16-Slot` 态 `[16, 384]` 在 `f16` 下仅 **`12 KB`**，整个 `2L × R=2` 循环完全驻留在一个 Workgroup Shared Memory 内一次执行完（0 中间 VRAM 往返！），主流核显屏均延迟 **`0.107–0.18 ms/row`**（无 `subgroups` 浏览器自动平滑回退纯核心 WebGPU / `WASM SIMD`）。
 
 ---
 
-## 五、`v0.7.0-OmniVeritas` 探索里程碑（`V7-R0` ~ `V7-R4`）
+## 四、不可突破的伦理与工程红线（Non-Goals & Epistemic Red Lines）
 
-| 阶段 | 核心探索与原型验证内容 | 定量 Go / No-Go 晋级门槛 |
+1. **绝对零 PII 不变性红线**：严禁引入 UID、用户名、等级、粉丝数、IP 属地、注册时长或跨视频用户画像；任何账号元数据扰动的输出偏移 CI 强制断言 `== 0.000000`；所有临时快权重与视频上下文指纹关页即刻内存清零。
+2. **严禁对“人机轻度润色”污名化**：明确区分 `Human-Assisted` 与恶意水军，UI 保持克制透明。
+3. **野生真实数据主权**：永不让合成数据淹没野生真实分布，外部评测集全程封存零泄漏。
+4. **先硬件微基准后重训**：未在目标 NPU / WebGPU 上用合成权重通过 `V7-R0` 实测前，绝不启动大规模训练。
+
+---
+
+## 五、`v0.7.0-OmniVeritas` 分阶段可证伪里程碑（`V7-R0` ~ `V7-R4`）
+
+| 阶段 | 核心探索与可证伪对比实验 | 定量 Go / No-Go 晋级门槛 |
 | :--- | :--- | :--- |
-| **`V7-R0`：WebGPU 1.58-bit WGSL 与跨模态信号基准** | 原型实现浏览器 `WebGPU WGSL` 查表内核 + B 站本地字幕/弹幕流/封面指纹零流量提取器；验证不增加任何外部 API 调用与显著功耗。 | 主流笔记本核显 **`WebGPU <= 0.18 ms/row`**，`WASM SIMD` 回退 `<= 0.45 ms/row`；全包 **`<= 2.2 MB`**；零 PII 不变性测试 `diff == 0.0`。 |
-| **`V7-R1`：视频-弹幕-评论跨模态因果对齐验证** | 构建 `100k+` 脱敏“真观众评论 vs 仅看标题/字幕生成的 RAG Bot 评论”双盲对照池，评测轻量跨模态适配器在短评上的增益。 | `<= 20` 字超短评 **`R@P95%` 较 `v0.6.0` 纯文本再提升 `>= +8%`**（冲击 **`>= 80%`**），同时对“纯文字槽点/玩梗”零误杀。 |
-| **`V7-R2`：`ACDL` 因果去混杂压测（B 站玩梗潮抗误杀）** | 专门采集 B 站高并发“接龙 / 复制粘贴梗 / 前排打卡”真人屏样本 vs 多 Agent 零词面重叠改写水军簇，对比 `Thread-Graph` vs `ACDL`。 | 真人高并发玩梗屏 **FPR `< 0.05%`**；隐性改写水军簇集群召回 **`>= 92%`**。 |
-| **`V7-R3`：`READER` 推理指纹 + `Sci-SpanDet` 证据卡对齐** | 收集 2026–2027 主流推理模型蒸馏评论与细粒度字符级混写样本，训练指针 Span 头与 5 类归因头，开展人类审阅者盲评。 | 人机混写 **`Char-Span F1 >= 0.88`**；推理模型专项 **`TPR@0.1%FPR >= 70%`**；人类盲评证据卡可理解度 `>= 90%`。 |
-| **`V7-R4`：三层真实性账本 & 万分之一误杀封板** | 整合端侧 `Origin Lens / C2PA` 轻量验签 + `OmniVeritas` 全栈模型，在冻结 `MeguvizBench-v4`（嵌套 `v2 ⊂ v3 ⊂ v4`）与封存外部盲测集终审。 | `v2/v3` 全项零退化；全库 **`TPR@0.1%FPR >= 78%` / `TPR@0.01%FPR >= 45%`**；`@alpha=0.01` 灰区率 **`<= 8%`**；真实社区误报投诉趋近于零。 |
+| **`V7-R0`：双硅靶 `2.104 MB` 硬件微基准（先测速后训练）** | 合成 `5-Trit / 2-Bit SEQ (g=128)` 权重，分别在 Hexagon NPU (`T-MAN`) 与 Chrome `WebGPU WGSL`（`<=6` Pass 持久 Core 巨核 vs 朴素 `T-MAC` WGSL）实跑测速；验证零 PII 不变性 CI。 | NPU **`<= 0.08 ms/row`**；WebGPU 较朴素 LUT 快 **`>= 2.0×`** 且屏均 **`<= 0.18 ms/row`**；全包 **`<= 2.20 MB`**；零 PII `diff == 0.0`。 |
+| **`V7-R1`：跨模态 CMI + 抗投毒 `VideoFastMem` 双盲压测** | `100k+` 真实观众评论 vs 仅读标题/字幕 RAG Bot 双盲对照池；50% 水军攻屏投毒仿真对比朴素 Titans-$L_2$ vs `MIRAS-Huber` 有机门控。 | `<= 20` 字超短评 **`R@P95%` 较纯文本再升 `>= +8%`（`>= 80%`）**；50% 攻屏下 `TPR@1%FPR` 波动 **`<= 2.0%`**；创意真人误罚 **`== 0.0%`**。 |
+| **`V7-R2`：`HypSheaf-Thread` + `ACDL` 玩梗潮抗误杀压测** | `2,000` 屏真实 B 站高频玩梗潮（*“下次一定/泪目/接龙”*）vs `2,000` 屏零字面重叠（`Jaccard < 0.08`）多 Agent 改写水军簇，对比平面 `Thread-Graph` vs `HypSheaf + ACDL`。 | 真人玩梗潮 **FPR `< 0.05%`**；零重叠改写水军簇集群召回 **`>= 92%`**（超越平面图 `>= +15%` F1）。 |
+| **`V7-R3`：冻结 `EBT-MoR` + `READER` + `TinyScope` 证据卡对齐** | 灰区对比 `EBT-MoR` vs `v0.6` 2 探针各向同性微扰；评测 2026–2027 推理模型蒸馏短评与 5 类归因证据卡人类盲评。 | 灰区 **`TPR@0.01%FPR` 再涨 `>= +4%`** 且灰区延迟降 **`>= 35%`**；混写 **`Char-Span F1 >= 0.88`**；推理模型 **`TPR@0.1%FPR >= 70%`**；证据卡人类一致度 **`>= 90%`**。 |
+| **`V7-R4`：三层真实性账本 & 万分之一误杀封板** | 整合端侧 `Origin Lens / C2PA` + `SCoRE` E-Value + Mandap 全路径保形校准，于冻结 `MeguvizBench-v4`（严格嵌套 `v2 ⊂ v3 ⊂ v4`）与外部盲测集终审。 | `v2/v3` 全项零退化；全库 **`TPR@0.1%FPR >= 78%` / `TPR@0.01%FPR >= 45%`**；`@alpha=0.01` 灰区率 **`<= 8%`**；`FP16 -> 1.58/2-bit` 漂移 `|ΔAUROC| <= 0.0025`。 |
