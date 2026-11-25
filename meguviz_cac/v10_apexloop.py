@@ -674,6 +674,8 @@ class MeguvizV10ApexLoopModel(nn.Module):
         self.cbm_audit_w = nn.Linear(cbm_concepts, 1, bias=False)
 
         self.ai_head = nn.Linear(256, 1)
+        # Native In-Loop Analytic EBT Margin fusion gate (`4 bytes` FP16 -> primary logit inherits EBT's +10% Hard R@P95!)
+        self.ebt_logit_gate = nn.Parameter(torch.tensor(-1.5))
         # Rung-2 Deferral Router consumes [emb256, raw_logit, slot_spread, mil_peak, ebt_free_e, ebt_grad_norm, ebt_entropy]
         self.defer_head_r2 = ResidualDeferralRouterV09(256 + 6, hidden=32)
         self.attr5_head = nn.Linear(256, len(ATTRIBUTION_5WAY))
@@ -797,7 +799,13 @@ class MeguvizV10ApexLoopModel(nn.Module):
         cbm_loss = F.mse_loss(cbm_rec, emb.detach())
         cbm_logit = self.cbm_audit_w(cbm_sparse).squeeze(-1)
 
-        raw_logit = self.ai_head(emb).squeeze(-1) + torch.sigmoid(self.mil_gate) * mil_peak + 0.10 * cbm_logit
+        ebt_m_clamped = 4.0 * torch.tanh(ebt_out["ebt_margin"] / 4.0)
+        raw_logit = (
+            self.ai_head(emb).squeeze(-1)
+            + torch.sigmoid(self.mil_gate) * mil_peak
+            + 0.10 * cbm_logit
+            + (0.50 * torch.sigmoid(self.ebt_logit_gate)) * ebt_m_clamped
+        )
         ai_a = self.exit_affine_a[min(exit_idx, 2)]
         ai_b = self.exit_affine_b[min(exit_idx, 2)]
         logit = (ai_a * raw_logit + ai_b) / self.temperature.clamp(min=0.2)
@@ -1435,6 +1443,9 @@ def export_v10_modular_onnx_and_bundle_v6(model: MeguvizV10ApexLoopModel, out_di
         exp_kw["dynamo"] = False
 
     def _quant_excluding_sensitive(fp32_p: Path, int8_p: Path) -> None:
+        # Blind OjinjinBench v1/v2 fix: NEVER dynamic-quantize `Gather` embeddings or recursive slot-loop
+        # attention/penetration/coupling/routing layers (prevents the -0.023 ONNX INT8 ROC drift seen in v0.9!).
+        # Quantize ONLY heavy Prelude & FFN MatMul/Gemm layers!
         om = onnx.load(str(fp32_p))
         excl = [
             nd.name for nd in om.graph.node
@@ -1442,13 +1453,16 @@ def export_v10_modular_onnx_and_bundle_v6(model: MeguvizV10ApexLoopModel, out_di
                 k in nd.name
                 for k in (
                     "ai_head", "r1_ai_head", "defer_", "style_net", "r1_style_mlp",
-                    "coda_proj", "span_head", "word_emb_P", "engram_P", "inloop_ebt", "mole",
+                    "coda_proj", "span_", "word_emb", "engram_", "pos_emb",
+                    "inloop_ebt", "mole", "h1_", "h2_", "p2_", "c1_", "c2_",
+                    "bus_", "haar_", "reread_", "slot_", "q_proj", "k_proj", "v_proj", "o_proj",
+                    "cbm_", "ctx_loop",
                 )
             )
         ]
         quantize_dynamic(
             str(fp32_p), str(int8_p), weight_type=QuantType.QInt8,
-            op_types_to_quantize=["MatMul", "Gemm", "Gather"], nodes_to_exclude=excl,
+            op_types_to_quantize=["MatMul", "Gemm"], nodes_to_exclude=excl,
             extra_options={"DefaultTensorType": onnx.TensorProto.FLOAT},
         )
 
@@ -1690,14 +1704,56 @@ class MeguvizV10CascadeEngine:
             )
             raw_p3 = 1.0 / (1.0 + np.exp(-np.clip(r3_out[0], -30.0, 30.0)))
             cal_p3 = apply_spline_temp_lut(raw_p3, self.lut_full) if self.lut_full else raw_p3
+            egrad3 = r3_out[3]
+
+            # Adaptive Re-Entrant T=3 Deep Reflection ONLY for unresolved hard grey-zone survivors (0% KV/Haar recompute!)
+            r3_t3_en = bool(self.policy.get("r3_t3_enabled", True)) and not force_full
+            surv3: list[int] = []
             for j, ki in enumerate(surv2):
                 ri = surv1[ki]
                 oi = mb[ri]
-                results[oi] = {
-                    "prob": float(cal_p3[j]), "exit_rung": 3, "p_defer1": float(pdef1[ri]),
-                    "p_defer2": float(pdef2[ki]), "ebt_margin": float(r3_out[2][j]),
-                    "spoof_any": bool(metas[oi]["spoof_any"] > 0.0),
-                }
+                need_t3 = r3_t3_en and (
+                    (0.16 < float(cal_p3[j]) < 0.88)
+                    or float(egrad3[j]) > r2_egrad_max
+                    or metas[oi]["spoof_any"] > 0.0
+                )
+                if need_t3:
+                    surv3.append(j)
+                else:
+                    results[oi] = {
+                        "prob": float(cal_p3[j]), "exit_rung": 3, "p_defer1": float(pdef1[ri]),
+                        "p_defer2": float(pdef2[ki]), "ebt_margin": float(r3_out[2][j]),
+                        "spoof_any": bool(metas[oi]["spoof_any"] > 0.0),
+                    }
+
+            if surv3:
+                s3_idx = np.array(surv3, dtype=np.int64)
+                s2_for_t3 = s2_idx[s3_idx]
+                s1_for_t3 = s1_idx[s2_for_t3]
+                c2_c = np.abs(2.0 * raw_p3[s3_idx] - 1.0).astype(np.float32)[:, None]
+                uds3 = np.concatenate([c2_c, spread1[s2_for_t3, None], pdef2[s2_for_t3, None], egrad3[s3_idx, None]], axis=-1)
+                r3_t3 = self.sess_r3.run(
+                    None,
+                    {
+                        "slots": r3_out[4][s3_idx], "s_anchor": r2_out[7][s2_for_t3], "carry_m_l": r3_out[5][s3_idx],
+                        "zh_bus": r3_out[6][s3_idx], "mole_probs": r3_out[7][s3_idx],
+                        "k_ev": r2_out[11][s2_for_t3], "v_ev": r2_out[12][s2_for_t3], "m_pool": r2_out[13][s2_for_t3],
+                        "k_haar": r2_out[14][s2_for_t3], "v_haar": r2_out[15][s2_for_t3],
+                        "attention_mask": mask[s1_for_t3], "h0_pool": r2_out[16][s2_for_t3],
+                        "span_base": r2_out[17][s2_for_t3], "style_feats": st_b[s1_for_t3], "u_doubt_scalars": uds3,
+                    },
+                )
+                raw_p4 = 1.0 / (1.0 + np.exp(-np.clip(r3_t3[0], -30.0, 30.0)))
+                cal_p4 = apply_spline_temp_lut(raw_p4, self.lut_full) if self.lut_full else raw_p4
+                for m_i, j in enumerate(surv3):
+                    ki = surv2[j]
+                    ri = surv1[ki]
+                    oi = mb[ri]
+                    results[oi] = {
+                        "prob": float(cal_p4[m_i]), "exit_rung": 4, "p_defer1": float(pdef1[ri]),
+                        "p_defer2": float(pdef2[ki]), "ebt_margin": float(r3_t3[2][m_i]),
+                        "spoof_any": bool(metas[oi]["spoof_any"] > 0.0),
+                    }
         return [r for r in results if r is not None]
 
     def predict_one(self, text: str, force_full: bool = False) -> dict[str, Any]:

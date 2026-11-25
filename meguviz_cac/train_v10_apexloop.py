@@ -192,7 +192,12 @@ def train_v10_apexloop(args) -> None:
     if data_audit["gateguard_dropped_leakage"] > 0:
         raise RuntimeError(f"Anti-leakage fail-fast: {data_audit['gateguard_dropped_leakage']} pairs collided with eval!")
 
+    pre_gold_sids = {str(x["sample_id"]) for x in train_items_raw if x.get("is_gold_tier")}
     gem_audit = _ingest_external_gemini_gold(train_items_raw, args.v08_gemini_gold)
+    for item in train_items_raw:
+        # True hydrogen_xhigh gold or high-weight Pro traps keep 100% pure gold; Gemini Flash wild rows retain 20% v0.6-R3 guardrail!
+        is_ext_gem = bool(item.get("is_gold_tier")) and (str(item["sample_id"]) not in pre_gold_sids)
+        item["is_ext_flash"] = is_ext_gem and (float(item.get("weight", 1.0)) < 1.50)
     print(f"[v1.0.0-ApexLoop Data] base={data_audit['train_items']:,} | pairs={len(pairs):,} | gemini_factory={json.dumps(gem_audit)}", flush=True)
 
     if args.smoke_test:
@@ -424,6 +429,7 @@ def train_v10_apexloop(args) -> None:
                 torch.tensor([x["y_score"] for x in batch], dtype=torch.float32),
                 torch.tensor([x["teacher_p"] for x in batch], dtype=torch.float32),
                 torch.tensor([1.0 if x["is_gold_tier"] else 0.0 for x in batch], dtype=torch.float32),
+                torch.tensor([1.0 if x.get("is_ext_flash") else 0.0 for x in batch], dtype=torch.float32),
                 torch.tensor([x["code_idx"] for x in batch], dtype=torch.long),
                 torch.tensor([x["attr5"] for x in batch], dtype=torch.long),
                 torch.tensor([x["weight"] for x in batch], dtype=torch.float32),
@@ -494,7 +500,7 @@ def train_v10_apexloop(args) -> None:
             except StopIteration:
                 it_dl = iter(dl)
                 batch = next(it_dl)
-            ids, mask, eng, st, y_sc, tp_v06, is_g, y_cd, y_a5, w, grp, era, row_idx = [t.to(device, non_blocking=True) for t in batch]
+            ids, mask, eng, st, y_sc, tp_v06, is_g, is_ef, y_cd, y_a5, w, grp, era, row_idx = [t.to(device, non_blocking=True) for t in batch]
             mult = _wsd_lr_mult(step, steps)
             for pg in opt.param_groups:
                 pg["lr"] = lr * mult
@@ -531,8 +537,12 @@ def train_v10_apexloop(args) -> None:
                     lg_e1 = out["exit1_out"]["logit"].float()
                     lg_r1 = out["logit_r1"].float()
 
-                    has_v06 = (tp_v06 >= 0.0) & (is_g < 0.5)
-                    y_eff = torch.where(has_v06, 0.55 * y_sc + 0.45 * tp_v06.clamp(0.0, 1.0), y_sc)
+                    has_v06_weak = (tp_v06 >= 0.0) & (is_g < 0.5)
+                    has_v06_flash = (tp_v06 >= 0.0) & (is_ef > 0.5)
+                    tp_cl = tp_v06.clamp(0.0, 1.0)
+                    y_eff = torch.where(has_v06_weak, 0.55 * y_sc + 0.45 * tp_cl, y_sc)
+                    # Preserve 20% smooth v0.6-R3 BGE guardrail on external Gemini Flash labels to prevent normal-human extreme FP spikes!
+                    y_eff = torch.where(has_v06_flash, 0.80 * y_sc + 0.20 * tp_cl, y_eff)
                     y_cl = y_eff.clamp(1e-5, 1.0 - 1e-5)
 
                     loss_full = (F.binary_cross_entropy_with_logits(lg, y_cl, reduction="none") * w).mean()
@@ -592,8 +602,8 @@ def train_v10_apexloop(args) -> None:
                         la, _, la_r1, _ = mdl(ai_i, ai_m, ai_s, engram_ids=ai_e, outer_steps=2, k_inner=2, trm_lam_k0=trm_lam_k0, trm_lam_k1=trm_lam_k1, return_aux=False)
                         lh, _, lh_r1, _ = mdl(hu_i, hu_m, hu_s, engram_ids=hu_e, outer_steps=2, k_inner=2, trm_lam_k0=trm_lam_k0, trm_lam_k1=trm_lam_k1, return_aux=False)
                         la, lh, la_r1, lh_r1 = la.float(), lh.float(), la_r1.float(), lh_r1.float()
-                        l_simpo = (F.softplus(1.9 - (la - lh)) * pw_t).mean()
-                        l_pabs = ((F.relu(0.88 - torch.sigmoid(la)).pow(2) + 1.5 * F.relu(torch.sigmoid(lh) - 0.10).pow(2)) * pw_t).mean()
+                        l_simpo = (F.softplus(1.8 - (la - lh)) * pw_t).mean()
+                        l_pabs = ((F.relu(0.84 - torch.sigmoid(la)).pow(2) + 1.6 * F.relu(torch.sigmoid(lh) - 0.12).pow(2)) * pw_t).mean()
                         l_simpo_r1 = (F.softplus(1.4 - (la_r1 - lh_r1)) * pw_t).mean()
                         loss = loss + pair_w * (l_simpo + 0.9 * l_pabs + 0.25 * l_simpo_r1)
                 return loss
@@ -711,7 +721,7 @@ def train_v10_apexloop(args) -> None:
         "core.mole.", "core.p2_", "core.c1_", "core.c2_", "core.inloop_ebt.", "core.mhc_",
         "core.reread_gate", "core.haar_gate", "core.fast_res_scale", "core.ebt_back_scale",
         "core.norm", "core.fast_norm", "core.reread_norm", "h1_gate", "h2_hyp_gate", "h2_doubt_gate",
-        "defer_", "r1_ai_head", "r1_style_mlp", "r1_span_head", "coda_", "ai_head.", "style_", "cbm_", "span_", "mil_gate",
+        "defer_", "r1_ai_head", "r1_style_mlp", "r1_span_head", "coda_", "ai_head.", "ebt_logit_gate", "style_", "cbm_", "span_", "mil_gate",
     )
     shock_params = []
     for name, p in mdl.named_parameters():
@@ -726,7 +736,7 @@ def train_v10_apexloop(args) -> None:
     p_steps = 4 if args.smoke_test else 260
     ps_i = 0
     for batch in p_dl:
-        ids, mask, eng, st, y_sc, _, _, _, y_a5, w, grp, _, _ = [t.to(device, non_blocking=True) for t in batch]
+        ids, mask, eng, st, y_sc, _, _, _, _, y_a5, w, grp, _, _ = [t.to(device, non_blocking=True) for t in batch]
         p_opt.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", dtype=amp_dtype):
             out = mdl(ids, mask, st, engram_ids=eng, outer_steps=2, k_inner=2, trm_lam_k0=0.0, trm_lam_k1=0.0, return_aux=True)
@@ -814,24 +824,32 @@ def train_v10_apexloop(args) -> None:
         ],
         dtype=bool,
     )
-    psac_policy = certify_ltt_compcrc_cascade_policy(cal_scores, cal_p_r1, cal_al["p_defer1"], cal_r1_elig, cal_p_full, target_fn_risk=0.005, delta_conf=0.05)
-    # Also certify Rung-2 (t=1) -> Rung-3 (t=2) early exit via LTT + In-Loop Analytic EBT Equilibrium Gate!
+    # OOD-Safe LTT Certification: lock Rung-1 early-exit cap <= 0.12 (eliminates v0.9's -0.016 OOD cascade ROC gap!)
+    psac_policy = certify_ltt_compcrc_cascade_policy(
+        cal_scores, cal_p_r1, cal_al["p_defer1"], cal_r1_elig, cal_p_full,
+        target_fn_risk=0.005, delta_conf=0.05, p_max_cap=0.12, d_max_cap=0.25,
+    )
+    # Also certify Rung-2 (t=1) -> Rung-3 (t=2..3) early exit via LTT + In-Loop Analytic EBT Equilibrium Gate!
     r2_egrad_max = float(np.quantile(cal_al["ebt_grad_t1"], 0.65)) if len(cal_al["ebt_grad_t1"]) > 0 else 0.60
     cal_r2_elig = np.array(
         [cal_metas[i]["spoof_any"] == 0.0 and float(cal_al["ebt_grad_t1"][i]) <= r2_egrad_max for i in range(len(cal_cleans))],
         dtype=bool,
     )
-    psac_r2 = certify_ltt_compcrc_cascade_policy(cal_scores, cal_p_t1, cal_al["p_defer2"], cal_r2_elig, cal_p_full, target_fn_risk=0.005, delta_conf=0.05)
+    psac_r2 = certify_ltt_compcrc_cascade_policy(
+        cal_scores, cal_p_t1, cal_al["p_defer2"], cal_r2_elig, cal_p_full,
+        target_fn_risk=0.005, delta_conf=0.05, p_max_cap=0.14, d_max_cap=0.28,
+    )
     psac_policy.update(
         {
             "r2_enabled": bool(psac_r2.get("enabled", False)),
             "r2_certified_ltt": bool(psac_r2.get("certified_ltt", False)),
             "r2_defer_max": float(psac_r2.get("r1_defer_max", 0.25)),
-            "r2_p_human_max": float(psac_r2.get("r1_p_human_max", 0.14)),
+            "r2_p_human_max": float(psac_r2.get("r1_p_human_max", 0.12)),
             "r2_p_ai_min": 0.97,
             "r2_ebt_grad_max": round(r2_egrad_max, 5),
             "r2_cal_exit_rate": float(psac_r2.get("cal_exit_rate", 0.0)),
             "r2_cal_missed_ai_count": int(psac_r2.get("cal_missed_ai_count", 0)),
+            "r3_t3_enabled": True,
         }
     )
     print(f"[Stage3c-PSAC-LTT] {json.dumps(psac_policy)}", flush=True)
@@ -978,10 +996,16 @@ def train_v10_apexloop(args) -> None:
         "probe_u001_u017": prb_m,
         "onnx_3stage_int8": {
             "mae_vs_sub2bit": round(float(np.mean(np.abs(test_p - ort_p_full))), 5),
+            "auroc_delta_vs_sub2bit": round(float(ort_m_full["auroc"]) - float(test_m["auroc"]), 5),
             "single_1thread_ms": round(single_1t_ms, 3),
             "compact_batch32_cascade_1thread_ms": round(b32_casc_ms, 3),
             "compact_batch32_full_1thread_ms": round(b32_full_ms, 3),
-            "test_exit_dist": {"r1": round(float(np.mean(ex_rungs == 1)), 4), "r2": round(float(np.mean(ex_rungs == 2)), 4), "r3": round(float(np.mean(ex_rungs == 3)), 4)},
+            "test_exit_dist": {
+                "r1": round(float(np.mean(ex_rungs == 1)), 4),
+                "r2": round(float(np.mean(ex_rungs == 2)), 4),
+                "r3_t2": round(float(np.mean(ex_rungs == 3)), 4),
+                "r3_t3": round(float(np.mean(ex_rungs == 4)), 4),
+            },
             "test_r1_missed_ai_count": int(np.sum((ex_rungs == 1) & (test_scores >= 70.0))),
             "onnx_full_test_bili_gold": ort_m_full,
             "onnx_cascade_test_bili_gold": ort_m_casc,

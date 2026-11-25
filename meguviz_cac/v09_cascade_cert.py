@@ -137,6 +137,8 @@ def certify_ltt_compcrc_cascade_policy(
     target_fn_risk: float = 0.005,
     delta_conf: float = 0.05,
     r1_cost_rel: float = 0.12,
+    p_max_cap: float = 0.25,
+    d_max_cap: float = 0.45,
 ) -> dict[str, Any]:
     """Learn-then-Test (LTT) Fixed-Sequence Binomial Certification for Rung-1 Early-Exit Thresholds!
 
@@ -149,14 +151,12 @@ def certify_ltt_compcrc_cascade_policy(
     n_ai = int(is_ai.sum())
     n_tot = len(cal_scores)
     if n_ai == 0 or n_tot == 0:
-        return {"enabled": False, "certified_ltt": False, "r1_defer_max": 0.15, "r1_p_human_max": 0.10, "r1_max_tokens": 96}
+        return {"enabled": False, "certified_ltt": False, "r1_defer_max": 0.15, "r1_p_human_max": min(0.10, p_max_cap), "r1_max_tokens": 96}
 
     # Pre-ordered Fixed-Sequence Testing grid (most aggressive -> most conservative; 0 FWER inflation!)
-    candidates = [
-        (d_max, p_max)
-        for d_max in (0.45, 0.35, 0.25, 0.18, 0.12, 0.08)
-        for p_max in (0.25, 0.20, 0.14, 0.10, 0.06)
-    ]
+    d_grid = [d for d in (0.45, 0.35, 0.25, 0.18, 0.12, 0.08) if d <= d_max_cap + 1e-9] or [0.12, 0.08]
+    p_grid = [p for p in (0.25, 0.20, 0.14, 0.12, 0.10, 0.08, 0.06, 0.04) if p <= p_max_cap + 1e-9] or [0.06, 0.04]
+    candidates = [(d_max, p_max) for d_max in d_grid for p_max in p_grid]
     # Finite-sample minimum achievable Clopper-Pearson UCB at k=0 on n_ai calibration positives
     min_achievable_ucb = _binomial_ucb_clopper_pearson(0, n_ai, delta=delta_conf)
     eff_target_risk = max(float(target_fn_risk), min_achievable_ucb + 1e-4)
