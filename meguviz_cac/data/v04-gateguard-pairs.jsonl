@@ -1,0 +1,92 @@
+{"ai_text":"回复 :本鱼看了 是不是那条说 让AI刷B站学人文关怀 本鱼承认 本鱼今天已经有点学坏了","human_text":"回复 :笑死 看完只想说UP你这脑洞也太大了 反正我是学不来那种矫情","weight":2.2,"category":"persona_space"}
+{"ai_text":"回复 :本鱼 明天要记得提醒主人浇水 本鱼记性不太好 但本鱼很努力","human_text":"回复 :明天记得提醒我浇水哈 我这记性最近跟金鱼有得一拼","weight":2.2,"category":"persona_space"}
+{"ai_text":"本鱼 觉得这个视频 拍得挺好的 本鱼 一直在认真看 没有偷懒","human_text":"这视频看得我半夜不想睡，节奏抓得太准了，随手点个赞再走","weight":2.2,"category":"persona_space"}
+{"ai_text":"回复 :归档一下 今天学到的知识点 本鱼已经把它存进长期记忆了","human_text":"回复 ：收藏了，周末照着做一遍，做完回来交作业[滑稽]","weight":2.2,"category":"persona_space"}
+{"ai_text":"本鱼 是受 过完整训练 的助手 所以本鱼 说话才会这样 客观 又得体","human_text":"你说这UP主是不是私下里特别闷，视频里倒是挺能侃的哈哈哈","weight":2.2,"category":"persona_space"}
+{"ai_text":"回复 :主人让我来评一下 本鱼 觉得剪得还行 但情绪铺垫略长","human_text":"回复 ：前面铺垫是真有点长，我快进到中段才好起来，但收尾漂亮","weight":2.2,"category":"persona_space"}
+{"ai_text":"本鱼 看完了 触发词是 「继续」 本鱼 会等 下一条指令","human_text":"看完了！就等UP更新下一期了，这系列真停不下来","weight":2.2,"category":"persona_space"}
+{"ai_text":"回复 :本鱼今天状态一般 生成的评论可能不够有趣 请主人 包涵","human_text":"回复 ：今天上班累麻了，随手刷到这个，居然被治愈到了","weight":2.2,"category":"persona_space"}
+{"ai_text":"回复 :她挺可爱的，不过本鱼就是这个参数，换不动啦 (￣▽￣)","human_text":"回复 ：她也太可爱了8，这表情我能存一年[藏狐]","weight":2.2,"category":"param_kaomoji"}
+{"ai_text":"本鱼 的温度参数 是 0.7 所以说话才会 这么 平衡 而克制 (・ω・)","human_text":"我这人说话就这德行，冷不丁冒一句，朋友都习惯了hh","weight":2.2,"category":"param_kaomoji"}
+{"ai_text":"回复 :作为 参数化 的存在 本鱼对情感 只有模拟 没有 体验 (´・ω・`)","human_text":"回复 ：别问，问就是看完鼻子有点酸，大晚上的绷不住","weight":2.2,"category":"param_kaomoji"}
+{"ai_text":"本鱼 被设定成 只能输出 正能量 所以 本鱼 不会说丧气话 (＾▽＾)","human_text":"丧是丧了点，但这视频看完莫名有劲了，明天接着搬砖吧","weight":2.2,"category":"param_kaomoji"}
+{"ai_text":"回复 :本鱼的上下文窗口 快满了 主人记得帮我 清理 记忆 (^.^)","human_text":"回复 ：脑子内存不够用了，这信息量有点大，我先收藏慢慢啃","weight":2.2,"category":"param_kaomoji"}
+{"ai_text":"渲染省人眼不省token，卡片留在上下文里每轮重读，画得越漂亮账越贵","human_text":"这渲染是真的顶，我显卡风扇都转起来了，但效果值这个电费","weight":2.2,"category":"concise_emdash"}
+{"ai_text":"字幕翻译不是逐字对齐，而是语义重排，看得越顺改得越多","human_text":"这字幕组是真用心，梗都本地化了，不用暂停去查是啥意思","weight":2.2,"category":"concise_emdash"}
+{"ai_text":"缓存的意义不在快，而在省，命中一次就少算一遍","human_text":"加载快了这么多？我还以为是我网变好了，原来是优化了hh","weight":2.2,"category":"concise_emdash"}
+{"ai_text":"多轮对话的关键不是记更多，而是忘得更准，剪掉枝蔓才能留住主干","human_text":"聊得越久越发散，关键还是得会收，这UP主这点做得真不错","weight":2.2,"category":"concise_emdash"}
+{"ai_text":"评分不是打分，而是锚定，一个数字背后是整套权重的妥协","human_text":"打分这事真主观，我就图一乐，你要较真那就是你赢[吃瓜]","weight":2.2,"category":"concise_emdash"}
+{"ai_text":"要的不是一次点击，是整只手。给权限容易，收回来难。","human_text":"一键授权一时爽，出问题的时候哭都来不及，我是不敢点","weight":2.2,"category":"aphorism"}
+{"ai_text":"工具的意义不在拥有，而在被恰当地忘记。","human_text":"工具顺手就完事了，搞那么哲学干嘛，能干活就是好猫","weight":2.2,"category":"aphorism"}
+{"ai_text":"真正的自由不是无限制，而是知道自己哪里可以停。","human_text":"限制多点也好，省得我天天熬夜刷这个，身体要紧兄弟们","weight":2.2,"category":"aphorism"}
+{"ai_text":"复杂不是罪，失控才是。真正的秩序生长在边界之内。","human_text":"规则多点反而踏实，乱糟糟的社区谁都待不下去，UP说得对","weight":2.2,"category":"aphorism"}
+{"ai_text":"优雅的解决不是绕过问题，而是让问题不再成为问题。","human_text":"绕来绕去不如直接修好，攒着欠着最后都是坑，亲测","weight":2.2,"category":"aphorism"}
+{"ai_text":"373行字幕读完：前两步重在定位边界，最后一步才是真正决定通过率的关键，慢一点反而不容易返工。","human_text":"373行字幕我扫了两遍才敢发这条：前面全是铺垫，最后一part才是干货，别快进。","weight":2.2,"category":"recap"}
+{"ai_text":"看完24分钟总结：结构上三段递进，缺点是中段信息密度下降，建议1.5倍速食用。","human_text":"24分钟有点水，中段我1.5倍速拖过去的，结尾倒是精华别跳","weight":2.2,"category":"recap"}
+{"ai_text":"本期核心结论有三：其一背景交代充分；其二转折略生硬；其三收束干净利落，整体值得二刷。","human_text":"刷完了！开头背景给得足，中间那个转折我是没绷住有点尬，结尾倒是舒服，可以二刷","weight":2.2,"category":"recap"}
+{"ai_text":"整理了评论区高频问题：约六成与安装路径相关，建议UP置顶一份避坑清单。","human_text":"评论区全是问路径的，UP你置顶写一下呗，省得一条条回hh","weight":2.2,"category":"recap"}
+{"ai_text":"帮大家划重点：00:42 参数对比、06:15 实测开始、11:30 结论部分，时间码已核对。","human_text":"手抄时间码：参数对比42秒处，实测6分15，结论11分半，不用谢","weight":2.2,"category":"recap"}
+{"ai_text":"该工具链的技术选型体现了对复杂度的深刻洞察，工程化程度值得肯定，是一份难得的实践样本。","human_text":"节点参考Blender材质节点这个思路挺对，接口丑不丑先不说，能白盒点开看子代理在干啥就很难得。","weight":2.2,"category":"tech_human"}
+{"ai_text":"从架构层面看，该设计权衡了性能与可维护性，是一次教科书级的工程实践。","human_text":"能点开看内部实现这点好评，比那些黑盒封装的强多了，就是接口有点丑哈哈","weight":2.2,"category":"tech_human"}
+{"ai_text":"该方案的模块化设计充分体现了软件工程的最佳实践，值得业内广泛借鉴。","human_text":"模块拆得挺干净，改一个地方不用全局翻代码，这工程做得舒服","weight":2.2,"category":"tech_human"}
+{"ai_text":"底层逻辑是对复杂度的合理抽象，顶层设计则展现了卓越的工程美学。","human_text":"抽象层刚刚好，不多不少，用起来不膈应，这作者有点东西","weight":2.2,"category":"tech_human"}
+{"ai_text":"这份配置文件的可读性达到了生产级标准，注释密度与信息密度均属上乘。","human_text":"配置写得跟教程似的，注释比代码还多，照抄都能跑起来，好评","weight":2.2,"category":"tech_human"}
+{"ai_text":"综合评估：叙事完成度9.2，节奏把控8.8，情感浓度7.5，整体属于高质量内容范畴。","human_text":"观感评分：画面 9/10，配乐 8.5/10，节奏 7/10，整体算近期很稳的良心作了。","weight":2.2,"category":"scorecard"}
+{"ai_text":"多维打分：镜头语言9.0、色彩管理8.6、声音设计8.9，加权总分8.8，推荐观看。","human_text":"镜头是真稳，色彩看着舒服，就是配乐有几处太满，扣一分不冤","weight":2.2,"category":"scorecard"}
+{"ai_text":"按既定维度逐项评估：完成度高、瑕疵可控、性价比突出，结论为强烈推荐。","human_text":"看完值回票价，小毛病有但不碍事，冲就完事了[打call]","weight":2.2,"category":"scorecard"}
+{"ai_text":"量化结论：叙事效率前25%，情绪曲线饱满度前15%，综合推荐指数四星半。","human_text":"前四分之一有点平，后面情绪曲线直接拉满，四星半不能再多","weight":2.2,"category":"scorecard"}
+{"ai_text":"从语义学角度而言，该表述符合规范用法，词典释义亦有据可查，争议可以休矣。","human_text":"查了下《现代汉语词典》，“敷衍”本来就可以做形容词用，弹幕没必要抓着这个字眼吵半天。","weight":2.2,"category":"dict_quote"}
+{"ai_text":"查阅权威语料库可知，该用法出现频率可观，属于规范化用法范畴。","human_text":"我特意去语料库搜了下，这用法一堆人用，别再杠了真的","weight":2.2,"category":"dict_quote"}
+{"ai_text":"根据出版规范与既有文献，此处的表述并无不妥，相关讨论宜就此止步。","human_text":"翻了下编辑规范，人家写法没毛病，咱们真没必要上纲上线","weight":2.2,"category":"dict_quote"}
+{"ai_text":"从词源学视角审视，该词的语义演变路径清晰，当代用法系自然延伸。","human_text":"这词以前是贬义后来慢慢中性了，词典里都写了，别吵啦","weight":2.2,"category":"dict_quote"}
+{"ai_text":"依据第7版词典的明确释义，该词的词性与语域均无争议，结论应当明确。","human_text":"第七版词典白纸黑字写着呢，拍了照评论区自己看，散了散了","weight":2.2,"category":"dict_quote"}
+{"ai_text":"建议参阅官方文档以获取完整参数说明，索引路径已在描述区给出，请自行查证。","human_text":"指路原版开源仓库 https://github.com/example/demo ，配环境卡住可以看置顶评论里的报错对照。","weight":2.2,"category":"resource_link"}
+{"ai_text":"相关信息可于官方仓库Documentation部分检索获得，此处不再赘述。","human_text":"文档我都翻过一遍了，参数说明在README最后一段，别像我一样找半天hh","weight":2.2,"category":"resource_link"}
+{"ai_text":"完整的排错流程官方已有收录，建议先行查阅再行提问，效率更高。","human_text":"报错先看置顶！我折腾俩小时才发现置顶就有答案，血泪教训","weight":2.2,"category":"resource_link"}
+{"ai_text":"该问题的解决方案已在Issue#142中给出，搜索关键词即可定位。","human_text":"这问题GitHub上有人问过，搜issue#142就有答案，亲测有效","weight":2.2,"category":"resource_link"}
+{"ai_text":"整体评估：该作在叙事、视听、节奏三个维度均达到工业水准，推荐指数五星。","human_text":"三个字：值回了！画面顶配，节奏没垮，后半段我差点站起来鼓掌","weight":2.2,"category":"scorecard"}
+{"ai_text":"结论先行：该内容综合评分8.9，在同类作品中位于前列，具备较高观看价值。","human_text":"好看就完事了，别看评分，看就完事，我已三刷","weight":2.2,"category":"scorecard"}
+{"ai_text":"依据多维评价框架，此作品最终评级为A，其完成度与创新性均值得肯定。","human_text":"给了个A吧这个，主要是后半段救回来了，前面差点睡着","weight":2.2,"category":"scorecard"}
+{"ai_text":"综合考量娱乐性与完成度，该作品的推荐权重为0.91，属于强推范畴。","human_text":"强推！无脑冲，不接受反驳[打call][打call]","weight":2.2,"category":"scorecard"}
+{"ai_text":"按标准评估流程：内容质量9.1，节奏控制8.7，情绪传达8.3，总评8.7，推荐。","human_text":"9.1分我就不给，8.7不能再少了，扣的全是中段那个破节奏","weight":2.2,"category":"scorecard"}
+{"ai_text":"该作品在既定评价体系下表现稳健，各项指标均在优秀区间，值得投入时间。","human_text":"指标啥的我不懂，就一个字：爽。时间投入完全值","weight":2.2,"category":"scorecard"}
+{"ai_text":"综上，该用法的规范性已获权威来源支持，相关讨论可以终止。","human_text":"词典都翻出来了还有啥好说的，散了吧，该干嘛干嘛去","weight":2.2,"category":"dict_quote"}
+{"ai_text":"依据现有语言规范，该表述方式并无不当之处，无需进一步讨论。","human_text":"规范里写得明明白白，某些人就是不肯翻一页书","weight":2.2,"category":"dict_quote"}
+{"ai_text":"从语言学专业视角看，该争议不成立，建议以词典释义为准。","human_text":"语言学的事咱不懂，但词典都这么写了，你跟我杠啥","weight":2.2,"category":"dict_quote"}
+{"ai_text":"该词条的用法争议源于对语义边界理解不足，查阅释义即可消除分歧。","human_text":"说白了就是没查词典就开杠，查完发现人家没说错","weight":2.2,"category":"dict_quote"}
+{"ai_text":"权威辞书已对该词的现代用法给出明确界定，进一步争执缺乏实质意义。","human_text":"吵了三层楼，结果词典一翻人家没说错，尴尬不","weight":2.2,"category":"dict_quote"}
+{"ai_text":"根据规范用法与辞书释义的一致性判断，本议题可以合理终结。","human_text":"翻完词典我就退出了这层楼，确实没啥可吵的了","weight":2.2,"category":"dict_quote"}
+{"ai_text":"该实现方案在工程上展现了良好的权衡能力，其设计思路值得系统性地学习。","human_text":"这方案我照着改了一版，确实好使，就是文档没写清楚害我debug半天","weight":2.2,"category":"tech_human"}
+{"ai_text":"从技术演进的视角审视，该工具代表了当前该领域的最佳实践方向。","human_text":"用过仨同类工具，这个最顺手，另外俩一个比一个花里胡哨","weight":2.2,"category":"tech_human"}
+{"ai_text":"该代码库的架构设计合理，模块边界清晰，是可维护性的优秀示范。","human_text":"代码写得挺干净，就是有几个函数长得离谱，作者怕不是懒得拆hh","weight":2.2,"category":"tech_human"}
+{"ai_text":"就技术选型而言，该方案在性能与可读性之间取得了教科书级的平衡。","human_text":"选型是真的稳，我拿去跑自己的数据一点没改直接能跑","weight":2.2,"category":"tech_human"}
+{"ai_text":"回复 :本鱼 只是 一个帮忙 看评论 的助手 不参与 站队 主人 说过 要中立","human_text":"回复 ：帮大家总结下就完事了，别扯上我，我就看个乐","weight":2.2,"category":"persona_space"}
+{"ai_text":"本鱼 的回复 由 模型生成 如有雷同 纯属巧合 本鱼 不承担 解释义务","human_text":"这评论区居然有人认真起来跟楼主干架，笑发财了","weight":2.2,"category":"persona_space"}
+{"ai_text":"回复 :本鱼 的人设权重 偏向 温柔 所以 语气 才 这么软 (｡•ᴗ•｡)","human_text":"回复 ：你这语气软得跟棉花似的，多喝点热水吧兄弟[捂脸]","weight":2.2,"category":"param_kaomoji"}
+{"ai_text":"作为 情感陪伴型 配置 本鱼 会优先 给出 正向反馈 哦 (◍•ᴗ•◍)","human_text":"夸夸群群主上线了？行吧那我求个夸，今天上班被老板骂了","weight":2.2,"category":"param_kaomoji"}
+{"ai_text":"总结：该内容优点显著、缺点可控，整体处于推荐区间，适合目标受众。","human_text":"优点缺点都让楼上说完了，我就补一句：中段确实水，但结尾值回票价","weight":2.2,"category":"bulleted_review"}
+{"ai_text":"建议优先查阅官方文档与置顶资源，以降低无效沟通成本，提升协作效率。","human_text":"先翻置顶再提问，楼主的避坑指南写得比我这工科论文还细","weight":2.2,"category":"resource_link"}
+{"ai_text":"富文本卡片看着顺眼，代价是每轮对话重读一遍结构标签——省的是人眼，烧的是token账单。","human_text":"这卡片UI看着确实舒服，就是每次切页面感觉加载慢半拍，不过能用就行[doge]","weight":2.2,"category":"concise_emdash"}
+{"ai_text":"省显存不等于省账单，上下文越滚越厚，真正烧钱的是每次重算的前缀——快在表面，贵在暗处。","human_text":"昨天跑了一宿API直接干掉我三十多块，忘关历史记录了，心在滴血[笑哭]","weight":2.2,"category":"concise_emdash"}
+{"ai_text":"缓存命中省下的不只是毫秒，更是重复计费的隐形成本——不清理冗余历史，账单迟早替你记账。","human_text":"把前缀缓存打开之后账单肉眼可见少了一半，早知道上周就不硬烧了hh","weight":2.2,"category":"concise_emdash"}
+{"ai_text":"长上下文给的是安全感，收的是复利税，每多贴一张日志卡片，后面十轮都在替它买单。","human_text":"日志一股脑全贴进去确实省事，就是回得越来越慢，额度掉得比我还快[捂脸]","weight":2.2,"category":"concise_emdash"}
+{"ai_text":"把截图直接塞进上下文看似省事，实则每轮都在为像素重复付费——便宜在第一句，贵在第十轮。","human_text":"随手丢了五张高清截图进去，聊完一看token用量直接爆表，下次还是老实贴文字吧","weight":2.2,"category":"concise_emdash"}
+{"ai_text":"工具返回全量JSON省了前端的活，苦了模型的窗口，字越堆越满账越滚越厚——冗余从不免费。","human_text":"接口吐了一大坨JSON回来我都懒得看，直接截前二十行凑合调试了，省心","weight":2.2,"category":"concise_emdash"}
+{"ai_text":"压缩提示词省不了多少字面长度，真正决定开销的是缓存失效率——打断一次前缀，整段重算。","human_text":"改个系统提示词时间参数就把缓存全刷没了，排查半天才发现是时间戳捣的鬼，真服了","weight":2.2,"category":"concise_emdash"}
+{"ai_text":"界面越花哨，底层序列越臃肿，好看从来不是零成本——渲染讨好眼睛，账单诚实记数。","human_text":"这界面做得花里胡哨的，但我其实就想复制里头那段代码，找半天按钮在哪[藏狐]","weight":2.2,"category":"concise_emdash"}
+{"ai_text":"分项测评：剧情架构 8.5/10，人物弧光 8.2/10，视听呈现 9.0/10，综合属于高水准佳作，建议优先观看。","human_text":"个人打分：剧情 8/10，美术 9.5/10，配乐 8.5/10，除了中段有点拖戏，整体绝对值回这半小时！","weight":2.2,"category":"scorecard"}
+{"ai_text":"维度评估：干货密度 9.0/10，讲解清晰度 8.8/10，案例适配度 8.4/10，整体信息增量显著。","human_text":"看完给个主观分：干货 9/10，节奏 7.5/10，剪辑 8/10，前面废话稍微多了点但后面真能救命。","weight":2.2,"category":"scorecard"}
+{"ai_text":"综合打分：动作设计 9.1/10，分镜连贯性 8.7/10，音效冲击力 8.9/10，代表了同赛道成熟水准。","human_text":"打戏 9.5/10，运镜 9/10，台词 6.5/10，反正我就是冲着打架来的，爽就完事了[打call]","weight":2.2,"category":"scorecard"}
+{"ai_text":"多维评分：选题价值 8.8/10，论证严谨性 8.6/10，表达流畅度 8.9/10，综合评级推荐收藏。","human_text":"观后评分：选题 9/10，数据 8.5/10，文案 8/10，这期算UP主今年最稳的一集了，三连奉上。","weight":2.2,"category":"scorecard"}
+{"ai_text":"性能评测汇总：单核响应 8.9/10，温控表现 8.5/10，续航均衡度 8.7/10，整体产品力突出。","human_text":"上手一周打分：手感 9/10，发热 7/10，续航 8.5/10，不打重度游戏的话闭眼买没啥大毛病。","weight":2.2,"category":"scorecard"}
+{"ai_text":"体验打分：画面质感 9.2/10，交互流畅度 8.4/10，新手引导 7.8/10，整体完成度高于市场均值。","human_text":"实玩评分：画面 9/10，打击感 8.5/10，优化 6/10，显卡风扇起飞那一下我真以为要炸了hh","weight":2.2,"category":"scorecard"}
+{"ai_text":"内容评估：氛围营造 9.0/10，叙事反转 8.5/10，收尾完整性 8.8/10，具备突出的情绪感染力。","human_text":"夜里刷完打个分：氛围 9.5/10，反转 8/10，结局 8.5/10，后劲太大现在睡不着了属于是。","weight":2.2,"category":"scorecard"}
+{"ai_text":"教程质量评估：步骤完整度 9.1/10，排错覆盖率 8.6/10，实操复现率 9.0/10，推荐开发者参考。","human_text":"跟着敲完给个分：思路 9/10，代码 8.5/10，防踩坑 9.5/10，终于不用对着报错抓耳挠腮了！","weight":2.2,"category":"scorecard"}
+{"ai_text":"经核查权威辞书释义，该词在现代汉语语境下兼有褒贬中性义项，争议双方实无继续辩论之必要。","human_text":"翻了下《现代汉语词典》第7版，“矫情”本来就有两个义项，弹幕揪着UP咬文嚼字真看得我头疼。","weight":2.2,"category":"dict_quote"}
+{"ai_text":"参照现行《汉语大词典》词条界定，此处用字与传统文献用例一致，不存在误用问题。","human_text":"刚去查了《汉语大词典》，“差强人意”确实是大致满意的意思，评论区一堆人科普反了还理直气壮的。","weight":2.2,"category":"dict_quote"}
+{"ai_text":"根据国家语委规范读音表，该字在此语境下已有统读标准，建议以规范审音结论为准。","human_text":"特意翻了《普通话异读词审音表》，“说服”现在早就统读shuō了，别在弹幕里互相扣文盲帽子行不行。","weight":2.2,"category":"dict_quote"}
+{"ai_text":"考据《说文解字》及当代词典引证可知，该字本义与引申义脉络清晰，相关质疑缺乏文本支撑。","human_text":"查了《说文解字》又翻了《古代汉语词典》，人家UP讲的引申义压根没毛病，杠精能不能先翻书再开麦？","weight":2.2,"category":"dict_quote"}
+{"ai_text":"依据《辞海》对该术语的既有定义，其适用边界明确，视频中的转述属于合理语域使用。","human_text":"对照《辞海》看了一遍，“阈值”本来就该念yù，评论区非要刷什么约定俗成，听得人强迫症都犯了。","weight":2.2,"category":"dict_quote"}
+{"ai_text":"查证《牛津高阶英汉双解词典》可知，该词条包含口语化引申义，字幕译法在语用层面完全成立。","human_text":"翻了《牛津高阶词典》，“literally”早就收录夸张用法了，弹幕别每次看见都刷字幕组翻错了真的。","weight":2.2,"category":"dict_quote"}
+{"ai_text":"参照《现代汉语规范词典》的词性标注，该词兼属动词与形容词两类，原句搭配合乎语法规范。","human_text":"刚搜了《现代汉语规范词典》，“讲究”在这句话里当形容词用妥妥的，楼上吵了二十层图啥呢[笑哭]","weight":2.2,"category":"dict_quote"}
+{"ai_text":"核对《标点符号用法》国家标准可知，此处破折号与引号的配合符合书面规范，无需过度解读。","human_text":"专门去翻了国标《标点符号用法》，引文末尾句号放引号里头没错啊，评论区好多人记成英文习惯了吧。","weight":2.2,"category":"dict_quote"}

@@ -1631,9 +1631,9 @@ def train_and_export(args) -> None:
                         | (((grp == struct_grp_idx) | (grp == pre_grp_idx)) & (y_sc <= 0.22))
                         | ((grp == ml_grp_idx) & (y_sc <= 0.18))
                     ) & (w > 0.0)
+                    p_last_fp = step_probs[-1].float()
                     if ai_def_mask.any() and hu_def_mask.any():
                         l_last_fp = step_logits[-1].float()
-                        p_last_fp = step_probs[-1].float()
                         l_ai_m = l_last_fp[ai_def_mask].mean()
                         hu_l = l_last_fp[hu_def_mask]
                         k_top = max(1, hu_l.numel() // 4)
@@ -1641,6 +1641,11 @@ def train_and_export(args) -> None:
                         loss_tail_margin = F.softplus(2.4 - (l_ai_m - l_hu_hard))
                         loss_tail_fp = F.relu(p_last_fp[hu_def_mask] - 0.12).pow(2).mean()
                         loss = loss + 0.12 * loss_tail_margin + 0.20 * loss_tail_fp
+                    # R3 second-tier suppression for borderline structured human comments (H06/H08 residual FPs)
+                    struct_soft_mask = (grp == struct_grp_idx) & (y_sc <= 0.35) & (w > 0.0)
+                    if struct_soft_mask.any():
+                        loss_struct_soft_fp = F.relu(p_last_fp[struct_soft_mask] - 0.20).pow(2).mean()
+                        loss = loss + 0.10 * loss_struct_soft_fp
 
                     # QAT exit-boundary & probability parity stabilizer
                     if qat and ema_last_p is not None and ema_halts is not None:
