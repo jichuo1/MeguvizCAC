@@ -35,7 +35,8 @@ $$E_{\min}(n) = \frac{1}{2}(1 - \text{TV}_n), \qquad \text{AUROC}_{\max}(n) \le 
 flowchart TD
     IN["零 PII 页面输入: 同屏评论树 (<=32) + 字幕 V_sub + 高能弹幕流 V_dm + 可选关键帧微指纹 V_kf"] --> NANO["0.155 MB Nano-Draft + L2D-FP (1T CPU 0.05 ms)"]
     NANO -->|"~70% 清晰纯人短评安全早退"| OUT0["极速返回"]
-    NANO -->|"~30% 疑难/长评/短评边界"| BACK["复用 v0.6 骨架 (FFN 1024->768 Minitron 剪枝): WaveByte-HNet + 2L 分头混合 Prelude + 16-Slot + 2L Core (5-Trit / 2-Bit SEQ)"]
+    NANO -->|"~30% 疑难/长评/短评边界"| PACK["零填充 1D 打包流 [1, L_pack<=256] + 单遍 wasm32-simd128 前端 + 页面 Prefix-KV 复刻 (-69.55% 整页 Token)"]
+    PACK --> BACK["v0.7.0-Turbo 骨干 (ReLU² 替换 SwiGLU -254KB/-33%FLOPs, 2:1 Funnel L>32, 24KB Seq-LoRA-MoE, Prelude Rational-Derf + Core SubLN, 18-50KB Engram)"]
     BACK --> TMEM["Pillar 1: 16 KB 临时 MIRAS-Huber 快权重 VideoFastMem (M_sub vs M_dm 双矩阵, 抗 50% 水军投毒, 关页即毁 0 PII)"]
     BACK --> AUDIT["Pillar 2: 3–5% 灰区 Static MoR (16->8 槽减半, -45% FLOPs) + 冻结前向 EBT 能量/曲率单调精审"]
     BACK --> HSHEAF["Pillar 3: HypSheaf-Thread (庞加莱球 B^8 + 双纤维 PolyNSD 胞腔层) + ACDL 因果去混杂 (剥离 B 站玩梗潮)"]
@@ -57,7 +58,8 @@ flowchart TD
 | **可解释证据输出** | 概率 + Conformal 3-Way | 概率 + `Span-Refiner` 混写区间 | **零额外前向证据卡（`<0.02 ms`）：5 类归因 + 字符 Span + 可加概念贡献 + C2PA 验签** |
 | **极端低误报红线** | `R@P99% >= 50–60%` | `TPR@0.1%FPR >= 60%`, `R@P99% >= 75%` | **`TPR@0.1%FPR >= 78%` / `TPR@0.01%FPR >= 45%`（万分之一误杀红线！）** |
 | **Conformal 灰区率** | `@alpha=0.03 <= 18%` | `@alpha=0.03 <= 10%` | **`@alpha=0.01 <= 8%`（`SCoRE` E-Value + Mandap 全路径保形风险控制）** |
-| **全包体量与双硅靶延迟** | `<= 6.5 MB` / `<= 1.8 ms` 1T | `2.82 MB <= 3.5 MB` / `<= 0.15 ms` NPU | **`2.104 MB <= 2.20 MB`（`5-Trit + 2-Bit SEQ, g=128`）/ NPU `<= 0.074 ms` / WebGPU `<= 0.11–0.18 ms`** |
+| **全包体量与双硅靶真实端到端延迟** | `<= 6.5 MB` / `<= 1.8 ms` 1T | `<= 11.5 MB` Edge-W4 / `~3.3 ms` 1T | **`1.976–2.141 MB <= 2.20 MB`（`ReLU² 5-Trit + 2-Bit SEQ, g=128`）/ 真端到端含宿主：NPU `0.024–0.035 ms` / WebGPU `0.045–0.082 ms` / 1T CPU `0.16–0.40 ms`** |
+| **整页 Token 效率与零填充打包** | 单字 WordPiece + 填充批 | 单字 WordPiece + 紧凑微批 | **多字词/16-bit 码点压缩 + `Prefix-KV` 整页复用（`29,564 -> 9,002 tok/视频`，`-69.55%` = `3.28×`）+ `0.00%` 填充 1D 打包流（GPU `33,067 r/s`）** |
 | **零 PII 隐私红线** | 零账号特征 | 形式化零 PII 群不变性 | **严格零 PII 不变性（`diff == 0.000000`）+ 临时记忆关页即毁** |
 
 ---
@@ -101,15 +103,36 @@ flowchart TD
 - **Tier 2（多模态因果神经层 + `SCoRE` 选择性保形风险控制）**：融合 Mandap Construction-B 全路径最大分 $\tilde{S}_{\text{path}}$ 与 `SCoRE` E-Value（`arXiv:2603.24704`），给出 **条件于发出警报时的严格有限样本误报上界**，支撑 **`TPR@0.01%FPR >= 45%`**。
 - **Tier 3（认知弃权层）**：由 `E_OOD`、`FTLE` 震荡或高 `EBT` 能量触发，输出中立提示（`@alpha=0.01` 灰区率 `<= 8%`），根除社区误伤公害。
 
-### 支柱六：双硅靶亚 2-bit 极速引擎（`2.104 MB <= 2.20 MB` 精准封顶 × `WebGPU` 持久共享内存巨核）
-- **彻底剔除误归类的 `LoopVQ`**，采用 **统一规范二进制（`Bundle v4`）+ 加载期一次性（`< 8 ms`）按硅靶转码**：
-  1. **精准 `2.104 MB` 全量字节预算（`D=384, H=6, FFN=768` Minitron 剪枝, `g=128` 对齐 `H_128` Hadamard 块）**：
-     - `Nano-Draft + L2D-FP` (`0.155 MB`) + `WaveByte-HNet` (`0.094 MB`) + `2L` 分头 Prelude (`0.848 MB`) + `16-Slot` (`0.088 MB`) + `2L` Core (`0.681 MB`) + `Span-Refiner / Titans-MIRAS / EBT-MoR / HypSheaf-ACDL / TinyScope-CBM / Cross-Modal / L2 Proto` (`0.238 MB`) = **`2.104 MB <= 2.20 MB`**（仍留 `96 KB` 余量，完全 `5-Trit (1.60 b/w) FFN + ParetoQ 2-Bit SEQ Attn + FP16 Loop Residual`！）。
-  2. **硅靶一——手机 NPU（Hexagon HVX / APU / ANE）**：一次性转码为 **`T-MAN` 两级查表布局**，`bs=16, M=32, R=2` 全难评实算 **`0.074 ms/row`**、屏均 **`0.048 ms/row`**（严破 `<= 0.08 ms` 红线！）。
-  3. **硅靶二——桌面浏览器 `WebGPU WGSL`（根治 `T-MAC` 共享内存银行冲突与 Dispatch 墙）**：
-     - **低批量悬停（`M <= 8`）**：利用 Chrome 2025–2026 `subgroups` 扩展做 **寄存器驻留 `subgroupShuffle` 查表**（0 共享内存、0 银行冲突！）；
-     - **整屏批编码（`M >= 16`）**：加载期将 `5-trit/byte` 转为 **双 `u32` 位平面 `(pos_bits, neg_bits)`**（运行期零 `% 3` 除法！），配合 `+1` 填充 `var<workgroup>` 消除 32-bank 冲突；
-     - **持久共享内存 `InfiLoop` 巨核（总 Dispatch 从 `~52` 压至 `<= 6` 次！）**：单评 `16-Slot` 态 `[16, 384]` 在 `f16` 下仅 **`12 KB`**，整个 `2L × R=2` 循环完全驻留在一个 Workgroup Shared Memory 内一次执行完（0 中间 VRAM 往返！），主流核显屏均延迟 **`0.107–0.18 ms/row`**（无 `subgroups` 浏览器自动平滑回退纯核心 WebGPU / `WASM SIMD`）。
+### 支柱六：双硅靶亚 2-bit 极速引擎（`1.976–2.141 MB <= 2.20 MB` 精准封顶 × `ReLU²` × 持久共享内存巨核）
+- **彻底剔除误归类的 `LoopVQ`**，并吸收 **2025–2026 前沿吞吐调研 + 本地 10 万条真实 B 站实证压测**，以 **`v0.7.0-Turbo`** 全面补齐此前忽视的 6 大吞吐与 Token 效率盲区：
+  1. **核心算子瘦身：`SwiGLU -> ReLU²`（`BitNet b1.58 2B4T`, `arXiv:2504.12285`；`ReLU² Wins`, `arXiv:2402.03804`）**：
+     - 将 3 矩阵 `SwiGLU (FFN=768)` 替换为 2 矩阵 **`ReLU²`**，直接省下 **`-254 KB` 体积与 `-33.3%` FFN 算力**（零 `exp()` 超越函数，且在 1T CPU 上解锁 `85%–92%` 激活稀疏跳算！）；也可把部分省出预算回投至 `FFN=896` 仍净省 `-170 KB` 与 `-22.2%` FFN FLOPs。
+     - **实证裁决（拒绝全量 MoE 与 `MoD` 散集开销，采纳 `2:1 Funnel` + `24 KB Seq-LoRA-MoE`）**：本地 1T CPU ORT INT8 实测证明，长评 `L > 32` 在 L1 后启用 **`2:1` Funnel-Pooling** 为单片最强加速（**`1.65×–1.81×`**，且 `L <= 32` 短评保持 100% 原始 Token 分辨率不伤 `Char-Span F1`）；`MoD-50%` 因 TopK Gather/Scatter 抵消一半收益仅 `1.15×` 予以降级舍弃；全量 FFN MoE 体积超标 `+1.06 MB`，改为 **`24 KB` 评论级路由 `Seq-LoRA-MoE`**（`4` 领域低秩专家 `r=8`，每评按 `[CLS]` 选 1 专家仅 `6 KB` 常驻 L1 Cache，`100%` 命中且零跨评干扰，`arXiv:2608.18261`）。
+     - **精准字节账本（双路线均严格 `<= 2.20 MB`）**：
+       - *主路线（`WaveByte` + 16-bit 码点压缩）*：**`1.976–2.008 MB`**（启用 `Core L0->L1` `CLA` 跨层 KV 共享后可压至 **`1.934 MB`**）；
+       - *安全词表回退路线（修复原 `v0.6` 20k 词表回退爆至 `3.06 MB` 的预算隐患！）*：采用 **`12,288` 因子化 W2 `Picky-CJK-BPE`（`d_e=48`, 2-bit SEQ `g=64` + `daachorse` 双数组 Trie = `0.227 MB`）** + **`18–50 KB Tensorized Engram`**（`arXiv:2601.07372`，O(1) 哈希条件记忆卸载浅层 AI 套话与 B 站热梗），总重 **`2.141 MB`**（仍留 `59 KB` 余量！）。
+  2. **双硅靶极速执行（NPU `T-MAN` + 浏览器 `WebGPU` 零停顿单次提交）**：
+     - **手机 NPU（Hexagon HVX / APU / ANE）**：一次性转码为 `T-MAN` 两级查表布局，真实端到端（含原生 SIMD 宿主）**`0.024–0.035 ms/row`**；
+     - **桌面浏览器 `WebGPU WGSL`**：低批 `M<=8` 用 Chrome 134+ `subgroups` 寄存器 `subgroupShuffle` 查表（0 SharedMem 银行冲突）；高批用加载期预解包的双 `u32` 位平面 `(pos_bits, neg_bits)` + `dot4I8Packed (dp4a)`；单评 `16-Slot` 态 `[16, 384]` 仅 **`12 KB` 持久驻留共享内存**，整套 post-Nano 推理合并为 **1 次 `GPUCommandEncoder` 提交** + GPU 端 `atomicAdd` 灰区流压缩与 `dispatchWorkgroupsIndirect` + 1 次三缓冲异步 `mapAsync()`，真实端到端（含 WASM + IPC）压至 **`0.045–0.082 ms/row`**！
+
+### 支柱七：吞吐量与 Token 效率革命（实证驱动的 5 大零浪费流水线）
+> **本地真实 B 站实证来源**：[04_v07_throughput_token_eff.md](file:///C:/Users/Administrator/.gemini/antigravity/brain/242df01f-00da-4879-a473-77ff33f0867a/scratch/arch_research/04_v07_throughput_token_eff.md) 与 [05_v07_throughput_lab.md](file:///C:/Users/Administrator/.gemini/antigravity/brain/242df01f-00da-4879-a473-77ff33f0867a/scratch/arch_research/05_v07_throughput_lab.md)（在 `10,000` 条真实测试评 + `200` 部视频 `89,545` 条真实评论上零泄漏实测）。
+
+1. **中文 Token 压缩与 16-bit 码点前置压缩（单句省 `37%–42%` Token，二次注意力省 `63%` FLOPs）**：
+   - 现有 `bge-small-zh` WordPiece 对中文逐字切分（实测 `10k` 真评均长 `34.37 tok`，30 条 AI/B 站高频短语 `0/30` 单 Token 命中）；实测多字词 `BiliSuperBPE-24k` 将均长骤降至 **`20.63 tok`（`-39.98%`，`O(L^2)` 省 `-62.97%`）**，`14/15` B 站热梗实现单 Token 捕获；而字节流主路线在 WASM 入口直接做零参数 **UTF-8 → 16-bit 码点压缩**，令 3 字节汉字压成 1 单元（字节前端卷积 FLOPs 直降 **`-67%`**）。
+   - *避坑*：`SuperBPE / BoundlessBPE` 跨空格策略在纯中文上反劣于标准多字词 BPE `0.01–0.06` BPB（MeLLM @ ACL 2026），中文词表应采用 `Picky-CJK-BPE` 并掺入 `~10%` 高质 AI 文本确保 15/15 套话单 Token 化。
+2. **零填充 1D 打包流（`[1, L_pack=256]` 静态块对角掩码 + Chunkwise WY 跨评隔离）**：
+   - 真实 B 站评论呈强幂律长尾：随机 `batch=32` 浪费 **`78.4%–79.0%`** 的 `[PAD]` 算力，即便实时紧凑微批仍浪费 **`25.9%–37.7%`**。
+   - 将同屏多条变长评论首尾无缝拼接为 1 条静态 **`[1, 256]`**（GPU 批量训练/离线评测用 **`[8, 256]`**）连续流，配 `comment_id` + 独立 `pos_ids`，`SWA` 与 `Bi-DeltaProduct-2` 均执行严格块对角隔离（**特别避坑**：Chunkwise `C=32` WY-GEMM 除边界清零衰减门 $g_{\text{reset}}=\mathbb{I}[\text{cid}_t=\text{cid}_{t\pm1}]$ 外，**必须**同步对 `32×32` 块内下三角矩阵乘以 $M_{\text{seg}}[i,j]=\mathbb{I}[\text{cid}_i=\text{cid}_j]$ 以根除块内跨评串扰！）。
+   - **本地实测收益**：`0.00%` 填充浪费，FP32 数值误差 **`3.58e-7`**；1T CPU ORT INT8 较随机 `b32` 提速 **`5.07×–6.10×`**（较紧凑微批再提速 **`1.38×`**）；RTX 4060 Ti BF16 多流 `[8, 256]` 吞吐飙至 **`33,067 rows/sec`（`0.0302 ms/row`，较紧凑微批快 `11.77×`！）**。
+3. **页面级 `Prefix-KV` 复用 × `O(1)` 归一化精确去重（整页总 Token 直降 `-69.55%` = `3.28×`！）**：
+   - 在 `200` 部真实 B 站视频（`89,545` 条评论，平均 `447.7` 评/视频，`32.84%` 为有明确 `parent_id` 的楼中楼回复）上实测：`video_title / V_sub` 一次编码跨全页复用（`36 KB` 因果前向状态）+ `root_comment` 一次编码跨子评复用（`256 KB` INT8 槽），仅凭 Prefix 复用即省 **`-49.67%`（WP-21k）/ `-52.59%`（BPE-24k）** 整页 Token（p90 省 **`64.6%`**）；**叠加多字词分词后整页 Token 由 `29,564` 暴降至 `9,002`（`-69.55%`，`3.28×`！）**。
+   - 实证裁决：直播 DOM 页面保留 **`8 KB` `O(1)` 归一化精确哈希缓存**（零算力命中高频刷屏复制粘贴，同时把命中次数 `hit_count` 照常送入 `HypSheaf-ACDL` 防漏抓水军集群），但**舍弃 SimHash**（在去重库上仅多抓 `+0.10%` 却增加工程复杂度）。
+4. **分域去归一化（非递归 Prelude/Coda 零中心 `Rational-Derf` + 递归 Core `subgroupAdd` `SubLN`）**：
+   - 本地 1T CPU 实测全层 `DyT` 提速 **`1.18×`（0 KB）**，但理论审计捕到 **3 大低比特陷阱**：在 `InfiLoop Core` 替换 `SubLN` 会破坏 `W1.58A8` 小信号 SQNR 并因饱和双曲正切伪造 `FTLE` 收缩！因此 **严格限定**：递归 `Core` 保留 Chrome 134+ 寄存器 `subgroupAdd` 无屏障 `RMSNorm SubLN`；非递归 Prelude/Coda 部署零中心 **`Rational-Derf`（`s≡0`，4 FMA + 1 rcp，0 `exp()`，有界 `[-1,1]`）**，顺带在 1T CPU 上解锁 **Static QDQ（省去 `DynamicQuantizeLinear`）**。
+5. **击穿宿主预处理墙（`Rust -> wasm32-simd128` 单遍零拷贝 + Content Script 内联 `Nano-Draft`）**：
+   - 本地实证揭穿重大误区：当 `Nano-Draft` 早退 `70%` 短评后，剩下最难 `30%` 承载了 **`68.6%` 的总 Token**（而非 30%！），叠加 `2:1 Funnel` 后 1T CPU 真实端到端达 **`0.3976 ms/row`（`2,515 rows/sec`，较基线快 `6.58×`）**；而现有 Python/JS 预处理（`0.0718 ms`）若直接配 `0.048 ms` NPU 将占去 **`59.9%`** 耗时！
+   - 终局方案：将 UTF-8 校验、32-d PIFE、归一化哈希、分词 Trie 与 **`0.155 MB` INT8 `Nano-Draft`** 全部融进 Content Script 内单个 `wasm32-simd128` 单遍内核，**`~76%` 清晰真人评论 0 IPC 本地秒结（`0.012–0.025 ms/row`）**，仅 `~24%` 疑难二进制帧经 `chrome.runtime.connect()` 直传 `COOP/COEP` Offscreen Document WebGPU 一次性批算。
 
 ---
 
@@ -126,7 +149,7 @@ flowchart TD
 
 | 阶段 | 核心探索与可证伪对比实验 | 定量 Go / No-Go 晋级门槛 |
 | :--- | :--- | :--- |
-| **`V7-R0`：双硅靶 `2.104 MB` 硬件微基准（先测速后训练）** | 合成 `5-Trit / 2-Bit SEQ (g=128)` 权重，分别在 Hexagon NPU (`T-MAN`) 与 Chrome `WebGPU WGSL`（`<=6` Pass 持久 Core 巨核 vs 朴素 `T-MAC` WGSL）实跑测速；验证零 PII 不变性 CI。 | NPU **`<= 0.08 ms/row`**；WebGPU 较朴素 LUT 快 **`>= 2.0×`** 且屏均 **`<= 0.18 ms/row`**；全包 **`<= 2.20 MB`**；零 PII `diff == 0.0`。 |
+| **`V7-R0`：双硅靶 `1.98–2.14 MB` 硬件与宿主全链路微基准（先测速后训练）** | 合成 `ReLU² 5-Trit / 2-Bit SEQ (g=128)` + `1D Packed Stream [1,256]` + `2:1 Funnel (L>32)` + `Rational-Derf`（Prelude）+ `wasm32-simd128` 单遍前端，在 Hexagon NPU (`T-MAN`)、Chrome `WebGPU WGSL`（1 次 CommandEncoder + GPU 流压缩）与 1T CPU 上实测真端到端延迟与 `WY-GEMM` 块内跨评零泄漏 CI。 | 含宿主真端到端：NPU **`<= 0.04 ms/row`**，WebGPU **`<= 0.085 ms/row`**，1T CPU **`<= 0.40 ms/row`**；全包（含安全词表回退）**`<= 2.20 MB`**；Chunkwise 1D 打包块内跨评误差 **`< 1e-5`**；零 PII `diff == 0.0`。 |
 | **`V7-R1`：跨模态 CMI + 抗投毒 `VideoFastMem` 双盲压测** | `100k+` 真实观众评论 vs 仅读标题/字幕 RAG Bot 双盲对照池；50% 水军攻屏投毒仿真对比朴素 Titans-$L_2$ vs `MIRAS-Huber` 有机门控。 | `<= 20` 字超短评 **`R@P95%` 较纯文本再升 `>= +8%`（`>= 80%`）**；50% 攻屏下 `TPR@1%FPR` 波动 **`<= 2.0%`**；创意真人误罚 **`== 0.0%`**。 |
 | **`V7-R2`：`HypSheaf-Thread` + `ACDL` 玩梗潮抗误杀压测** | `2,000` 屏真实 B 站高频玩梗潮（*“下次一定/泪目/接龙”*）vs `2,000` 屏零字面重叠（`Jaccard < 0.08`）多 Agent 改写水军簇，对比平面 `Thread-Graph` vs `HypSheaf + ACDL`。 | 真人玩梗潮 **FPR `< 0.05%`**；零重叠改写水军簇集群召回 **`>= 92%`**（超越平面图 `>= +15%` F1）。 |
 | **`V7-R3`：冻结 `EBT-MoR` + `READER` + `TinyScope` 证据卡对齐** | 灰区对比 `EBT-MoR` vs `v0.6` 2 探针各向同性微扰；评测 2026–2027 推理模型蒸馏短评与 5 类归因证据卡人类盲评。 | 灰区 **`TPR@0.01%FPR` 再涨 `>= +4%`** 且灰区延迟降 **`>= 35%`**；混写 **`Char-Span F1 >= 0.88`**；推理模型 **`TPR@0.1%FPR >= 70%`**；证据卡人类一致度 **`>= 90%`**。 |

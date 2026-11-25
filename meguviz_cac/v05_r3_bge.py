@@ -344,7 +344,7 @@ def export_v05_r3_onnx(model_cpu: MeguvizV05R3BGEModel, out_dir: Path, vocab_siz
     if "dynamo" in inspect.signature(torch.onnx.export).parameters:
         kw["dynamo"] = False
 
-    torch.onnx.export(V05R3ExportWrapper(model_cpu), (d_ids, d_mask, d_st), str(fp32_p), **kw)
+    torch.onnx.export(V05R3ExportWrapper(model_cpu).eval(), (d_ids, d_mask, d_st), str(fp32_p), **kw)
     quantize_dynamic(str(fp32_p), str(int8_p), weight_type=QuantType.QInt8)
 
     # Ordered W4-Emb (Gather opset21) + W8-Body Edge ONNX

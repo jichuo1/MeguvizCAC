@@ -731,7 +731,7 @@ def export_v06_bundle_v3_onnx(
     if "dynamo" in inspect.signature(torch.onnx.export).parameters:
         kw["dynamo"] = False
 
-    torch.onnx.export(V06ExportWrapper(model_cpu), (torch.ones((2, 32), dtype=torch.long), torch.ones((2, 32), dtype=torch.long), torch.zeros((2, STYLE_FEAT_DIM))), str(fp32_p), **kw)
+    torch.onnx.export(V06ExportWrapper(model_cpu).eval(), (torch.ones((2, 32), dtype=torch.long), torch.ones((2, 32), dtype=torch.long), torch.zeros((2, STYLE_FEAT_DIM))), str(fp32_p), **kw)
     # Keep tiny (~16 KB) depthwise Conv1d in FP32: ORT ConvInteger has no depthwise SIMD (20x slower + high INT8 error!)
     # Still quantize MatMul, Gemm, and Embedding Gather to QInt8 so hyperloop_int8.onnx stays ~17.5 MB (~11.5 MB zip).
     quantize_dynamic(
