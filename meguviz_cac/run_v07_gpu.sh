@@ -4,12 +4,12 @@ set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-/content/MeguvizCAC}"
 DATA_DIR="${DATA_DIR:-/content/data}"
-OUT_DIR="${OUT_DIR:-/content/out_v07_r1}"
+OUT_DIR="${OUT_DIR:-/content/out_v07_r2}"
 DRIVE_DIR="${DRIVE_DIR:-/content/drive/MyDrive/MeguvizCAC/v070_omniveritas}"
-LOG_DRIVER="${LOG_DRIVER:-/content/log_v07_r1_driver.txt}"
-LOG_TRAIN="${LOG_TRAIN:-/content/log_v07_r1_full.txt}"
-DONE_JSON="${DONE_JSON:-/content/v07_r1_done.json}"
-VERSION="${VERSION:-v0.7.0-r1-omniveritas-b4}"
+LOG_DRIVER="${LOG_DRIVER:-/content/log_v07_r2_driver.txt}"
+LOG_TRAIN="${LOG_TRAIN:-/content/log_v07_r2_full.txt}"
+DONE_JSON="${DONE_JSON:-/content/v07_r2_done.json}"
+VERSION="${VERSION:-v0.7.0-r2-omniveritas-b4}"
 TEACHER_V06_CKPT="${TEACHER_V06_CKPT:-/content/drive/MyDrive/MeguvizCAC/v060_hyperloop/v0.6.0-r2-hyperloop-b3_stage1_ckpt.pt}"
 
 mkdir -p "$OUT_DIR" "$DRIVE_DIR"
@@ -67,14 +67,17 @@ python3 -u -m meguviz_cac.train_v07_omniveritas \
   --max-len 256 \
   --stage1-synth-cap 15000 \
   --v04-synth-cap -1 \
-  --epochs "${EPOCHS_OVERRIDE:-3}" \
+  --epochs "${EPOCHS_OVERRIDE:-6}" \
+  --stage15-steps "${STAGE15_STEPS_OVERRIDE:-1800}" \
+  --stage15-lr "${STAGE15_LR_OVERRIDE:-1.1e-4}" \
+  --teacher-v06-polish-steps "${TEACHER_POLISH_STEPS:-900}" \
   --upq-cap 480000 \
   --w4-steps "${W4_STEPS_OVERRIDE:-1200}" \
-  --sub2-steps "${SUB2_STEPS_OVERRIDE:-2000}" \
+  --sub2-steps "${SUB2_STEPS_OVERRIDE:-2200}" \
   --batch-size "$BS" \
-  --lr "${LR_OVERRIDE:-3.8e-4}" \
-  --w4-lr "${W4_LR_OVERRIDE:-9.0e-5}" \
-  --sub2-lr "${SUB2_LR_OVERRIDE:-5.0e-5}" \
+  --lr "${LR_OVERRIDE:-7.5e-4}" \
+  --w4-lr "${W4_LR_OVERRIDE:-8.5e-5}" \
+  --sub2-lr "${SUB2_LR_OVERRIDE:-4.5e-5}" \
   2>&1 | tee "$LOG_TRAIN"
 
 echo "[$(date +%H:%M:%S)] DONE v0.7.0-OmniVeritas training bs=$BS" | tee -a "$LOG_DRIVER"

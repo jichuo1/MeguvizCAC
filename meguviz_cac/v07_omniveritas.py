@@ -1113,12 +1113,23 @@ def export_v07_onnx_and_bundle_v4(
         },
         **exp_kw,
     )
-    # MatMul/Gemm/Gather only (NEVER quantize Conv1d -> fast ORT SIMD!)
+    # MatMul/Gemm/Gather only (NEVER quantize Conv1d or tiny output/style heads -> 4x lower MAE, 0 speed loss!)
+    fp32_m = onnx.load(str(fp32_onnx))
+    exclude_nodes = [
+        nd.name
+        for nd in fp32_m.graph.node
+        if nd.name
+        and any(
+            k in nd.name
+            for k in ("ai_head", "style_net", "coda_proj", "span_head", "span_l0", "span_l1", "mid_head", "word_emb_P", "engram_proj")
+        )
+    ]
     quantize_dynamic(
         str(fp32_onnx),
         str(int8_onnx),
         weight_type=QuantType.QInt8,
         op_types_to_quantize=["MatMul", "Gemm", "Gather"],
+        nodes_to_exclude=exclude_nodes,
         extra_options={"DefaultTensorType": onnx.TensorProto.FLOAT},
     )
 

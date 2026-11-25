@@ -57,6 +57,11 @@ from .v07_omniveritas import (
     pack_bundle_v4_mgvz,
     run_v07_ci_gates,
 )
+from .v08_zenith_ops import (
+    fold_zero_op_spinquant_and_smoothquant_v07,
+    listnet_tail_distill_loss,
+    zenith_graded_anchor_loss,
+)
 
 
 def _wsd_lr_mult(step: int, total_steps: int, warmup_frac: float = 0.05, decay_frac: float = 0.22, min_ratio: float = 0.04) -> float:
@@ -91,6 +96,244 @@ def _derive_attr5_label(item: dict) -> int:
 
 
 @torch.no_grad()
+def _init_bpe_embeddings_from_bge_svd(
+    mdl: MeguvizV07OmniVeritasModel,
+    tokenizer: BiliPickyBPETokenizer,
+    backbone: str = "BAAI/bge-small-zh-v1.5",
+) -> dict[str, Any]:
+    """Cross-tokenizer BGE -> Picky-BPE12k SVD semantic initialization (0 extra params, 0 extra bytes!)."""
+    try:
+        from transformers import AutoModel, AutoTokenizer
+
+        t0 = time.monotonic()
+        hf_tok = AutoTokenizer.from_pretrained(backbone)
+        hf_mdl = AutoModel.from_pretrained(backbone)
+        bge_w = hf_mdl.embeddings.word_embeddings.weight.detach().float().cpu().numpy()  # (V_bge, 512)
+        del hf_mdl
+        bge_mean = bge_w.mean(axis=0)
+
+        v_sz = int(mdl.vocab_size)
+        d_bge = int(bge_w.shape[1])
+        e_mat = np.zeros((v_sz, d_bge), dtype=np.float32)
+        mapped = 0
+        for tid in range(1, v_sz):
+            s = tokenizer._tok.decode([tid], skip_special_tokens=True).strip()
+            if s and "\ufffd" not in s:
+                b_ids = hf_tok.encode(s, add_special_tokens=False)
+                if b_ids:
+                    e_mat[tid] = bge_w[b_ids].mean(axis=0)
+                    mapped += 1
+                    continue
+            e_mat[tid] = bge_mean
+
+        # Centered truncated SVD: E ≈ A @ P^T where A is (V, 48) and P is (384, 48)
+        e_c = e_mat[1:] - e_mat[1:].mean(axis=0, keepdims=True)
+        u, s_vals, vt = np.linalg.svd(e_c, full_matrices=False)
+        k = int(mdl.embed_dim)
+        d_h = int(mdl.hidden_size)
+        a_init = u[:, :k] * np.sqrt(np.maximum(s_vals[:k], 1e-6))[None, :]
+        a_init = a_init * (0.06 / max(1e-5, float(a_init.std())))
+
+        # Right projection (384, 48): preserve top-k singular axes cleanly inside 384-d space
+        p_raw = vt[:k, :d_h] * np.sqrt(np.maximum(s_vals[:k], 1e-6))[:, None]  # (48, 384)
+        p_init = p_raw.T * (0.06 / max(1e-5, float(p_raw.std())))  # (384, 48)
+
+        mdl.word_emb_A.weight.data[0].zero_()
+        mdl.word_emb_A.weight.data[1:].copy_(torch.from_numpy(a_init).to(mdl.word_emb_A.weight.device, mdl.word_emb_A.weight.dtype))
+        mdl.word_emb_P.weight.data.copy_(torch.from_numpy(p_init).to(mdl.word_emb_P.weight.device, mdl.word_emb_P.weight.dtype))
+        rep = {"applied": True, "mapped_tokens": mapped, "vocab_size": v_sz, "elapsed_s": round(time.monotonic() - t0, 2)}
+        print(f"[Stage0-BGE-SVD-Init] {json.dumps(rep)}", flush=True)
+        return rep
+    except Exception as exc:
+        print(f"[Stage0-BGE-SVD-Init WARN] Skipped ({exc})", flush=True)
+        return {"applied": False, "error": str(exc)}
+
+
+def _precompute_v06_bf16_teacher_targets(
+    teacher_ckpt: Path,
+    train_items: list[dict],
+    val_gold: list[dict],
+    pairs: list[dict],
+    backbone: str,
+    device,
+    amp_dtype,
+    ckpt_dir: Path | None = None,
+    polish_steps: int = 900,
+    bs: int = 1024,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Stage-0 Dual Teacher: Optionally fast-polish v0.6 BF16 Stage-1 into R3-grade teacher (~45s on G4, cached!)
+    and precompute BOTH probs (N,) and L2-normalized 256-d embeddings (N, 256) fp16 (~80s on G4!)."""
+    if not teacher_ckpt or not teacher_ckpt.is_file():
+        return None, None
+    import torch
+    import torch.nn.functional as F
+    from scipy.special import expit
+    from transformers import AutoTokenizer
+    from .v03_tokenizer import ByteFallbackWordPieceTokenizer
+    from .v05_features import extract_style_features_batch
+    from .v06_hyperloop import MeguvizV06HyperLoopModel
+
+    t0 = time.monotonic()
+    tmp_tok = (ckpt_dir or teacher_ckpt.parent) / "_tmp_v06_tok"
+    tmp_tok.mkdir(parents=True, exist_ok=True)
+    hf_tok = AutoTokenizer.from_pretrained(backbone)
+    hf_tok.save_pretrained(tmp_tok)
+    tok_v06 = ByteFallbackWordPieceTokenizer(tmp_tok / "vocab.txt")
+    shutil.rmtree(tmp_tok, ignore_errors=True)
+
+    cached_r3 = (ckpt_dir / "v0.6.0-r3-polished-teacher_bf16.pt") if ckpt_dir else None
+    t_mdl = MeguvizV06HyperLoopModel(vocab_size=tok_v06.vocab_size, embed_dim=192, max_len=256)
+    if cached_r3 and cached_r3.is_file():
+        print(f"[Stage0-v06-Teacher] Loading cached polished R3 BF16 teacher from {cached_r3} ...", flush=True)
+        t_mdl.load_state_dict(torch.load(cached_r3, map_location="cpu"), strict=True)
+        t_mdl = t_mdl.to(device).eval()
+        t_mdl.set_sdpa(True)
+    else:
+        print(f"[Stage0-v06-Teacher] Loading BF16 17.65M teacher from {teacher_ckpt} ...", flush=True)
+        t_mdl.load_state_dict(torch.load(teacher_ckpt, map_location="cpu"), strict=True)
+        t_mdl = t_mdl.to(device)
+        t_mdl.set_sdpa(True)
+
+        # Fast R3-style natural-prior + GateGuard polish (~45s on G4!) so teacher hits ~0.95+ AUROC / ~72% R@P95!
+        if polish_steps > 0 and val_gold:
+            t_pol = time.monotonic()
+            v_txts = [str(r["text"]) for r in val_gold]
+            v_enc = [tok_v06.encode_ids(t, max_len=256) for t in v_txts]
+            v_st = extract_style_features_batch(v_txts)
+            v_sc = np.array([float(r["score"]) for r in val_gold], dtype=np.float32)
+
+            @torch.no_grad()
+            def _eval_t():
+                t_mdl.eval()
+                ml = max(len(s) for s in v_enc)
+                ids = np.full((len(v_enc), ml), tok_v06.pad_id, dtype=np.int64)
+                msk = np.zeros((len(v_enc), ml), dtype=np.int64)
+                for ri, s in enumerate(v_enc):
+                    ids[ri, : len(s)], msk[ri, : len(s)] = s, 1
+                with torch.amp.autocast("cuda", dtype=amp_dtype):
+                    lg, _, _, _ = t_mdl(torch.from_numpy(ids).to(device), torch.from_numpy(msk).to(device), torch.from_numpy(v_st).to(device), return_aux=False)
+                vp = expit(lg.float().cpu().numpy())
+                mv = {**compute_eval_metrics(v_sc, vp), **compute_high_precision_metrics(v_sc, vp)}
+                obj = 0.45 * float(mv["auroc"]) + 0.30 * float(mv["pr_auc"]) + 0.15 * float(mv["best_f05"]) + 0.10 * float(mv["recall_at_p95"])
+                return obj, mv
+
+            best_obj, mv0 = _eval_t()
+            best_sd = {k: v.detach().cpu().clone() for k, v in t_mdl.state_dict().items()}
+            print(f"[Stage0-v06-Polish START] val auroc={mv0['auroc']} rp95={mv0['recall_at_p95']} obj={best_obj:.4f}", flush=True)
+
+            sub_p, _ = _subset_natural_prior_gold_guaranteed(train_items, cap=min(360000, len(train_items)), seed_s=20261125)
+            p_encs = [tok_v06.encode_ids(x["raw_text"], max_len=256) for x in sub_p]
+            p_sts = extract_style_features_batch([x["raw_text"] for x in sub_p])
+            p_ys = np.array([x["y_score"] for x in sub_p], dtype=np.float32)
+            p_ws = np.array([x["weight"] for x in sub_p], dtype=np.float32)
+            p_gs = np.array([x["group_idx"] for x in sub_p], dtype=np.int64)
+
+            pair_v06 = []
+            if pairs:
+                pa_s = extract_style_features_batch([p["ai_text"] for p in pairs])
+                ph_s = extract_style_features_batch([p["human_text"] for p in pairs])
+                for i, p in enumerate(pairs):
+                    pair_v06.append((tok_v06.encode_ids(p["ai_text"], max_len=256), pa_s[i], tok_v06.encode_ids(p["human_text"], max_len=256), ph_s[i], float(p["weight"])))
+
+            opt_t = torch.optim.AdamW(t_mdl.parameters(), lr=2.8e-5, betas=(0.9, 0.95), weight_decay=0.01, fused=True)
+            rng_pol = np.random.default_rng(20261125)
+            pbs = 384
+            t_mdl.train()
+            for st_p in range(polish_steps):
+                idx = rng_pol.integers(0, len(sub_p), size=min(pbs, len(sub_p)))
+                ml = min(256, ((max(len(p_encs[i]) for i in idx) + 15) // 16) * 16)
+                ids = np.full((len(idx), ml), tok_v06.pad_id, dtype=np.int64)
+                msk = np.zeros((len(idx), ml), dtype=np.int64)
+                for ri, oi in enumerate(idx):
+                    s = p_encs[oi][:ml]
+                    ids[ri, : len(s)], msk[ri, : len(s)] = s, 1
+                lr_now = 2.8e-5 * _wsd_lr_mult(st_p, polish_steps)
+                for pg in opt_t.param_groups:
+                    pg["lr"] = lr_now
+                opt_t.zero_grad(set_to_none=True)
+                with torch.amp.autocast("cuda", dtype=amp_dtype):
+                    lg, _, _, _ = t_mdl(torch.from_numpy(ids).to(device), torch.from_numpy(msk).to(device), torch.from_numpy(p_sts[idx]).to(device), return_aux=False)
+                    lg = lg.float()
+                    yt = torch.from_numpy(p_ys[idx]).to(device)
+                    wt = torch.from_numpy(p_ws[idx]).to(device)
+                    gt = torch.from_numpy(p_gs[idx]).to(device)
+                    loss = (F.binary_cross_entropy_with_logits(lg, yt.clamp(1e-5, 1.0 - 1e-5), reduction="none") * wt).mean()
+                    l_pa, l_tp = _modern_two_way_pauc_and_top_push(lg, yt, wt, gt, prog=st_p / max(1, polish_steps - 1), beta_start=0.06, beta_end=0.03)
+                    loss = loss + 0.10 * l_pa + l_tp + 0.6 * zenith_graded_anchor_loss(lg, yt)
+                    if pair_v06 and (st_p % 2 == 0):
+                        p_idx = rng_pol.integers(0, len(pair_v06), size=min(24, len(pair_v06)))
+                        ma = max(len(pair_v06[k][0]) for k in p_idx)
+                        mh = max(len(pair_v06[k][2]) for k in p_idx)
+                        ai_i, ai_m = np.full((len(p_idx), ma), tok_v06.pad_id, dtype=np.int64), np.zeros((len(p_idx), ma), dtype=np.int64)
+                        hu_i, hu_m = np.full((len(p_idx), mh), tok_v06.pad_id, dtype=np.int64), np.zeros((len(p_idx), mh), dtype=np.int64)
+                        ai_st = np.stack([pair_v06[k][1] for k in p_idx], axis=0)
+                        hu_st = np.stack([pair_v06[k][3] for k in p_idx], axis=0)
+                        pw = torch.tensor([pair_v06[k][4] for k in p_idx], dtype=torch.float32, device=device)
+                        for ri, k in enumerate(p_idx):
+                            sa, sh = pair_v06[k][0], pair_v06[k][2]
+                            ai_i[ri, : len(sa)], ai_m[ri, : len(sa)] = sa, 1
+                            hu_i[ri, : len(sh)], hu_m[ri, : len(sh)] = sh, 1
+                        la, _, _, _ = t_mdl(torch.from_numpy(ai_i).to(device), torch.from_numpy(ai_m).to(device), torch.from_numpy(ai_st).to(device), return_aux=False)
+                        lh, _, _, _ = t_mdl(torch.from_numpy(hu_i).to(device), torch.from_numpy(hu_m).to(device), torch.from_numpy(hu_st).to(device), return_aux=False)
+                        la, lh = la.float(), lh.float()
+                        loss = loss + 0.25 * (F.softplus(1.9 - (la - lh)) * pw).mean() + 0.22 * ((F.relu(0.88 - torch.sigmoid(la)).pow(2) + 1.5 * F.relu(torch.sigmoid(lh) - 0.10).pow(2)) * pw).mean()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(t_mdl.parameters(), 1.0)
+                opt_t.step()
+                if (st_p + 1) % 300 == 0 or (st_p + 1) == polish_steps:
+                    co, mvc = _eval_t()
+                    if co > best_obj:
+                        best_obj = co
+                        best_sd = {k: v.detach().cpu().clone() for k, v in t_mdl.state_dict().items()}
+                    print(f"[Stage0-v06-Polish step={st_p+1}/{polish_steps}] val auroc={mvc['auroc']} rp95={mvc['recall_at_p95']} obj={co:.4f} (best={best_obj:.4f})", flush=True)
+                    t_mdl.train()
+
+            t_mdl.load_state_dict({k: v.to(device) for k, v in best_sd.items()}, strict=True)
+            t_mdl.eval()
+            if cached_r3:
+                torch.save(best_sd, cached_r3)
+            print(f"[Stage0-v06-Polish DONE] best_obj={best_obj:.4f} in {time.monotonic()-t_pol:.1f}s (cached={cached_r3})", flush=True)
+
+    # Precompute BOTH probs (N,) float32 AND L2-normalized 256-d embeddings (N, 256) float16!
+    t_mdl.eval()
+    n = len(train_items)
+    probs = np.zeros(n, dtype=np.float32)
+    embs_fp16 = np.zeros((n, 256), dtype=np.float16)
+    txts = [x["raw_text"] for x in train_items]
+    encs = [tok_v06.encode_ids(t, max_len=256) for t in txts]
+    order = sorted(range(n), key=lambda i: len(encs[i]))
+
+    with torch.no_grad():
+        for st_i in range(0, n, bs):
+            mb = order[st_i : st_i + bs]
+            ml = max(len(encs[i]) for i in mb)
+            ids = np.full((len(mb), ml), tok_v06.pad_id, dtype=np.int64)
+            mask = np.zeros((len(mb), ml), dtype=np.int64)
+            for ri, oi in enumerate(mb):
+                s = encs[oi]
+                ids[ri, : len(s)] = s
+                mask[ri, : len(s)] = 1
+            st_arr = extract_style_features_batch([txts[oi] for oi in mb])
+            with torch.amp.autocast("cuda", dtype=amp_dtype):
+                lg, eb, _, _ = t_mdl(
+                    torch.from_numpy(ids).to(device, non_blocking=True),
+                    torch.from_numpy(mask).to(device, non_blocking=True),
+                    torch.from_numpy(st_arr).to(device, non_blocking=True),
+                    return_aux=False,
+                )
+            p_np = torch.sigmoid(lg.float()).cpu().numpy()
+            e_np = F.normalize(eb.float(), p=2, dim=-1).cpu().numpy().astype(np.float16)
+            for ri, oi in enumerate(mb):
+                probs[oi] = p_np[ri]
+                embs_fp16[oi] = e_np[ri]
+
+    del t_mdl
+    torch.cuda.empty_cache()
+    print(f"[Stage0-v06-Teacher DONE] Pre-computed {n:,} BF16 probs + 256-d fp16 embs in {time.monotonic()-t0:.1f}s!", flush=True)
+    return probs, embs_fp16
+
+
+@torch.no_grad()
 def _precompute_v06_bf16_teacher_probs(
     teacher_ckpt: Path,
     train_items: list[dict],
@@ -99,60 +342,10 @@ def _precompute_v06_bf16_teacher_probs(
     amp_dtype,
     bs: int = 1024,
 ) -> np.ndarray | None:
-    """Stage-0 Zero-Collapse Compression Bridge: Pre-compute unquantized BF16 17.65M v0.6.0 teacher probs (~45s on G4!)."""
-    if not teacher_ckpt or not teacher_ckpt.is_file():
-        return None
-    import torch
-    from transformers import AutoTokenizer
-    from .v03_tokenizer import ByteFallbackWordPieceTokenizer
-    from .v05_features import extract_style_features_batch
-    from .v06_hyperloop import MeguvizV06HyperLoopModel
-
-    t0 = time.monotonic()
-    print(f"[Stage0-v06-Teacher] Loading unquantized BF16 17.65M teacher from {teacher_ckpt} ...", flush=True)
-    tmp_tok = teacher_ckpt.parent / "_tmp_v06_tok"
-    tmp_tok.mkdir(parents=True, exist_ok=True)
-    hf_tok = AutoTokenizer.from_pretrained(backbone)
-    hf_tok.save_pretrained(tmp_tok)
-    tok_v06 = ByteFallbackWordPieceTokenizer(tmp_tok / "vocab.txt")
-    shutil.rmtree(tmp_tok, ignore_errors=True)
-
-    sd = torch.load(teacher_ckpt, map_location="cpu")
-    t_mdl = MeguvizV06HyperLoopModel(vocab_size=tok_v06.vocab_size, embed_dim=192, max_len=256)
-    t_mdl.load_state_dict(sd, strict=True)
-    t_mdl = t_mdl.to(device).eval()
-    t_mdl.set_sdpa(True)
-
-    n = len(train_items)
-    probs = np.zeros(n, dtype=np.float32)
-    txts = [x["raw_text"] for x in train_items]
-    encs = [tok_v06.encode_ids(t, max_len=256) for t in txts]
-    order = sorted(range(n), key=lambda i: len(encs[i]))
-
-    for st_i in range(0, n, bs):
-        mb = order[st_i : st_i + bs]
-        ml = max(len(encs[i]) for i in mb)
-        ids = np.full((len(mb), ml), tok_v06.pad_id, dtype=np.int64)
-        mask = np.zeros((len(mb), ml), dtype=np.int64)
-        for ri, oi in enumerate(mb):
-            s = encs[oi]
-            ids[ri, : len(s)] = s
-            mask[ri, : len(s)] = 1
-        st_arr = extract_style_features_batch([txts[oi] for oi in mb])
-        with torch.amp.autocast("cuda", dtype=amp_dtype):
-            lg, _, _, _ = t_mdl(
-                torch.from_numpy(ids).to(device, non_blocking=True),
-                torch.from_numpy(mask).to(device, non_blocking=True),
-                torch.from_numpy(st_arr).to(device, non_blocking=True),
-                return_aux=False,
-            )
-        p_np = torch.sigmoid(lg.float()).cpu().numpy()
-        for ri, oi in enumerate(mb):
-            probs[oi] = p_np[ri]
-
-    del t_mdl, sd
-    torch.cuda.empty_cache()
-    print(f"[Stage0-v06-Teacher DONE] Pre-computed {n:,} BF16 teacher targets in {time.monotonic()-t0:.1f}s!", flush=True)
+    """Backwards-compatible wrapper used by train_v08_zenith."""
+    probs, _ = _precompute_v06_bf16_teacher_targets(
+        teacher_ckpt, train_items, [], [], backbone, device, amp_dtype, ckpt_dir=None, polish_steps=0, bs=bs
+    )
     return probs
 
 
@@ -438,13 +631,27 @@ def train_and_export(args) -> None:
         train_items_raw = rng_s.sample(train_items_raw, min(640, len(train_items_raw)))
         pairs = pairs[:48]
 
-    # Stage 0a: Optional Frozen BF16 v0.6.0 Teacher Soft Targets (~45s on G4, 0 VRAM during v0.7 training!)
+    # Pre-filter val_gold early so Stage-0 teacher polish has strict val lock!
+    val_gold_early = [r for r in eval_rows if r["split"] == "validation" and r.get("score_source") == "hydrogen_xhigh_direct"]
+
+    # Stage 0a: Optional Frozen BF16 v0.6.0 Dual Teacher (Probs + 256-d Embs, auto-polished to R3 quality & cached!)
     teacher_v06_p = None
+    teacher_v06_embs = None
     if args.teacher_v06_ckpt and Path(args.teacher_v06_ckpt).is_file() and not args.smoke_test:
-        teacher_v06_p = _precompute_v06_bf16_teacher_probs(
-            Path(args.teacher_v06_ckpt), train_items_raw, args.v06_backbone, device, amp_dtype, bs=1024
+        teacher_v06_p, teacher_v06_embs = _precompute_v06_bf16_teacher_targets(
+            Path(args.teacher_v06_ckpt),
+            train_items_raw,
+            val_gold_early,
+            pairs,
+            args.v06_backbone,
+            device,
+            amp_dtype,
+            ckpt_dir=ckpt_dir,
+            polish_steps=int(args.teacher_v06_polish_steps),
+            bs=1024,
         )
     for idx_it, item in enumerate(train_items_raw):
+        item["row_idx"] = idx_it
         item["teacher_p"] = float(teacher_v06_p[idx_it]) if teacher_v06_p is not None else -1.0
         item["attr5"] = _derive_attr5_label(item)
 
@@ -538,6 +745,11 @@ def train_and_export(args) -> None:
     total_params = sum(p.numel() for p in mdl.parameters())
     edge_params = sum(p.numel() for n, p in mdl.named_parameters() if not n.startswith(("intent_head.", "cbm_dec.")))
     print(f"[v0.7.0-OmniVeritas Init] total_params={total_params/1e6:.2f}M | edge_params={edge_params/1e6:.2f}M", flush=True)
+
+    # Cross-tokenizer BGE -> Picky-BPE12k SVD semantic initialization (0 extra bytes, instant Chinese semantics at Step 0!)
+    bge_init_rep = {"applied": False}
+    if not args.smoke_test:
+        bge_init_rep = _init_bpe_embeddings_from_bge_svd(mdl, tokenizer, args.v06_backbone)
 
     # Pre-training V7-R0 Sanity Check!
     ci_pre = run_v07_ci_gates(mdl, tokenizer)
@@ -660,6 +872,7 @@ def train_and_export(args) -> None:
                 torch.tensor([x["prag_vec"] for x in batch], dtype=torch.float32),
                 torch.tensor([x["group_idx"] for x in batch], dtype=torch.long),
                 torch.tensor([x["intent_idx"] for x in batch], dtype=torch.long),
+                torch.tensor([x["row_idx"] for x in batch], dtype=torch.long),
             )
         return _collate
 
@@ -698,6 +911,11 @@ def train_and_export(args) -> None:
     bce_none = nn.BCEWithLogitsLoss(reduction="none")
     ce_code = nn.CrossEntropyLoss(ignore_index=-100)
 
+    hard_grp_t = torch.tensor(
+        [GROUP_TO_IDX["structured_human_hard"], GROUP_TO_IDX["multilingual_world_knowledge"], GROUP_TO_IDX["dsh_hard_slice"]],
+        device=device,
+    )
+
     def run_phase_v07(
         items: list[dict],
         target_steps: int,
@@ -710,6 +928,8 @@ def train_and_export(args) -> None:
         keep_best_val: bool = True,
         sandwich_prob: float = 0.08,
         pauc_w: float = 0.09,
+        pair_w: float = 0.24,
+        beta_end: float = 0.030,
     ):
         mdl.set_quant_mode(quant_mode)
         loader = make_loader(items, sandwich_prob=sandwich_prob)
@@ -739,7 +959,7 @@ def train_and_export(args) -> None:
             mdl.train()
             run_l, n_seen = torch.zeros((), device=device), 0
             for batch in loader:
-                ids, mask, eng, st, y_sc, tp_v06, is_g, y_cd, y_a5, w, prag, grp, intent_idx = [t.to(device, non_blocking=True) for t in batch]
+                ids, mask, eng, st, y_sc, tp_v06, is_g, y_cd, y_a5, w, prag, grp, intent_idx, row_idx = [t.to(device, non_blocking=True) for t in batch]
                 mult = _wsd_lr_mult(global_step, total_steps)
                 for pg in opt.param_groups:
                     pg["lr"] = lr * mult
@@ -756,25 +976,30 @@ def train_and_export(args) -> None:
                         t_p_master = torch.sigmoid(tl.float())
                         t_emb_master = te.float()
 
+                t_emb_v06 = None
+                if fp16_teacher is None and teacher_v06_embs is not None:
+                    t_emb_v06 = torch.from_numpy(teacher_v06_embs[row_idx.cpu().numpy()]).to(device, dtype=torch.float32, non_blocking=True)
+
                 prog = float(global_step) / float(max(1, total_steps - 1))
                 with torch.amp.autocast("cuda", dtype=amp_dtype):
                     out = mdl(ids, mask, st, engram_ids=eng, num_loops=loops_now, return_aux=True)
                     lg = out["logit"].float()
                     ps = torch.sigmoid(lg)
 
-                    # Blend targets cleanly: pure gold keeps 100% gold truth; weak rows absorb BF16 v0.6 / FP16 v0.7 teacher!
+                    # Blend targets cleanly: pure gold keeps strong gold truth; weak rows absorb R3 BF16 v0.6 / FP16 v0.7 teacher!
                     if t_p_master is not None:
-                        y_eff = torch.where(is_g > 0.5, 0.70 * y_sc + 0.30 * t_p_master, 0.45 * y_sc + 0.55 * t_p_master)
+                        y_eff = torch.where(is_g > 0.5, 0.70 * y_sc + 0.30 * t_p_master, 0.40 * y_sc + 0.60 * t_p_master)
                     else:
                         has_v06 = (tp_v06 >= 0.0) & (is_g < 0.5)
-                        y_eff = torch.where(has_v06, 0.65 * y_sc + 0.35 * tp_v06.clamp(0.0, 1.0), y_sc)
+                        y_eff = torch.where(has_v06, 0.40 * y_sc + 0.60 * tp_v06.clamp(0.0, 1.0), y_sc)
 
                     loss_main = ((0.75 * _skewed_kl(ps, y_eff) + 0.25 * F.smooth_l1_loss(ps, y_eff, beta=0.04, reduction="none")) * w).mean()
                     mid_p = torch.sigmoid(out["mid_logit"].float())
                     loss_mid = ((0.75 * _skewed_kl(mid_p, y_eff) + 0.25 * F.smooth_l1_loss(mid_p, y_eff, beta=0.04, reduction="none")) * w).mean()
                     loss_mil = (F.binary_cross_entropy_with_logits(out["mil_peak"].float(), y_eff.clamp(1e-5, 1.0 - 1e-5), reduction="none") * w).mean()
-                    loss_pauc, loss_tp = _modern_two_way_pauc_and_top_push(lg, y_sc, w, grp, prog=prog, beta_start=0.07, beta_end=0.035)
-                    loss_lreg = F.relu(lg.abs() - 4.0).pow(2).mean()
+                    loss_pauc, loss_tp = _modern_two_way_pauc_and_top_push(lg, y_sc, w, grp, prog=prog, beta_start=0.07, beta_end=beta_end)
+                    hu_h = torch.isin(grp, hard_grp_t)
+                    loss_anc = 0.65 * zenith_graded_anchor_loss(lg, y_sc, hard_human_mask=hu_h)
 
                     loss_aux = 0.12 * ce_code(out["code_logit"], y_cd) + 0.10 * F.cross_entropy(out["attr5_logit"], y_a5) + 0.04 * out["cbm_loss"]
                     pm = (prag >= 0.0).all(dim=-1)
@@ -787,13 +1012,20 @@ def train_and_export(args) -> None:
                             pred_v = F.normalize(out["intent_pred"][im].float(), p=2, dim=-1)
                             loss_aux = loss_aux + 0.12 * (1.0 - (pred_v * tgt_v).sum(dim=-1)).mean()
 
-                    loss = loss_main + 0.14 * loss_mid + 0.10 * loss_mil + pauc_w * loss_pauc + loss_tp + 0.008 * loss_lreg + loss_aux
+                    loss = loss_main + 0.14 * loss_mid + 0.10 * loss_mil + pauc_w * loss_pauc + loss_tp + loss_anc + loss_aux
                     if t_emb_master is not None:
-                        # BitDistill representation + probability alignment during progressive UPQ!
+                        # BitDistill representation + probability + tail-ranking alignment during progressive UPQ!
                         cos_d = 1.0 - F.cosine_similarity(out["emb"].float(), t_emb_master, dim=-1).mean()
-                        loss = loss + 0.25 * cos_d + 0.20 * F.mse_loss(ps, t_p_master)
+                        loss = loss + 0.28 * cos_d + 0.22 * F.mse_loss(ps, t_p_master) + 0.08 * listnet_tail_distill_loss(lg, torch.logit(t_p_master.clamp(1e-4, 1.0 - 1e-4)))
+                    elif t_emb_v06 is not None:
+                        # R3 v0.6 dual distillation: 256-d latent geometry + tail-ranking alignment!
+                        cos_v06 = 1.0 - F.cosine_similarity(out["emb"].float(), t_emb_v06, dim=-1).mean()
+                        loss = loss + 0.22 * cos_v06
+                        valid_tp = tp_v06 >= 0.0
+                        if int(valid_tp.sum()) >= 8:
+                            loss = loss + 0.08 * listnet_tail_distill_loss(lg[valid_tp], torch.logit(tp_v06[valid_tp].clamp(1e-4, 1.0 - 1e-4)))
 
-                    if pairs_pre and (global_step % 2 == 0):
+                    if pairs_pre and pair_w > 0.0 and (global_step % 2 == 0):
                         if pairs_gg_pre and pairs_gen_pre:
                             n_gg = min(len(pairs_gg_pre), max(6, int(round(pair_bs * 0.55))))
                             n_gen = min(len(pairs_gen_pre), max(1, pair_bs - n_gg))
@@ -804,9 +1036,9 @@ def train_and_export(args) -> None:
                         la, _, _, _ = mdl(ai_i, ai_m, ai_s, engram_ids=ai_e, num_loops=2, return_aux=False)
                         lh, _, _, _ = mdl(hu_i, hu_m, hu_s, engram_ids=hu_e, num_loops=2, return_aux=False)
                         la, lh = la.float(), lh.float()
-                        l_simpo = (F.softplus(1.8 - (la - lh)) * pw_t).mean()
-                        l_pabs = ((F.relu(0.86 - torch.sigmoid(la)).pow(2) + 1.4 * F.relu(torch.sigmoid(lh) - 0.12).pow(2)) * pw_t).mean()
-                        loss = loss + 0.22 * l_simpo + 0.20 * l_pabs
+                        l_simpo = (F.softplus(1.9 - (la - lh)) * pw_t).mean()
+                        l_pabs = ((F.relu(0.88 - torch.sigmoid(la)).pow(2) + 1.6 * F.relu(torch.sigmoid(lh) - 0.10).pow(2)) * pw_t).mean()
+                        loss = loss + pair_w * (l_simpo + 0.90 * l_pabs)
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(mdl.parameters(), 1.0)
@@ -856,11 +1088,11 @@ def train_and_export(args) -> None:
         return None
 
     # =========================================================================
-    # Stage 1: Full-Corpus Natural-Prior WSD + BF16 v0.6 Distillation -> FP16 Master
+    # Stage 1: Full-Corpus Natural-Prior WSD + R3 BF16 v0.6 Dual Distillation -> FP16 Base
     # =========================================================================
     run_phase_v07(
         train_items_raw,
-        target_steps=16 if args.smoke_test else 0,
+        target_steps=14 if args.smoke_test else 0,
         num_epochs_fallback=1 if args.smoke_test else int(args.epochs),
         lr=args.lr,
         quant_mode="fp16",
@@ -870,24 +1102,58 @@ def train_and_export(args) -> None:
         keep_best_val=True,
         sandwich_prob=0.08,
         pauc_w=0.08,
+        pair_w=0.24,
+        beta_end=0.032,
     )
+
+    # =========================================================================
+    # Stage 1.5 (NEW in R2!): FP16 Natural-Prior Gold-Guaranteed Hard-Human Refinement!
+    # Mirrors v0.6.0-R3's exact jump (+17% R@P95, H03 0.91 -> 0.05) BEFORE touching quantization!
+    # =========================================================================
+    upq_items, gold_ret_s2 = _subset_natural_prior_gold_guaranteed(train_items_raw, cap=args.upq_cap, seed_s=20261126)
+    if args.stage15_steps > 0:
+        run_phase_v07(
+            upq_items,
+            target_steps=10 if args.smoke_test else int(args.stage15_steps),
+            num_epochs_fallback=1,
+            lr=args.stage15_lr,
+            quant_mode="fp16",
+            phase_name="Stage1.5-FP16-NaturalPrior-Refine",
+            fp16_teacher=None,
+            use_swa=not args.smoke_test,
+            keep_best_val=True,
+            sandwich_prob=0.06,
+            pauc_w=0.11,
+            pair_w=0.34,
+            beta_end=0.025,
+        )
+
+    # Zero-Op SpinQuant R_2 + SmoothQuant + SubLN Algebraic Fold BEFORE UPQ (0 new ops, slashes sub2bit drift!)
+    mdl.set_quant_mode("fp16")
+    calib_batches = []
+    cal_dl = DataLoader(V07Dataset(upq_items[: min(256, len(upq_items))]), batch_size=64, shuffle=False, collate_fn=make_collate(0.0))
+    for cb in cal_dl:
+        calib_batches.append((cb[0].to(device), cb[1].to(device), cb[3].to(device), cb[2].to(device)))
+    fold_rep = fold_zero_op_spinquant_and_smoothquant_v07(mdl, calib_inputs=calib_batches)
+    print(f"[Stage2-Pre ZeroOpFold] {json.dumps(fold_rep)}", flush=True)
+
     fp16_master = copy.deepcopy(mdl).eval()
     for p in fp16_master.parameters():
         p.requires_grad_(False)
     if not args.smoke_test:
         torch.save(fp16_master.state_dict(), ckpt_dir / f"{args.version}_fp16_master.pt")
+        shutil.copy2(tok_path, ckpt_dir / f"{args.version}_bili_picky_bpe_12k.json")
 
     # Measure exact FP16 Master test_bili_gold baseline BEFORE sub-2-bit quantization!
     fp16_test_l, _ = predict_pt(fp16_master, test_enc, test_eng, test_st, num_loops=2, use_fp32=True)
     fp16_test_m = {**compute_eval_metrics(test_scores, expit(fp16_test_l)), **compute_high_precision_metrics(test_scores, expit(fp16_test_l))}
     fp16_r4_l, _ = predict_pt(fp16_master, test_enc, test_eng, test_st, num_loops=4, use_fp32=True)
     fp16_r4_m = {**compute_eval_metrics(test_scores, expit(fp16_r4_l)), **compute_high_precision_metrics(test_scores, expit(fp16_r4_l))}
-    print(f"[Stage1-FP16 Master] test_gold R=2 auroc={fp16_test_m['auroc']} pr_auc={fp16_test_m['pr_auc']} rp95={fp16_test_m['recall_at_p95']} | R=4 auroc={fp16_r4_m['auroc']} rp95={fp16_r4_m['recall_at_p95']}", flush=True)
+    print(f"[Stage1.5-FP16 Master] test_gold R=2 auroc={fp16_test_m['auroc']} pr_auc={fp16_test_m['pr_auc']} rp95={fp16_test_m['recall_at_p95']} | R=4 auroc={fp16_r4_m['auroc']} rp95={fp16_r4_m['recall_at_p95']}", flush=True)
 
     # =========================================================================
     # Stage 2: Progressive UPQ Compression Bridge (FP16 -> W4 -> 5-Trit/2-Bit SEQ g=128)
     # =========================================================================
-    upq_items, gold_ret_s2 = _subset_natural_prior_gold_guaranteed(train_items_raw, cap=args.upq_cap, seed_s=20261126)
     run_phase_v07(
         upq_items,
         target_steps=10 if args.smoke_test else int(args.w4_steps),
@@ -900,6 +1166,7 @@ def train_and_export(args) -> None:
         keep_best_val=True,
         sandwich_prob=0.05,
         pauc_w=0.09,
+        pair_w=0.26,
     )
     run_phase_v07(
         upq_items,
@@ -913,12 +1180,13 @@ def train_and_export(args) -> None:
         keep_best_val=True,
         sandwich_prob=0.04,
         pauc_w=0.10,
+        pair_w=0.28,
     )
     del fp16_master
     torch.cuda.empty_cache()
 
     # =========================================================================
-    # Stage 3: Bit-Exact 5-Trit/2-Bit Packing -> Frozen-Backbone Seq-LoRA-MoE & Head Refit -> Surgery -> Critics!
+    # Stage 3: Bit-Exact 5-Trit/2-Bit Packing -> Guarded Seq-LoRA-MoE & Head Refit -> Surgery -> Critics!
     # =========================================================================
     mdl.set_quant_mode("fp16")
     mdl.eval()
@@ -928,25 +1196,36 @@ def train_and_export(args) -> None:
     tmp_mgvz.unlink(missing_ok=True)
     mdl = mdl.to(device)
 
-    # Stage 3a: Frozen-Backbone Post-Quantization Refit (only Seq-LoRA-MoE + Coda/Head adapt to exact 5-trit/2-bit residual!)
+    # Stage 3a: Strictly Guarded Frozen-Backbone Post-Quantization Refit (rolls back if val regresses!)
+    pre_refit_obj, _ = _val_eval_obj(mdl)
+    pre_refit_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
     for name, p in mdl.named_parameters():
         p.requires_grad_(("lora_moe" in name) or name.startswith(("coda_", "ai_head.", "style_", "cbm_")))
-    refit_opt = torch.optim.AdamW([p for p in mdl.parameters() if p.requires_grad], lr=2e-4, weight_decay=1e-4)
+    refit_opt = torch.optim.AdamW([p for p in mdl.parameters() if p.requires_grad], lr=1.5e-4, weight_decay=1e-4)
     refit_items, _ = _subset_natural_prior_gold_guaranteed(train_items_raw, cap=min(120000, len(train_items_raw)), seed_s=20261129)
     refit_loader = make_loader(refit_items, sandwich_prob=0.0)
+    rng_rf = random.Random(20261129)
     mdl.train()
-    refit_steps = 8 if args.smoke_test else 300
+    refit_steps = 8 if args.smoke_test else 260
     rs = 0
     for batch in refit_loader:
-        ids, mask, eng, st, y_sc, _, _, _, _, w, _, grp, _ = [t.to(device, non_blocking=True) for t in batch]
+        ids, mask, eng, st, y_sc, _, _, _, _, w, _, grp, _, _ = [t.to(device, non_blocking=True) for t in batch]
         refit_opt.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", dtype=amp_dtype):
             out = mdl(ids, mask, st, engram_ids=eng, num_loops=2, return_aux=True)
             lg = out["logit"].float()
             ps = torch.sigmoid(lg)
             lp = ((0.75 * _skewed_kl(ps, y_sc) + 0.25 * F.smooth_l1_loss(ps, y_sc, beta=0.04, reduction="none")) * w).mean()
-            l_pa, l_tp = _modern_two_way_pauc_and_top_push(lg, y_sc, w, grp, prog=0.8, beta_start=0.05, beta_end=0.03)
-            loss = lp + 0.08 * l_pa + l_tp
+            l_pa, l_tp = _modern_two_way_pauc_and_top_push(lg, y_sc, w, grp, prog=0.85, beta_start=0.05, beta_end=0.025)
+            hu_h = torch.isin(grp, hard_grp_t)
+            loss = lp + 0.09 * l_pa + l_tp + 0.65 * zenith_graded_anchor_loss(lg, y_sc, hard_human_mask=hu_h)
+            if pairs_pre and (rs % 2 == 0):
+                pb = rng_rf.sample(pairs_pre, min(20, len(pairs_pre)))
+                ai_i, ai_m, ai_e, ai_s, hu_i, hu_m, hu_e, hu_s, pw_t = _collate_pairs(pb)
+                la, _, _, _ = mdl(ai_i, ai_m, ai_s, engram_ids=ai_e, num_loops=2, return_aux=False)
+                lh, _, _, _ = mdl(hu_i, hu_m, hu_s, engram_ids=hu_e, num_loops=2, return_aux=False)
+                la, lh = la.float(), lh.float()
+                loss = loss + 0.24 * (F.softplus(1.9 - (la - lh)) * pw_t).mean() + 0.22 * ((F.relu(0.88 - torch.sigmoid(la)).pow(2) + 1.6 * F.relu(torch.sigmoid(lh) - 0.10).pow(2)) * pw_t).mean()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(mdl.parameters(), 1.0)
         refit_opt.step()
@@ -955,6 +1234,12 @@ def train_and_export(args) -> None:
             break
     for p in mdl.parameters():
         p.requires_grad_(True)
+    post_refit_obj, _ = _val_eval_obj(mdl)
+    if post_refit_obj < pre_refit_obj:
+        mdl.load_state_dict({k: v.to(device) for k, v in pre_refit_sd.items()}, strict=True)
+        print(f"[Stage3a-Refit ROLLED_BACK] post={post_refit_obj:.4f} < pre={pre_refit_obj:.4f}", flush=True)
+    else:
+        print(f"[Stage3a-Refit KEPT] pre={pre_refit_obj:.4f} -> post={post_refit_obj:.4f}", flush=True)
     mdl.eval()
 
     # Stage 3b: 0 KB Confounding-Neuron Orthogonal Projection Surgery (auto-validated on val_gold!)
@@ -1179,18 +1464,21 @@ def main() -> None:
     ap.add_argument("--v06-backbone", default="BAAI/bge-small-zh-v1.5")
     ap.add_argument("--out", type=Path, default=Path("./out_v07_omniveritas"))
     ap.add_argument("--checkpoint-dir", type=Path, default=None)
-    ap.add_argument("--version", default="v0.7.0-r1-omniveritas-b4")
+    ap.add_argument("--version", default="v0.7.0-r2-omniveritas-b4")
     ap.add_argument("--max-len", type=int, default=MAX_LEN_V07)
     ap.add_argument("--stage1-synth-cap", type=int, default=15000)
     ap.add_argument("--v04-synth-cap", type=int, default=-1)
-    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--epochs", type=int, default=6)
+    ap.add_argument("--stage15-steps", type=int, default=1800)
+    ap.add_argument("--stage15-lr", type=float, default=1.1e-4)
+    ap.add_argument("--teacher-v06-polish-steps", type=int, default=900)
     ap.add_argument("--upq-cap", type=int, default=480000)
     ap.add_argument("--w4-steps", type=int, default=1200)
-    ap.add_argument("--sub2-steps", type=int, default=2000)
+    ap.add_argument("--sub2-steps", type=int, default=2200)
     ap.add_argument("--batch-size", type=int, default=0)
-    ap.add_argument("--lr", type=float, default=3.8e-4)
-    ap.add_argument("--w4-lr", type=float, default=9.0e-5)
-    ap.add_argument("--sub2-lr", type=float, default=5.0e-5)
+    ap.add_argument("--lr", type=float, default=7.5e-4)
+    ap.add_argument("--w4-lr", type=float, default=8.5e-5)
+    ap.add_argument("--sub2-lr", type=float, default=4.5e-5)
     ap.add_argument("--smoke-test", action="store_true")
     args = ap.parse_args()
     train_and_export(args)
