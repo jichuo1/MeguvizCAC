@@ -30,10 +30,13 @@ from .v08_zenith_ops import (
     compute_zenith_calibration_and_lowfpr_metrics,
 )
 from .v09_chronoloop import MeguvizV09CascadeEngine
+from .v10_apexloop import MeguvizV10CascadeEngine
 
 
 def _load_bundle_engine(bundle_dir: Path, threads: int = 2):
     manifest = json.loads((Path(bundle_dir) / "manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("schema_version") == "meguviz.bundle.v6" or "rung3_onnx" in manifest:
+        return MeguvizV10CascadeEngine(bundle_dir, threads=threads), True
     if manifest.get("schema_version") == "meguviz.bundle.v5" or "rung1_onnx" in manifest:
         return MeguvizV09CascadeEngine(bundle_dir, threads=threads), True
     return MeguvizV07Engine(bundle_dir, threads=threads, enable_nano_cascade=True), False
