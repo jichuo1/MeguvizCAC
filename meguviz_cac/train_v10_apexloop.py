@@ -38,7 +38,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .train_student import CODE_LIST, CODE_TO_IDX, PRAG_TAGS, compute_eval_metrics, find_val_thresholds
-from .train_v04_dualloop import compute_high_precision_metrics
+from .train_v04_dualloop import _open_read, compute_high_precision_metrics
 from .train_v05_apexloop import build_stratified_val_calibration_set
 from .train_v06_hyperloop import (
     _load_v06_balanced_bundle,
@@ -99,6 +99,94 @@ from .v10_apexloop import (
     pack_bundle_v6_mgvz,
     run_v10_ci_gates,
 )
+
+
+def _ingest_external_gemini_gold_v10(
+    train_items: list[dict],
+    gemini_gold_path: Path | None,
+) -> dict[str, int]:
+    """V10-aware Gemini 80k ingestion:
+      1. Cleanly separates true Pro gold (`v08_gemini_pro*`) from Flash wild (`v08_gemini_flash_gold`) so Pro stays 100% pure
+         gold while Flash keeps a 20% `v0.6-R3` BGE guardrail & requires double-confirmation in Top-FP suppression!
+      2. Promotes ALL `is_trap_human=True` (`score <= 30`) rows — BOTH overridden AND appended (all 10,829!) — into
+         `structured_human_hard` with minimum weight `1.45` so Tier-2a & Top-FP protection covers 100% of traps!
+    """
+    for it in train_items:
+        it["is_true_pro_gold"] = bool(it.get("is_gold_tier"))
+        it["is_ext_flash"] = False
+        it["is_trap_human"] = bool(it.get("group_idx") == GROUP_TO_IDX.get("structured_human_hard"))
+    if not gemini_gold_path or not gemini_gold_path.is_file():
+        return {"loaded": 0, "overridden_weak": 0, "appended_wild": 0, "pro_gold": 0, "flash_wild": 0, "traps_promoted": 0}
+
+    by_sid = {str(x["sample_id"]): i for i, x in enumerate(train_items)}
+    struct_gid = GROUP_TO_IDX["structured_human_hard"]
+    loaded = overridden = appended = n_pro = n_flash = n_traps = 0
+    with _open_read(gemini_gold_path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            if r.get("split", "train") != "train":
+                continue
+            sid = str(r["sample_id"])
+            sc = float(r["score"])
+            y_new = float(np.clip(sc / 100.0, 0.0, 1.0))
+            src = str(r.get("score_source", r.get("source", ""))).lower()
+            is_pro = ("pro" in src) or (float(r.get("train_weight", 1.0)) >= 1.30)
+            is_trap = bool(r.get("is_trap_human", False)) and (sc <= 30.0)
+            w_rec = float(r.get("train_weight", 1.35 if is_pro else 1.05))
+            if is_trap:
+                w_rec = max(w_rec, 1.45)
+                n_traps += 1
+            if is_pro:
+                n_pro += 1
+            else:
+                n_flash += 1
+            loaded += 1
+
+            if sid in by_sid:
+                it = train_items[by_sid[sid]]
+                it["y_score"] = y_new
+                it["code_idx"] = CODE_TO_IDX.get(str(r.get("code", "")), it["code_idx"])
+                it["is_gold_tier"] = True
+                it["is_true_pro_gold"] = bool(it["is_true_pro_gold"] or is_pro)
+                it["is_ext_flash"] = not it["is_true_pro_gold"]
+                it["weight"] = max(float(it["weight"]), w_rec)
+                if is_trap:
+                    it["group_idx"] = struct_gid
+                    it["is_trap_human"] = True
+                if isinstance(r.get("prag_vec"), list) and len(r["prag_vec"]) == len(PRAG_TAGS):
+                    it["prag_vec"] = [float(v) for v in r["prag_vec"]]
+                overridden += 1
+            else:
+                gid_str = "structured_human_hard" if is_trap else "current_2026_real"
+                prag = r.get("prag_vec") if (isinstance(r.get("prag_vec"), list) and len(r["prag_vec"]) == len(PRAG_TAGS)) else [-1.0] * len(PRAG_TAGS)
+                train_items.append(
+                    {
+                        "sample_id": sid,
+                        "raw_text": str(r["text"]),
+                        "y_score": y_new,
+                        "code_idx": CODE_TO_IDX.get(str(r.get("code", "")), -100),
+                        "weight": w_rec,
+                        "prag_vec": [float(v) for v in prag],
+                        "group_idx": GROUP_TO_IDX.get(gid_str, GROUP_TO_IDX["current_2026_real"]),
+                        "intent_idx": -1,
+                        "is_gold_tier": True,
+                        "is_true_pro_gold": is_pro,
+                        "is_ext_flash": not is_pro,
+                        "is_trap_human": is_trap,
+                        "is_pre_llm": False,
+                        "is_hu_anchor": bool(sc <= 18.0),
+                        "is_high_prio": True,
+                        "era_bucket": str(r.get("era_bucket", "current_2026")),
+                    }
+                )
+                by_sid[sid] = len(train_items) - 1
+                appended += 1
+    return {
+        "loaded": loaded, "overridden_weak": overridden, "appended_wild": appended,
+        "pro_gold": n_pro, "flash_wild": n_flash, "traps_promoted": n_traps,
+    }
 
 
 def _top_fp_logit_ceiling_loss(
@@ -228,12 +316,7 @@ def train_v10_apexloop(args) -> None:
     if data_audit["gateguard_dropped_leakage"] > 0:
         raise RuntimeError(f"Anti-leakage fail-fast: {data_audit['gateguard_dropped_leakage']} pairs collided with eval!")
 
-    pre_gold_sids = {str(x["sample_id"]) for x in train_items_raw if x.get("is_gold_tier")}
-    gem_audit = _ingest_external_gemini_gold(train_items_raw, args.v08_gemini_gold)
-    for item in train_items_raw:
-        # True hydrogen_xhigh gold or high-weight Pro traps keep 100% pure gold; Gemini Flash wild rows retain 20% v0.6-R3 guardrail!
-        is_ext_gem = bool(item.get("is_gold_tier")) and (str(item["sample_id"]) not in pre_gold_sids)
-        item["is_ext_flash"] = is_ext_gem and (float(item.get("weight", 1.0)) < 1.50)
+    gem_audit = _ingest_external_gemini_gold_v10(train_items_raw, args.v08_gemini_gold)
     print(f"[v1.0.0-ApexLoop Data] base={data_audit['train_items']:,} | pairs={len(pairs):,} | gemini_factory={json.dumps(gem_audit)}", flush=True)
 
     if args.smoke_test:
@@ -470,7 +553,7 @@ def train_v10_apexloop(args) -> None:
                 torch.from_numpy(ids), torch.from_numpy(mask), torch.from_numpy(eng), torch.from_numpy(st),
                 torch.tensor([x["y_score"] for x in batch], dtype=torch.float32),
                 torch.tensor([x["teacher_p"] for x in batch], dtype=torch.float32),
-                torch.tensor([1.0 if x["is_gold_tier"] else 0.0 for x in batch], dtype=torch.float32),
+                torch.tensor([1.0 if (x.get("is_true_pro_gold") or x.get("is_trap_human")) else 0.0 for x in batch], dtype=torch.float32),
                 torch.tensor([1.0 if x.get("is_ext_flash") else 0.0 for x in batch], dtype=torch.float32),
                 torch.tensor([x["code_idx"] for x in batch], dtype=torch.long),
                 torch.tensor([x["attr5"] for x in batch], dtype=torch.long),
@@ -579,7 +662,7 @@ def train_v10_apexloop(args) -> None:
                     lg_e1 = out["exit1_out"]["logit"].float()
                     lg_r1 = out["logit_r1"].float()
 
-                    has_v06_weak = (tp_v06 >= 0.0) & (is_g < 0.5)
+                    has_v06_weak = (tp_v06 >= 0.0) & (is_g < 0.5) & (is_ef < 0.5)
                     has_v06_flash = (tp_v06 >= 0.0) & (is_ef > 0.5)
                     tp_cl = tp_v06.clamp(0.0, 1.0)
                     y_eff = torch.where(has_v06_weak, 0.55 * y_sc + 0.45 * tp_cl, y_sc)
@@ -694,13 +777,16 @@ def train_v10_apexloop(args) -> None:
     sub_nat_raw, _ = _subset_natural_prior_gold_guaranteed(train_items_raw, cap=min(480000, len(train_items_raw)), seed_s=20261126)
     sub_nat = [dict(x) for x in sub_nat_raw]
 
-    # Mine the top-scoring double-confirmed clean humans (y<=0.18 AND [gold | pre_llm | teacher_p<=0.30]) from Stage 1!
+    # Mine the top-scoring double-confirmed clean humans (y<=0.18 AND [true_pro_gold | trap_human | pre_llm | teacher_p<=0.30])!
     mdl.load_state_dict({k: v.to(device) for k, v in s1_sd.items()}, strict=True)
     mdl.set_quant_mode("fp16")
     mdl.eval()
     conf_hu_idxs = [
         i for i, x in enumerate(sub_nat)
-        if x["y_score"] <= 0.18 and (x.get("is_gold_tier") or x.get("is_pre_llm") or x.get("teacher_p", -1.0) < 0.0 or x.get("teacher_p", 1.0) <= 0.30)
+        if x["y_score"] <= 0.18 and (
+            x.get("is_true_pro_gold") or x.get("is_trap_human") or x.get("is_pre_llm")
+            or x.get("teacher_p", -1.0) < 0.0 or x.get("teacher_p", 1.0) <= 0.30
+        )
     ]
     rng_m = random.Random(20261126)
     scan_cap = 256 if args.smoke_test else 120000

@@ -135,8 +135,9 @@ class DynaCoreMoLEV10(nn.Module):
             self.basis_v.weight.copy_(v_q * 0.05)
 
         # Pure FP16 Cores (0.000000 Stage-3a repack drift!): 1 always-on shared core + 8 routed domain cores
+        # Tiny 0.02 symmetry-breaking init on core_routed (with basis_v at 0.05 -> 0.001 delta) wakes all 8 experts from Step 0!
         self.core_shared = nn.Parameter(torch.zeros(rank, rank))
-        self.core_routed = nn.Parameter(torch.zeros(num_experts, rank, rank))
+        self.core_routed = nn.Parameter(torch.randn(num_experts, rank, rank) * 0.02)
         self.core_bias = nn.Parameter(torch.zeros(num_experts, rank))
         # Pre-core residual SiLU compensation per phase (0=Gather, 1=Clash, 2=Consolidate)
         self.phase_silu_gain = nn.Parameter(torch.zeros(3))
@@ -630,7 +631,7 @@ class MeguvizV10ApexLoopModel(nn.Module):
         self.h1_q_a = OmniQuantLinear(self.d1 + 32 + 2, 16, bias=False, target_bits="w4", group_size=64)
         self.h1_q_b = OmniQuantLinear(16, NUM_FAST_SLOTS_V09 * hidden_size // 4, bias=False, target_bits="w4", group_size=64)
         self.h1_q_up = OmniQuantLinear(hidden_size // 4, hidden_size, bias=False, target_bits="w4", group_size=64)
-        self.h1_gate = nn.Parameter(torch.zeros(1))  # exact 0.0 init -> safe bounded |gamma| <= 0.35!
+        self.h1_gate = nn.Parameter(torch.tensor([0.05]))  # tiny live init (0.35*tanh(0.05)=0.017) -> H1 wakes from Step 0!
 
         # P3 L0-Haar High-Pass Surface Micro-KV Projections (from 128-d masked Laplacian seam filter -> 64-d W4!)
         self.haar_k_proj = OmniQuantLinear(self.d1, BUS_DIM_V10, bias=False, target_bits="w4", group_size=64)
@@ -651,8 +652,8 @@ class MeguvizV10ApexLoopModel(nn.Module):
         # H2 DCCH-Bridge (Disentangled Counter-Hypothesis Falsification Bridge for Rung 2 -> Rung 3 escalation!)
         self.h2_hyp_proj = OmniQuantLinear(BUS_DIM_V10, hidden_size, bias=False, target_bits="w4", group_size=64)
         self.h2_doubt_proj = OmniQuantLinear(BUS_DIM_V10 + 4, hidden_size, bias=False, target_bits="w4", group_size=64)
-        self.h2_hyp_gate = nn.Parameter(torch.zeros(1))
-        self.h2_doubt_gate = nn.Parameter(torch.zeros(1))
+        self.h2_hyp_gate = nn.Parameter(torch.tensor([0.05]))
+        self.h2_doubt_gate = nn.Parameter(torch.tensor([0.05]))
 
         # TunnelSymplect Core (`P2 + P3 + P4 + C1 + C2 + C3 + C4 + E3 DynaCore-MoLE`)
         self.core = TunnelSymplectCoreV10(hidden_size=hidden_size, num_heads=num_heads, ffn_size=ffn_size)
