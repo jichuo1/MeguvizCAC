@@ -162,8 +162,8 @@ $$\mathcal{L} = \mathcal{L}_{\text{AI}} + \lambda_{\text{KD}} \mathcal{L}_{\text
 
 ---
 
-## 3. 待决策事项（3 项轻量拍板）
+## 3. 决策确认台账
 
-1. **`v1.0.0-R1` 成品 zip 体积余量**：待 Colab A100 `v1.0.0-R1` 产出后确认其是否 `<= 2.145 MB`（若略超则按 P5 顺次启用 L1–L3 零损压缩杠杆，共可再省 `23.5 KB`）。
-2. **Rung-1 推广漏放证书 $\alpha_{\text{pr}} = 1\%$**：认证严格要求 `promo_val_cert` 独立留出 **`>= 600`** 条短推广正样本（需从 Wave-1 + Wave-2 + UOT 收割池按连通分量整块划出）。
-3. **6-Way 属性顺序确认**：采纳 **F1** 建议，将 `Human-Commercial-Promo` 追加至 **idx 5**（而非插在 idx 2），100% 保护 `v1.0.0` `ATTRIBUTION_5WAY` 与 EBT 索引兼容。
+1. **✅ 已批准 · 6-Way 属性顺序（F1）**：正式确定将 `Human-Commercial-Promo` 追加至 **`idx 5`**（`ATTRIBUTION_6WAY = (Organic0, Assisted1, Bot2, Agent3, Cluster4, Promo5)`），100% 保护 `v1.0.0` EBT `energies[:, 2:5]` 索引兼容。
+2. **✅ 已批准 · Rung-1 推广漏放证书 $\alpha_{\text{pr}} = 1\%$**：正式确定按 `cos >= 0.92` 连通分量整块切分，留出 **`>= 600`** 条独立短推广正样本进入 `promo_val_cert`（由 [v11_uot_harvest.py](../meguviz_cac/v11_uot_harvest.py) 自动生成防泄漏切分清单 `v11_promo_split_manifest.json`）。
+3. **⏳ 待观测 · `v1.0.0-R1` 成品 zip 体积余量**：待 Colab A100 `v1.0.0-R1` 训练完成后实测其 zip 体积是否 `<= 2.145 MB`（若略超则自动按 P5 顺次启用 L1–L3 零损减重杠杆，共可回收 `23.5 KB`）。
