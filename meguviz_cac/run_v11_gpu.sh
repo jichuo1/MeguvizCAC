@@ -28,10 +28,17 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-# Auto-discover base v04 corpus across /content/data and Google Drive
+# Auto-discover base v04 corpus across /content/data and Google Drive (prefer shared_v04_data synced from A100!)
+SHARED_V04_DRIVE="/content/drive/MyDrive/MeguvizCAC/shared_v04_data"
 DATA_FILE="${DATA_FILE:-$DATA_DIR/v04-merged-1m4-r3.jsonl.gz}"
+if [ ! -f "$DATA_FILE" ] && [ -f "$SHARED_V04_DRIVE/v04-merged-1m4-r3.jsonl.gz" ]; then
+  mkdir -p "$DATA_DIR/stage2" "$DATA_DIR/co-teacher-gate"
+  echo "[$(date +%H:%M:%S)] Copying shared_v04_data from Drive -> $DATA_DIR (fast local NVMe)..." | tee -a "$LOG_DRIVER"
+  cp -rn "$SHARED_V04_DRIVE/." "$DATA_DIR/" 2>/dev/null || cp -f "$SHARED_V04_DRIVE/v04-merged-1m4-r3.jsonl.gz" "$DATA_FILE"
+fi
 if [ ! -f "$DATA_FILE" ]; then
   for cand in \
+    "$SHARED_V04_DRIVE/v04-merged-1m4-r3.jsonl.gz" \
     "/content/drive/MyDrive/MeguvizCAC/data/v04-merged-1m4-r3.jsonl.gz" \
     "/content/drive/MyDrive/MeguvizCAC/v04-merged-1m4-r3.jsonl.gz" \
     "/content/drive/MyDrive/MeguvizCAC/v080_zenith/data/v04-merged-1m4-r3.jsonl.gz" \
