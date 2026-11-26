@@ -207,7 +207,8 @@ def audit_external_dualaxis_replies(
         anti_cheat_flags: list[str] = []
         if s_errs > 2:
             anti_cheat_flags.append(f"schema_errs={s_errs}")
-        if ai_std < 3.5 or pr_std < 3.5:
+        pr_mean = float(np.mean(pr_vals)) if pr_vals else 0.0
+        if ai_std < 3.5 or (pr_std < 3.5 and (ai_std < 15.0 or pr_mean >= 12.0)):
             anti_cheat_flags.append(f"lazy_constant_scores(ai_std={ai_std:.1f},pr_std={pr_std:.1f})")
         if cue_uniq < 0.65:
             anti_cheat_flags.append(f"copy_paste_cues(uniq={cue_uniq:.2f})")
