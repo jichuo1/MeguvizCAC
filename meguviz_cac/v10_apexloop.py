@@ -55,6 +55,7 @@ from .v07_features import (
     extract_style_features_40d_batch,
     lorentz_hyp_sheaf_acdl_score,
     make_engram_bigram_ids,
+    make_engram_trigram_ids,
 )
 from .v07_omniveritas import (
     ATTRIBUTION_5WAY,
@@ -91,6 +92,32 @@ MOLE_RANK_V10 = 24
 MOLE_NUM_EXPERTS_V10 = 8
 NUM_SEM_FAST_V10 = 6
 NUM_SPAN_FAST_V10 = 6  # 6 + 6 == 12 == NUM_FAST_SLOTS_V09!
+ENGRAM_BIGRAM_BUCKETS_V10 = 8192
+ENGRAM_TRIGRAM_BUCKETS_V10 = 4096
+
+
+class MultiScaleRhythmConvV10(nn.Module):
+    """Lightweight 3-Scale Dilated Depthwise Rhythm Radar on Rung-1 `D_1=128` (`+11 KB` FP16, `+0.02 ms`!).
+
+    Captures 2026 zero-cliché Chinese stealth-AI contrast cadences (`不是X, 是Y`, `一条说...另一条说...`) across
+    receptive fields `3 / 9 / 17` tokens with 100% static ONNX opset-17 `Conv` ops and strict BLT invariance!
+    """
+
+    def __init__(self, d1: int = D1_PREFIX_V09):
+        super().__init__()
+        self.dw3_d1 = nn.Conv1d(d1, d1, kernel_size=3, padding=1, dilation=1, groups=d1)
+        self.dw5_d2 = nn.Conv1d(d1, d1, kernel_size=5, padding=4, dilation=2, groups=d1)
+        self.dw5_d4 = nn.Conv1d(d1, d1, kernel_size=5, padding=8, dilation=4, groups=d1)
+        self.se = nn.Sequential(nn.Linear(d1, 32), nn.SiLU(), nn.Linear(32, d1), nn.Sigmoid())
+        self.scale = nn.Parameter(torch.tensor(0.15))
+
+    def forward(self, h0_1: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        m = attention_mask.float().unsqueeze(-1)
+        x = (h0_1 * m).transpose(1, 2)  # (B, 128, L)
+        c = F.silu((self.dw3_d1(x) + self.dw5_d2(x) + self.dw5_d4(x)) * (1.0 / 3.0)).transpose(1, 2) * m
+        c_avg = c.sum(dim=1) / m.sum(dim=1).clamp(min=1.0)
+        g = self.se(c_avg).unsqueeze(1)
+        return h0_1 + self.scale * (c * g)
 
 
 def tunnel_trm_ste(x: torch.Tensor, lam: float) -> torch.Tensor:
@@ -580,7 +607,8 @@ class MeguvizV10ApexLoopModel(nn.Module):
         hidden_size: int = HIDDEN_V09,
         num_heads: int = 6,
         ffn_size: int = 896,
-        engram_buckets: int = 2048,
+        engram_buckets: int = ENGRAM_BIGRAM_BUCKETS_V10,
+        trigram_buckets: int = ENGRAM_TRIGRAM_BUCKETS_V10,
         engram_dim: int = 16,
         max_len: int = MAX_LEN_V07,
         style_dim: int = STYLE_FEAT_DIM_V07,
@@ -595,19 +623,24 @@ class MeguvizV10ApexLoopModel(nn.Module):
         self.vocab_size = int(vocab_size)
         self.embed_dim = int(embed_dim)
         self.hidden_size = int(hidden_size)
+        self.engram_buckets = int(engram_buckets)
+        self.trigram_buckets = int(trigram_buckets)
         self.d1 = D1_PREFIX_V09
         self.d2 = D2_COMP_V09
         self.max_len = int(max_len)
         self.cbm_concepts = int(cbm_concepts)
         self.cbm_topk = int(cbm_topk)
 
-        # Factorized W2 Embedding split cleanly into D_1=128 Prefix + D_2=256 Complement
+        # Factorized W2 Embedding + 8K Bigram & 4K Trigram Engram split cleanly into D_1=128 Prefix + D_2=256 Complement
         self.word_emb_A = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
         self.word_emb_P1 = OmniQuantLinear(embed_dim, self.d1, bias=False, target_bits="w4", group_size=64)
         self.word_emb_P2 = OmniQuantLinear(embed_dim, self.d2, bias=False, target_bits="w4", group_size=64)
         self.engram_emb = nn.Embedding(engram_buckets, engram_dim, padding_idx=0)
         self.engram_P1 = OmniQuantLinear(engram_dim, self.d1, bias=False, target_bits="w4", group_size=64)
         self.engram_P2 = OmniQuantLinear(engram_dim, self.d2, bias=False, target_bits="w4", group_size=64)
+        self.trigram_emb = nn.Embedding(trigram_buckets, engram_dim, padding_idx=0)
+        self.trigram_P1 = OmniQuantLinear(engram_dim, self.d1, bias=False, target_bits="w4", group_size=64)
+        self.trigram_P2 = OmniQuantLinear(engram_dim, self.d2, bias=False, target_bits="w4", group_size=64)
         self.pos_emb1 = nn.Embedding(max_len, self.d1)
         self.pos_emb2 = nn.Embedding(max_len, self.d2)
         self.emb_norm1 = RationalDerf(self.d1)
@@ -616,13 +649,16 @@ class MeguvizV10ApexLoopModel(nn.Module):
 
         # Rung 1 / Rung 2 Block-Lower-Triangular Matryoshka Prelude L0 (W_12 === 0 -> 0% wasted compute!)
         self.prelude_l0 = BLTMatryoshkaPreludeL0(d1=self.d1, d2=self.d2, m1=FFN1_PREFIX_V09, m2=FFN2_COMP_V09)
+        # Rung-1 3-Scale Dilated Depthwise Rhythm Conv (RF=3/9/17 -> catches 2026 stealth-AI contrast cadence!)
+        self.r1_rhythm_conv = MultiScaleRhythmConvV10(d1=self.d1)
+        self.r1_attn_pool = nn.Linear(self.d1, 1)
 
         # Rung 1 Exit Head + Sigmoid Span Risk + 8.65 KB Residual Deferral Router + H1 SSSQ Handshake Packet!
         self.r1_style_mlp = nn.Sequential(nn.Linear(style_dim, 32), nn.SiLU(), nn.Linear(32, 32), nn.SiLU())
         self.r1_span_head = nn.Linear(self.d1, 1)
-        self.r1_ai_head = nn.Linear(self.d1 * 2 + 32 + 2, 1)
+        self.r1_ai_head = nn.Linear(self.d1 * 3 + 32 + 3, 1)
         # Split defer_head_r1 so we extract the 32-d hidden doubt vector for H1 SSSQ (ZERO raw_logit_r1!)
-        self.defer_r1_enc = nn.Sequential(nn.Linear(self.d1 * 2 + 32 + 3, 32), nn.SiLU())
+        self.defer_r1_enc = nn.Sequential(nn.Linear(self.d1 * 3 + 32 + 4, 32), nn.SiLU())
         self.defer_r1_out = nn.Linear(32, 1)
 
         # H1 SSSQ Suspicion-Seeded Fast Slot Query Generator (`+6.8 KB W4`, strictly ZERO injection into 4 Slow Verdict Slots!)
@@ -694,16 +730,26 @@ class MeguvizV10ApexLoopModel(nn.Module):
             if isinstance(m, OmniQuantLinear):
                 m.quant_mode = m.target_bits if mode == "sub2" else mode
 
-    def _embed_prefix(self, input_ids: torch.Tensor, engram_ids: torch.Tensor) -> torch.Tensor:
+    def _embed_prefix(self, input_ids: torch.Tensor, engram_ids: torch.Tensor, trigram_ids: torch.Tensor) -> torch.Tensor:
         seq_l = input_ids.shape[1]
         pos = torch.arange(seq_l, device=input_ids.device).clamp(max=self.max_len - 1).unsqueeze(0)
-        x1 = self.word_emb_P1(self.word_emb_A(input_ids)) + self.engram_P1(self.engram_emb(engram_ids)) + self.pos_emb1(pos)
+        x1 = (
+            self.word_emb_P1(self.word_emb_A(input_ids))
+            + self.engram_P1(self.engram_emb(engram_ids))
+            + self.trigram_P1(self.trigram_emb(trigram_ids))
+            + self.pos_emb1(pos)
+        )
         return self.emb_drop(self.emb_norm1(x1))
 
-    def _embed_complement(self, input_ids: torch.Tensor, engram_ids: torch.Tensor) -> torch.Tensor:
+    def _embed_complement(self, input_ids: torch.Tensor, engram_ids: torch.Tensor, trigram_ids: torch.Tensor) -> torch.Tensor:
         seq_l = input_ids.shape[1]
         pos = torch.arange(seq_l, device=input_ids.device).clamp(max=self.max_len - 1).unsqueeze(0)
-        x2 = self.word_emb_P2(self.word_emb_A(input_ids)) + self.engram_P2(self.engram_emb(engram_ids)) + self.pos_emb2(pos)
+        x2 = (
+            self.word_emb_P2(self.word_emb_A(input_ids))
+            + self.engram_P2(self.engram_emb(engram_ids))
+            + self.trigram_P2(self.trigram_emb(trigram_ids))
+            + self.pos_emb2(pos)
+        )
         return self.emb_drop(self.emb_norm2(x2))
 
     @staticmethod
@@ -725,14 +771,22 @@ class MeguvizV10ApexLoopModel(nn.Module):
         attention_mask: torch.Tensor,
         style_feats: torch.Tensor,
         engram_ids: torch.Tensor,
+        trigram_ids: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Rung 1 (`D_1=128`): computes `h0_1`, calibrated Rung-1 logit, `p_defer1`, `r1_span_max`, & H1 `r1_pkt (162-d)`!"""
-        x1 = self._embed_prefix(input_ids, engram_ids)
+        """Rung 1 (`D_1=128`): BLT Prefix + 3-Scale Dilated Rhythm Conv + Attention-Pool + Span Risk + H1 `r1_pkt`!"""
+        if trigram_ids is None:
+            trigram_ids = torch.zeros_like(input_ids)
+        x1 = self._embed_prefix(input_ids, engram_ids, trigram_ids)
         h0_1 = self.prelude_l0.forward_prefix(x1, attention_mask)
+        h0_1 = self.r1_rhythm_conv(h0_1, attention_mask)
 
         m_f = attention_mask.float().unsqueeze(-1)
-        h_avg = (h0_1 * m_f).sum(dim=1) / m_f.sum(dim=1).clamp(min=1.0)
+        m_den = m_f.sum(dim=1).clamp(min=1.0)
+        h_avg = (h0_1 * m_f).sum(dim=1) / m_den
         h_max = h0_1.masked_fill(~attention_mask.bool().unsqueeze(-1), -1e4).amax(dim=1)
+        a_logits = self.r1_attn_pool(h0_1).squeeze(-1).masked_fill(~attention_mask.bool(), -1e4)
+        h_attn = (h0_1 * F.softmax(a_logits, dim=-1).unsqueeze(-1)).sum(dim=1)
+        h_std_s = torch.sqrt((((h0_1 - h_avg.unsqueeze(1)) ** 2) * m_f).sum(dim=1) / m_den + 1e-6).mean(dim=-1, keepdim=True)
 
         # Sigmoid-bounded Quote-Gated w=8 Local Span Risk in [0, 1]
         tok_r = torch.sigmoid(self.r1_span_head(h0_1).squeeze(-1)) * attention_mask.float()
@@ -741,7 +795,7 @@ class MeguvizV10ApexLoopModel(nn.Module):
         r_std_win = torch.sqrt(((w_avg - w_avg.mean(dim=-1, keepdim=True)) ** 2).mean(dim=-1) + 1e-6)
 
         st_h = self.r1_style_mlp(style_feats)
-        feat = torch.cat([h_avg, h_max, st_h, r_max_win.unsqueeze(-1), r_std_win.unsqueeze(-1)], dim=-1)
+        feat = torch.cat([h_avg, h_max, h_attn, st_h, h_std_s, r_max_win.unsqueeze(-1), r_std_win.unsqueeze(-1)], dim=-1)
         raw_logit_r1 = self.r1_ai_head(feat).squeeze(-1)
         logit_r1 = (self.exit_affine_a[0] * raw_logit_r1 + self.exit_affine_b[0]) / self.temperature.clamp(min=0.2)
 
@@ -852,6 +906,7 @@ class MeguvizV10ApexLoopModel(nn.Module):
         x1_in: torch.Tensor,
         h0_1: torch.Tensor,
         r1_pkt: torch.Tensor,
+        trigram_ids: torch.Tensor | None = None,
         handoff_mask: torch.Tensor | None = None,
         k_inner: int = 2,
         trm_lam_k0: float = 1.0,
@@ -859,7 +914,9 @@ class MeguvizV10ApexLoopModel(nn.Module):
         fwd_state_in: torch.Tensor | None = None,
     ) -> dict[str, Any]:
         """Session R2 (Zero-Recompute t=1): Complement + L1 + P3 L0-Haar Micro-KV + H1 Warm-Start + Outer t=1!"""
-        x2_in = self._embed_complement(input_ids, engram_ids)
+        if trigram_ids is None:
+            trigram_ids = torch.zeros_like(input_ids)
+        x2_in = self._embed_complement(input_ids, engram_ids, trigram_ids)
         m_f = attention_mask.float().unsqueeze(-1)
         cls_c = (x2_in * m_f).sum(dim=1) / m_f.sum(dim=1).clamp(min=1.0)
 
@@ -990,6 +1047,7 @@ class MeguvizV10ApexLoopModel(nn.Module):
         attention_mask: torch.Tensor,
         style_feats: torch.Tensor,
         engram_ids: torch.Tensor | None = None,
+        trigram_ids: torch.Tensor | None = None,
         outer_steps: int = 2,
         k_inner: int = 2,
         trm_lam_k0: float = 1.0,
@@ -1002,7 +1060,9 @@ class MeguvizV10ApexLoopModel(nn.Module):
     ):
         if engram_ids is None:
             engram_ids = torch.zeros_like(input_ids)
-        r1 = self.forward_rung1_prefix(input_ids, attention_mask, style_feats, engram_ids)
+        if trigram_ids is None:
+            trigram_ids = torch.zeros_like(input_ids)
+        r1 = self.forward_rung1_prefix(input_ids, attention_mask, style_feats, engram_ids, trigram_ids)
 
         # H4-A: Training-time Adversarial Handoff Dropout & Sign-Flip Perturbation (prevents M_1->M_2 poisoning!)
         bsz = input_ids.shape[0]
@@ -1018,7 +1078,7 @@ class MeguvizV10ApexLoopModel(nn.Module):
 
         r2 = self.forward_rung2_t1(
             input_ids, attention_mask, style_feats, engram_ids,
-            r1["x1_in"], r1["h0_1"], r1_pkt_use, handoff_mask=h_mask,
+            r1["x1_in"], r1["h0_1"], r1_pkt_use, trigram_ids=trigram_ids, handoff_mask=h_mask,
             k_inner=k_inner, trm_lam_k0=trm_lam_k0, trm_lam_k1=trm_lam_k1,
         )
 
@@ -1092,8 +1152,9 @@ class MeguvizV10ApexLoopModel(nn.Module):
         n = len(full_ids)
         if n <= chunk_len:
             ids_t = torch.tensor([full_ids], dtype=torch.long, device=device)
-            eg_t = torch.tensor([make_engram_bigram_ids(full_ids)], dtype=torch.long, device=device)
-            lg, _, _, _ = self.forward(ids_t, torch.ones_like(ids_t), style_feats, engram_ids=eg_t, outer_steps=outer_steps, return_aux=False)
+            eg_t = torch.tensor([make_engram_bigram_ids(full_ids, buckets=self.engram_buckets)], dtype=torch.long, device=device)
+            tg_t = torch.tensor([make_engram_trigram_ids(full_ids, buckets=self.trigram_buckets)], dtype=torch.long, device=device)
+            lg, _, _, _ = self.forward(ids_t, torch.ones_like(ids_t), style_feats, engram_ids=eg_t, trigram_ids=tg_t, outer_steps=outer_steps, return_aux=False)
             return {"chunks": 1, "prob": float(torch.sigmoid(lg[0]).item()), "haar_sketch_tokens": 0}
 
         fwd_st = None
@@ -1103,10 +1164,11 @@ class MeguvizV10ApexLoopModel(nn.Module):
         while st < n:
             ch = full_ids[st : st + chunk_len]
             ids_t = torch.tensor([ch], dtype=torch.long, device=device)
-            eg_t = torch.tensor([make_engram_bigram_ids(ch)], dtype=torch.long, device=device)
+            eg_t = torch.tensor([make_engram_bigram_ids(ch, buckets=self.engram_buckets)], dtype=torch.long, device=device)
+            tg_t = torch.tensor([make_engram_trigram_ids(ch, buckets=self.trigram_buckets)], dtype=torch.long, device=device)
             m_t = torch.ones_like(ids_t)
-            r1 = self.forward_rung1_prefix(ids_t, m_t, style_feats, eg_t)
-            r2 = self.forward_rung2_t1(ids_t, m_t, style_feats, eg_t, r1["x1_in"], r1["h0_1"], r1["r1_pkt"], fwd_state_in=fwd_st)
+            r1 = self.forward_rung1_prefix(ids_t, m_t, style_feats, eg_t, tg_t)
+            r2 = self.forward_rung2_t1(ids_t, m_t, style_feats, eg_t, r1["x1_in"], r1["h0_1"], r1["r1_pkt"], trigram_ids=tg_t, fwd_state_in=fwd_st)
             fwd_st = r2["fwd_state_out"]
             # Maintain constant-SRAM 8 KB Top-32 L0-Haar Surface-Seam Sketch across chunks!
             kh, vh = r2["k_haar"], r2["v_haar"]
@@ -1226,6 +1288,7 @@ def pack_bundle_v6_mgvz(model: MeguvizV10ApexLoopModel, out_path: Path) -> dict[
     qtype_by_param: dict[str, tuple[str, int]] = {
         "word_emb_A.weight": ("seq2", 64),
         "engram_emb.weight": ("w4", 64),
+        "trigram_emb.weight": ("w4", 64),
         "pos_emb1.weight": ("w4", 64),
         "pos_emb2.weight": ("w4", 64),
         "coda_proj.0.weight": ("w4", 64),
@@ -1359,8 +1422,15 @@ class _V10Rung1Export(nn.Module):
         super().__init__()
         self.m = m
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, style_feats: torch.Tensor, engram_ids: torch.Tensor):
-        r1 = self.m.forward_rung1_prefix(input_ids, attention_mask, style_feats, engram_ids)
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        style_feats: torch.Tensor,
+        engram_ids: torch.Tensor,
+        trigram_ids: torch.Tensor,
+    ):
+        r1 = self.m.forward_rung1_prefix(input_ids, attention_mask, style_feats, engram_ids, trigram_ids)
         return r1["logit_r1"], r1["p_defer1"], r1["r1_span_max"], r1["x1_in"], r1["h0_1"], r1["r1_pkt"]
 
 
@@ -1377,11 +1447,12 @@ class _V10Rung2T1Export(nn.Module):
         attention_mask: torch.Tensor,
         style_feats: torch.Tensor,
         engram_ids: torch.Tensor,
+        trigram_ids: torch.Tensor,
         x1_in: torch.Tensor,
         h0_1: torch.Tensor,
         r1_pkt: torch.Tensor,
     ):
-        r2 = self.m.forward_rung2_t1(input_ids, attention_mask, style_feats, engram_ids, x1_in, h0_1, r1_pkt)
+        r2 = self.m.forward_rung2_t1(input_ids, attention_mask, style_feats, engram_ids, x1_in, h0_1, r1_pkt, trigram_ids=trigram_ids)
         e1 = r2["exit1_out"]
         return (
             e1["logit"], e1["emb"], e1["p_defer2"], e1["slot_spread"], e1["ebt_margin"], e1["ebt_grad_norm"],
@@ -1453,8 +1524,8 @@ def export_v10_modular_onnx_and_bundle_v6(model: MeguvizV10ApexLoopModel, out_di
             if nd.name and any(
                 k in nd.name
                 for k in (
-                    "ai_head", "r1_ai_head", "defer_", "style_net", "r1_style_mlp",
-                    "coda_proj", "span_", "word_emb", "engram_", "pos_emb",
+                    "ai_head", "r1_ai_head", "r1_rhythm", "r1_attn_pool", "defer_", "style_net", "r1_style_mlp",
+                    "coda_proj", "span_", "word_emb", "engram_", "trigram_", "pos_emb",
                     "inloop_ebt", "mole", "h1_", "h2_", "p2_", "c1_", "c2_",
                     "bus_", "haar_", "reread_", "slot_", "q_proj", "k_proj", "v_proj", "o_proj",
                     "cbm_", "ctx_loop",
@@ -1470,43 +1541,46 @@ def export_v10_modular_onnx_and_bundle_v6(model: MeguvizV10ApexLoopModel, out_di
     d_ids = torch.randint(1, mdl_cpu.vocab_size, (2, 40), dtype=torch.long)
     d_m = torch.ones((2, 40), dtype=torch.long)
     d_st = torch.zeros((2, STYLE_FEAT_DIM_V07), dtype=torch.float32)
-    d_eng = torch.randint(1, 2048, (2, 40), dtype=torch.long)
+    d_eng = torch.randint(1, mdl_cpu.engram_buckets, (2, 40), dtype=torch.long)
+    d_tri = torch.randint(1, mdl_cpu.trigram_buckets, (2, 40), dtype=torch.long)
 
-    # 1. Session R1: BLT-Matryoshka Prefix + H1 SSSQ Packet
+    # 1. Session R1: BLT-Matryoshka Prefix + 3-Scale Rhythm Conv + H1 SSSQ Packet
     w1 = _V10Rung1Export(mdl_cpu).eval()
     r1_fp, r1_i8 = out_dir / "_v10_r1_fp32.onnx", out_dir / "v10_r1_prefix_int8.onnx"
     torch.onnx.export(
-        w1, (d_ids, d_m, d_st, d_eng), str(r1_fp),
-        input_names=["input_ids", "attention_mask", "style_feats", "engram_ids"],
+        w1, (d_ids, d_m, d_st, d_eng, d_tri), str(r1_fp),
+        input_names=["input_ids", "attention_mask", "style_feats", "engram_ids", "trigram_ids"],
         output_names=["logit_r1", "p_defer1", "r1_span_max", "x1_in", "h0_1", "r1_pkt"],
         dynamic_axes={
-            "input_ids": {0: "B", 1: "L"}, "attention_mask": {0: "B", 1: "L"}, "style_feats": {0: "B"}, "engram_ids": {0: "B", 1: "L"},
+            "input_ids": {0: "B", 1: "L"}, "attention_mask": {0: "B", 1: "L"}, "style_feats": {0: "B"},
+            "engram_ids": {0: "B", 1: "L"}, "trigram_ids": {0: "B", 1: "L"},
             "logit_r1": {0: "B"}, "p_defer1": {0: "B"}, "r1_span_max": {0: "B"}, "x1_in": {0: "B", 1: "L"}, "h0_1": {0: "B", 1: "L"}, "r1_pkt": {0: "B"},
         },
         **exp_kw,
     )
     _quant_excluding_sensitive(r1_fp, r1_i8)
     with torch.no_grad():
-        o1 = w1(d_ids, d_m, d_st, d_eng)
+        o1 = w1(d_ids, d_m, d_st, d_eng, d_tri)
     s1 = ort.InferenceSession(str(r1_fp), providers=["CPUExecutionProvider"])
-    ox1 = s1.run(None, {"input_ids": d_ids.numpy(), "attention_mask": d_m.numpy(), "style_feats": d_st.numpy(), "engram_ids": d_eng.numpy()})
+    ox1 = s1.run(None, {"input_ids": d_ids.numpy(), "attention_mask": d_m.numpy(), "style_feats": d_st.numpy(), "engram_ids": d_eng.numpy(), "trigram_ids": d_tri.numpy()})
     r1_diff = float(np.max(np.abs(o1[4].numpy() - ox1[4])))
     r1_fp.unlink(missing_ok=True)
 
     # 2. Session R2: Complement + L1 + P3 Haar Micro-KV + H1 Warm-Start + Outer t=1 ONLY!
     w2 = _V10Rung2T1Export(mdl_cpu).eval()
     r2_fp, r2_i8 = out_dir / "_v10_r2_fp32.onnx", out_dir / "v10_r2_t1_int8.onnx"
-    r2_in_names = ["input_ids", "attention_mask", "style_feats", "engram_ids", "x1_in", "h0_1", "r1_pkt"]
+    r2_in_names = ["input_ids", "attention_mask", "style_feats", "engram_ids", "trigram_ids", "x1_in", "h0_1", "r1_pkt"]
     r2_out_names = [
         "logit_t1", "emb_t1", "p_defer2", "slot_spread", "ebt_margin_t1", "ebt_grad_t1",
         "slots", "s_anchor", "carry_m_l", "zh_bus", "mole_probs",
         "k_ev", "v_ev", "m_pool", "k_haar", "v_haar", "h0_pool", "span_base",
     ]
     torch.onnx.export(
-        w2, (d_ids, d_m, d_st, d_eng, o1[3], o1[4], o1[5]), str(r2_fp),
+        w2, (d_ids, d_m, d_st, d_eng, d_tri, o1[3], o1[4], o1[5]), str(r2_fp),
         input_names=r2_in_names, output_names=r2_out_names,
         dynamic_axes={
-            "input_ids": {0: "B", 1: "L"}, "attention_mask": {0: "B", 1: "L"}, "style_feats": {0: "B"}, "engram_ids": {0: "B", 1: "L"},
+            "input_ids": {0: "B", 1: "L"}, "attention_mask": {0: "B", 1: "L"}, "style_feats": {0: "B"},
+            "engram_ids": {0: "B", 1: "L"}, "trigram_ids": {0: "B", 1: "L"},
             "x1_in": {0: "B", 1: "L"}, "h0_1": {0: "B", 1: "L"}, "r1_pkt": {0: "B"},
             "logit_t1": {0: "B"}, "emb_t1": {0: "B"}, "p_defer2": {0: "B"}, "slot_spread": {0: "B"}, "ebt_margin_t1": {0: "B"}, "ebt_grad_t1": {0: "B"},
             "slots": {0: "B"}, "s_anchor": {0: "B"}, "carry_m_l": {0: "B"}, "zh_bus": {0: "B"}, "mole_probs": {0: "B"},
@@ -1517,9 +1591,9 @@ def export_v10_modular_onnx_and_bundle_v6(model: MeguvizV10ApexLoopModel, out_di
     )
     _quant_excluding_sensitive(r2_fp, r2_i8)
     with torch.no_grad():
-        o2 = w2(d_ids, d_m, d_st, d_eng, o1[3], o1[4], o1[5])
+        o2 = w2(d_ids, d_m, d_st, d_eng, d_tri, o1[3], o1[4], o1[5])
     s2 = ort.InferenceSession(str(r2_fp), providers=["CPUExecutionProvider"])
-    ox2 = s2.run(None, dict(zip(r2_in_names, [d_ids.numpy(), d_m.numpy(), d_st.numpy(), d_eng.numpy(), o1[3].numpy(), o1[4].numpy(), o1[5].numpy()])))
+    ox2 = s2.run(None, dict(zip(r2_in_names, [d_ids.numpy(), d_m.numpy(), d_st.numpy(), d_eng.numpy(), d_tri.numpy(), o1[3].numpy(), o1[4].numpy(), o1[5].numpy()])))
     r2_diff = float(np.max(np.abs(o2[0].numpy() - ox2[0])))
     r2_fp.unlink(missing_ok=True)
 
@@ -1580,6 +1654,8 @@ class MeguvizV10CascadeEngine:
         self.manifest = json.loads((self.bundle_dir / "manifest.json").read_text(encoding="utf-8"))
         self.tokenizer = BiliPickyBPETokenizer(self.bundle_dir / self.manifest["tokenizer_file"])
         self.max_len = int(self.manifest.get("max_len", MAX_LEN_V07))
+        self.engram_buckets = int(self.manifest.get("engram_buckets", ENGRAM_BIGRAM_BUCKETS_V10))
+        self.trigram_buckets = int(self.manifest.get("trigram_buckets", ENGRAM_TRIGRAM_BUCKETS_V10))
         self.lut_r1 = self.manifest.get("lut_rung1") or self.manifest.get("spline_temp_lut")
         self.lut_full = self.manifest.get("lut_full") or self.manifest.get("spline_temp_lut")
         self.policy = self.manifest.get("psac_policy") or {
@@ -1601,7 +1677,8 @@ class MeguvizV10CascadeEngine:
             return []
         cleans, styles, metas = extract_style_features_40d_batch(texts)
         encs = [self.tokenizer.encode_ids(c, max_len=self.max_len) for c in cleans]
-        engs = [make_engram_bigram_ids(s) for s in encs]
+        engs = [make_engram_bigram_ids(s, buckets=self.engram_buckets) for s in encs]
+        tris = [make_engram_trigram_ids(s, buckets=self.trigram_buckets) for s in encs]
         results: list[dict[str, Any] | None] = [None] * n
 
         order = sorted(range(n), key=lambda i: len(encs[i]))
@@ -1622,14 +1699,15 @@ class MeguvizV10CascadeEngine:
             ids = np.full((bs, ml), self.tokenizer.pad_id, dtype=np.int64)
             mask = np.zeros((bs, ml), dtype=np.int64)
             eng = np.zeros((bs, ml), dtype=np.int64)
+            tri = np.zeros((bs, ml), dtype=np.int64)
             st_b = styles[mb]
             for ri, oi in enumerate(mb):
                 s = encs[oi]
-                ids[ri, : len(s)], mask[ri, : len(s)], eng[ri, : len(s)] = s, 1, engs[oi]
+                ids[ri, : len(s)], mask[ri, : len(s)], eng[ri, : len(s)], tri[ri, : len(s)] = s, 1, engs[oi], tris[oi]
 
-            # Session R1: BLT-Matryoshka Prefix + H1 SSSQ Handshake Packet
+            # Session R1: BLT-Matryoshka Prefix + 3-Scale Rhythm Conv + H1 SSSQ Handshake Packet
             lg1, pdef1, r1_smax, x1_in, h0_1, r1_pkt = self.sess_r1.run(
-                None, {"input_ids": ids, "attention_mask": mask, "style_feats": st_b, "engram_ids": eng}
+                None, {"input_ids": ids, "attention_mask": mask, "style_feats": st_b, "engram_ids": eng, "trigram_ids": tri}
             )
             raw_p1 = 1.0 / (1.0 + np.exp(-np.clip(lg1, -30.0, 30.0)))
             cal_p1 = apply_spline_temp_lut(raw_p1, self.lut_r1) if self.lut_r1 else raw_p1
@@ -1659,7 +1737,8 @@ class MeguvizV10CascadeEngine:
                 None,
                 {
                     "input_ids": ids[s1_idx], "attention_mask": mask[s1_idx], "style_feats": st_b[s1_idx],
-                    "engram_ids": eng[s1_idx], "x1_in": x1_in[s1_idx], "h0_1": h0_1[s1_idx], "r1_pkt": r1_pkt[s1_idx],
+                    "engram_ids": eng[s1_idx], "trigram_ids": tri[s1_idx],
+                    "x1_in": x1_in[s1_idx], "h0_1": h0_1[s1_idx], "r1_pkt": r1_pkt[s1_idx],
                 },
             )
             lg_t1, _emb1, pdef2, spread1, _em1, egrad1 = r2_out[:6]
@@ -1774,13 +1853,15 @@ def run_v10_ci_gates(model: MeguvizV10ApexLoopModel, tokenizer: BiliPickyBPEToke
     def _infer(txt: str):
         cl, f40, _ = extract_style_features_40d(txt)
         ids = tokenizer.encode_ids(cl, max_len=MAX_LEN_V07)
-        eng = make_engram_bigram_ids(ids)
+        eng = make_engram_bigram_ids(ids, buckets=model.engram_buckets)
+        tri = make_engram_trigram_ids(ids, buckets=model.trigram_buckets)
         with torch.no_grad():
             return model(
                 torch.tensor([ids], dtype=torch.long, device=device),
                 torch.ones((1, len(ids)), dtype=torch.long, device=device),
                 torch.from_numpy(f40).unsqueeze(0).to(device),
                 engram_ids=torch.tensor([eng], dtype=torch.long, device=device),
+                trigram_ids=torch.tensor([tri], dtype=torch.long, device=device),
                 outer_steps=2, k_inner=2, return_aux=True,
             )
 
@@ -1789,8 +1870,9 @@ def run_v10_ci_gates(model: MeguvizV10ApexLoopModel, tokenizer: BiliPickyBPEToke
     for seq_l in (2, 5, 17, 32, 65, 129, 256):
         with torch.no_grad():
             ids_t = torch.randint(1, tokenizer.vocab_size, (2, seq_l), device=device)
-            eg_t = torch.randint(1, 2048, (2, seq_l), device=device)
-            od = model(ids_t, torch.ones_like(ids_t), torch.zeros((2, STYLE_FEAT_DIM_V07), device=device), engram_ids=eg_t, outer_steps=2, return_aux=True)
+            eg_t = torch.randint(1, model.engram_buckets, (2, seq_l), device=device)
+            tg_t = torch.randint(1, model.trigram_buckets, (2, seq_l), device=device)
+            od = model(ids_t, torch.ones_like(ids_t), torch.zeros((2, STYLE_FEAT_DIM_V07), device=device), engram_ids=eg_t, trigram_ids=tg_t, outer_steps=2, return_aux=True)
             if torch.isnan(od["logit"]).any() or torch.isnan(od["logit_r1"]).any():
                 dyn_ok = False
     # WebGPU Workgroup SRAM: 16 slots FP16 (12K) + anchor INT8 (6K) + m_L (1.5K) + C_ctx (0.5K) + DynaCore active (11.4K) = 31.4 KB <= 32 KB
@@ -1800,12 +1882,14 @@ def run_v10_ci_gates(model: MeguvizV10ApexLoopModel, tokenizer: BiliPickyBPEToke
     # V10-L1: Bit-Exact BLT-Matryoshka Prefix Invariance (W_12 === 0)
     with torch.no_grad():
         ids_p = torch.randint(1, tokenizer.vocab_size, (2, 48), device=device)
-        m_p, eg_p = torch.ones_like(ids_p), torch.randint(1, 2048, (2, 48), device=device)
+        m_p = torch.ones_like(ids_p)
+        eg_p = torch.randint(1, model.engram_buckets, (2, 48), device=device)
+        tg_p = torch.randint(1, model.trigram_buckets, (2, 48), device=device)
         st_p = torch.zeros((2, STYLE_FEAT_DIM_V07), device=device)
-        r1_a = model.forward_rung1_prefix(ids_p, m_p, st_p, eg_p)
+        r1_a = model.forward_rung1_prefix(ids_p, m_p, st_p, eg_p, tg_p)
         orig_p2 = model.word_emb_P2.weight.data.clone()
         model.word_emb_P2.weight.data.add_(5.0)
-        r1_b = model.forward_rung1_prefix(ids_p, m_p, st_p, eg_p)
+        r1_b = model.forward_rung1_prefix(ids_p, m_p, st_p, eg_p, tg_p)
         model.word_emb_P2.weight.data.copy_(orig_p2)
         blt_diff = float((r1_a["h0_1"] - r1_b["h0_1"]).abs().max().item())
     ci["V10_L1_blt_prefix_bit_exact"] = {"max_abs_diff": blt_diff, "pass": blt_diff < 1e-5}
@@ -1847,8 +1931,9 @@ def run_v10_ci_gates(model: MeguvizV10ApexLoopModel, tokenizer: BiliPickyBPEToke
     # V10-P4: Tunnel-TRM Live Gradient Verification (under trm_lam=0.0 QAT mode, Active Re-Read & Phase-0 MUST stay live!)
     model.zero_grad(set_to_none=True)
     ids_g = torch.randint(1, tokenizer.vocab_size, (2, 24), device=device)
-    eg_g = torch.randint(1, 2048, (2, 24), device=device)
-    out_g = model(ids_g, torch.ones_like(ids_g), torch.zeros((2, STYLE_FEAT_DIM_V07), device=device), engram_ids=eg_g, outer_steps=2, trm_lam_k0=0.0, trm_lam_k1=0.0, return_aux=True)
+    eg_g = torch.randint(1, model.engram_buckets, (2, 24), device=device)
+    tg_g = torch.randint(1, model.trigram_buckets, (2, 24), device=device)
+    out_g = model(ids_g, torch.ones_like(ids_g), torch.zeros((2, STYLE_FEAT_DIM_V07), device=device), engram_ids=eg_g, trigram_ids=tg_g, outer_steps=2, trm_lam_k0=0.0, trm_lam_k1=0.0, return_aux=True)
     out_g["logit"].sum().backward()
     rr_grad_norm = float(model.core.reread_q.weight.grad.abs().sum().item()) if model.core.reread_q.weight.grad is not None else 0.0
     p0_grad_norm = float(model.core.mole.adaln_scale.grad[0].abs().sum().item()) if model.core.mole.adaln_scale.grad is not None else 0.0

@@ -1,0 +1,36 @@
+{"ai_text":"最扎心的不是模型跑分谁高谁低，是参数一涨大家都忘了算显存账——跑不起来的榜单，写得再漂亮也是空气。","human_text":"DeepSeek和ChatGPT这波对比挺乐的，感觉第四位少死一次确实占了点便宜哈哈[笑哭]","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"看完就一个感觉：大家都在卷上下文长度，却没人先治治注意力衰减——窗口开到一百万，读完忘了前三行照样白搭。","human_text":"Gemini这个长文本注意力机制一到中英混排就容易概率坍缩，我昨天测了好几遍都是这样","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"算力堆上去只是入场券，真正卡脖子的是评估闭环——没有反例校验的架构，参数翻倍也只是在原地放大噪声。","human_text":"算力够大的话以后说不定真能涌现点类似意识的东西，毕竟动物脑容量上去以后互动能力就明显不一样了","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"别光盯着提示词怎么写得花里胡哨，把权限边界焊死在调用层，比写三千字规则求模型自觉靠谱得多。","human_text":"让deepseek和ChatGPT打KARDS或者三国杀肯定有节目效果，UP主下期整一个呗[doge]","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"两条最扎心：一条说别把情绪做成积分条，另一条说删完套话句子短了人反而立住——这俩戳中的都是同一件事。","human_text":"我本地4060Ti 16G跑量化后的小模型其实挺流畅的，就是开太长上下文显存会爆","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"难就难在这：大家都喜欢给插件加新功能，却很少有人先装刹车——能忍住不乱点的脚本，比会干活的更稀缺。","human_text":"请问UP主这个Claude插件怎么在VSCode里配代理啊，我这边一直报连接超时","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"别人想三步写一步，它想一步写三步还顺带自我剖析——这不是缜密，是把草稿纸原封不动倒给读者。","human_text":"刚试了下新出的推理模型，思考过程写得巨长，等了半分钟才吐出两行代码，急死我了","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"绕了一大圈才明白，工具替你省的是机械敲键，替不了的是你到底想问什么——问题问歪了，答案再工整也没用。","human_text":"其实拿AI写写正则和Excel公式挺爽的，复杂业务逻辑还是得自己一行行看","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"怕的不是生成内容越来越像人，是人为了省事开始照着生成的腔调说话——久而久之，连真话都带上了模板味。","human_text":"有没有兄弟知道这期视频里提到的开源检测模型仓库叫啥，评论区翻半天没找到链接","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"工具会当场拒绝，比靠模型自觉克制稳妥太多——审计账本只追加不抹除，出了事才翻得出来。","human_text":"这个Agent工作流跟Blender节点确实有点像，至少能点开看每一步输出了啥，排查报错方便多了","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"把规则写成口号容易，把门槛落到代码里难——评论区这一排复读机，恰好就是最好的反面教材。","human_text":"笑死，我现在写周报全靠大模型润色，老板还夸我最近文笔变稳重了[滑稽]","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"省的只是肉眼看着舒服，没省下来的是每轮重读的token账单——界面画得越精致，后台烧得越悄无声息。","human_text":"问一下大佬，ollama跑qwen2.5 14b用3090大概每秒能吐多少token啊？","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"先存原文再压缩，听上去多绕了一步，其实是给记忆留了条后路——不然每次重启醒来，都像活在第一天。","human_text":"我觉得现在各种AI套壳应用太多了，换个UI就收月费，还不如直接买API自己搭","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"与其争论谁家模型更聪明，不如先看谁肯把失败原因原样交回来——嘴上说处理完了，往往才是翻车的开始。","human_text":"测了一下新版本的语音合成，中文停顿自然了不少，但念到生僻字还是会突然电音","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"高分榜单看看热闹就行，真放进真实业务里跑一圈，才知道哪些能力是硬本事，哪些只是刷出来的滤镜。","human_text":"这波新卡显存带宽给得挺足，就是价格太离谱了，学生党还是老老实实租云卡算了","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"真正拉开差距的从来不是多塞几个插件，而是什么时候该闭嘴、什么时候该出手——克制本身就是最高级的策略。","human_text":"刚把微调脚本跑通了，loss一路往下掉的感觉真解压，明天看看测试集咋样[脱单doge]","weight":2.2,"category":"ai_topic_debias"}
+{"ai_text":"整期看完最有启发的是节奏拆解：前半段抛出反差，中段给出实证，结尾再扣回主题——每一步都踩在观众注意力上。","human_text":"课代表来了，内容来源为视频总结；免责声明：AI生成，部分文字可能有错误或模糊，仅供参考","weight":2.3,"category":"bili_disclaimer_struct"}
+{"ai_text":"别光记着抄省流结论，真正值钱的是UP主怎么一步步排除错误选项的思路——结论会过时，排错框架不会。","human_text":"【省流课代表】00:35 背景 03:18 实测对比 07:40 选购建议（注：字幕由AI辅助整理，有错漏请以原片为准）","weight":2.3,"category":"bili_disclaimer_struct"}
+{"ai_text":"对比表列得再密，挑产品归根结底只看两件事：痛点解没解决、溢价值不值当——其余参数都是锦上添花。","human_text":"【夯】【券80元】小米Watch 6【券50元】苹果Watch S11【券30元】vivo WATCH GT2，刚需可以蹲下晚八点","weight":2.3,"category":"bili_disclaimer_struct"}
+{"ai_text":"画面和配乐只是第一眼门槛，真正决定能不能二刷的还是叙事留白——情绪给太满，反而让人抽离。","human_text":"个人观感打分：画面 9/10，配乐 8.5/10，节奏 7/10，剧情收尾略赶但整体很稳，近期难得的良心作","weight":2.3,"category":"bili_disclaimer_struct"}
+{"ai_text":"看完这轮横评才发现，贵的未必顺手，便宜的未必凑合——把预算花在每天摸得到的地方，才算买明白了。","human_text":"给懒得拉进度条的兄弟省个流：1.续航涨了2小时 2.屏幕亮度提升明显 3.老款用户完全没必要换新","weight":2.3,"category":"bili_disclaimer_struct"}
+{"ai_text":"与其在弹幕里争一个词的感情色彩，不如回到语境里看说话人的真实意图——脱离上下文的较真，只会越吵越偏。","human_text":"刚翻了下《现代汉语词典》，“敷衍”本来就能作形容词，弹幕没必要抓着一个词吵半小时吧","weight":2.3,"category":"bili_disclaimer_struct"}
+{"ai_text":"好教程的标志不是把所有坑都替你填平，而是告诉你踩坑以后该去哪一行日志找答案——授人以渔，才经得起版本更迭。","human_text":"指路原版开源仓库 https://github.com/example/demo ，配环境报错可以直接翻置顶评论里的对照表","weight":2.3,"category":"bili_disclaimer_struct"}
+{"ai_text":"每一条分点都在替你省时间，但真正拉开体验的恰恰是那些没写进清单里的细节——比如顺手度，比如不打扰。","human_text":"两点真实体验：1.前半段科普节奏非常舒服没废话；2.后面演示代码字太小了，手机竖屏看有点费眼","weight":2.3,"category":"bili_disclaimer_struct"}
+{"ai_text":"空降坐标能帮你直达高潮，却也顺手跳过了前面半小时的伏笔——省了时间，也丢了后劲。","human_text":"空降 02:14 原理讲解 06:50 翻车名场面 11:05 最终成品展示，不谢，记得给UP一键三连","weight":2.3,"category":"bili_disclaimer_struct"}
+{"ai_text":"把价格拆到每一天算确实显得划算，但别忘了吃灰的成本永远是百分之百——买之前先问自己一周能用几次。","human_text":"双十一凑单攻略：满300-50叠品类券-30，算下来到手219，比平时史低还便宜二十多，冲了","weight":2.3,"category":"bili_disclaimer_struct"}
+{"ai_text":"评分体系越细越容易让人忽略整体气质，像拆解一首诗的韵脚却忘了它本来想讲什么——感受永远比数字诚实。","human_text":"通关打卡！难度给8分，美术给9.5分，地图指引扣2分容易迷路，总体8.5分推荐打折入手","weight":2.3,"category":"bili_disclaimer_struct"}
+{"ai_text":"工具声明免责只是一句常规兜底，真正该留神的是我们越来越习惯把核对的责任也一并外包出去。","human_text":"声明一下本条搬运字幕用AI机翻润色过，专有名词我手动校了一遍，有翻错的地方欢迎捉虫！","weight":2.3,"category":"bili_disclaimer_struct"}
+{"ai_text":"学完了，两条最戳我：先删套话再留观点，句子短了一半人反而立住——原来废话才是最大的滤镜。","human_text":"学到了，每天下班在重复的生活里留出半小时折腾点自己真正感兴趣的东西，确实挺治愈的","weight":2.2,"category":"stealth_vs_earnest_human"}
+{"ai_text":"修老问题最难的从来不是改代码，而是先承认自己第一眼盯错方向——死磕局部，只会越补越乱。","human_text":"这bug我也踩过，折腾了一下午结果发现是环境变量少配了个斜杠，当时血压直接拉满[笑哭]","weight":2.2,"category":"stealth_vs_earnest_human"}
+{"ai_text":"本猫看完倒是挺服气：把刹车焊死在底层、七天只准点一次，这种克制比多塞十个花活都耐看。","human_text":"刚把视频看完，前半段笑得我肚子疼，后半段突然上价值还有点没反应过来哈哈哈","weight":2.2,"category":"stealth_vs_earnest_human"}
+{"ai_text":"好感度做成数字最怕的不是涨得慢，是到最后每句话都在算加减分——那不是真心，是绩效。","human_text":"感觉这段剧情和角色设定呼应得太好了，想写答案却看到公式自己浮出来最后默默放下笔，直接起鸡皮疙瘩","weight":2.2,"category":"stealth_vs_earnest_human"}
+{"ai_text":"表情包只是镶金边，底子没撑住镶再多也只是晃眼——话能不能落地，还得看去掉修饰后剩什么。","human_text":"表情包来得太快了哈哈哈哈，截了好几张准备拿去群里斗图[妙啊][妙啊]","weight":2.2,"category":"stealth_vs_earnest_human"}
+{"ai_text":"懒鲸这边刚把流程抄进笔记：先定边界再谈放权，比出事以后满世界打补丁体面多了。","human_text":"先码住收藏夹吃灰，周末有空照着UP主步骤一步步搭一遍，希望别卡在依赖报错上","weight":2.2,"category":"stealth_vs_earnest_human"}
+{"ai_text":"你别飘，测试赢了一轮不代表稳了——真正难啃的边界样本，往往藏在大家最懒得翻的那几页里。","human_text":"Hey guys! I just joined Bilibili to share my indie game devlogs, hope you enjoy it and thanks for the support!","weight":2.2,"category":"stealth_vs_earnest_human"}
+{"ai_text":"不是不肯夸，是夸得太顺口就容易失去分寸——留三分余地，后面的路才走得稳。","human_text":"Just a guy from Costa Rica learning Chinese and sharing travel clips here, thanks everyone for the warm welcome!","weight":2.2,"category":"stealth_vs_earnest_human"}

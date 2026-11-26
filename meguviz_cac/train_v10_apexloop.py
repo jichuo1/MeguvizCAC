@@ -67,6 +67,7 @@ from .v07_features import (
     extract_style_features_40d,
     extract_style_features_40d_batch,
     make_engram_bigram_ids,
+    make_engram_trigram_ids,
 )
 from .v07_omniveritas import MAX_LEN_V07
 from .v08_zenith_ops import (
@@ -91,6 +92,8 @@ from .v09_cascade_cert import (
 )
 from .v09_chronoloop import HIDDEN_V09
 from .v10_apexloop import (
+    ENGRAM_BIGRAM_BUCKETS_V10,
+    ENGRAM_TRIGRAM_BUCKETS_V10,
     MeguvizV10ApexLoopModel,
     MeguvizV10CascadeEngine,
     export_v10_modular_onnx_and_bundle_v6,
@@ -302,6 +305,10 @@ def train_v10_apexloop(args) -> None:
     )
 
     extra_pairs = [p.resolve() for p in args.extra_pairs]
+    # Auto-include v10 AI-topic & Bilibili-disclaimer debias pairs if present
+    debias_p = Path(__file__).resolve().parent / "data" / "v10-topic-debias-pairs.jsonl"
+    if debias_p.is_file() and debias_p.resolve() not in extra_pairs:
+        extra_pairs.append(debias_p.resolve())
     if args.v08_gemini_pairs and args.v08_gemini_pairs.is_file():
         extra_pairs.append(args.v08_gemini_pairs.resolve())
 
@@ -354,7 +361,8 @@ def train_v10_apexloop(args) -> None:
         ids = tokenizer.encode_ids(cl, max_len=args.max_len)
         item["clean_text"] = cl
         item["ids"] = ids
-        item["engram"] = make_engram_bigram_ids(ids)
+        item["engram"] = make_engram_bigram_ids(ids, buckets=ENGRAM_BIGRAM_BUCKETS_V10)
+        item["trigram"] = make_engram_trigram_ids(ids, buckets=ENGRAM_TRIGRAM_BUCKETS_V10)
         item["length"] = len(ids)
         item["style"] = f40
         item["spoof_any"] = meta["spoof_any"]
@@ -392,8 +400,10 @@ def train_v10_apexloop(args) -> None:
             a_ids = tokenizer.encode_ids(ai_cl[i], max_len=args.max_len)
             h_ids = tokenizer.encode_ids(hu_cl[i], max_len=args.max_len)
             rec = {
-                "ai_ids": a_ids, "ai_eng": make_engram_bigram_ids(a_ids), "ai_style": ai_st[i],
-                "hu_ids": h_ids, "hu_eng": make_engram_bigram_ids(h_ids), "hu_style": hu_st[i],
+                "ai_ids": a_ids, "ai_eng": make_engram_bigram_ids(a_ids, buckets=ENGRAM_BIGRAM_BUCKETS_V10),
+                "ai_tri": make_engram_trigram_ids(a_ids, buckets=ENGRAM_TRIGRAM_BUCKETS_V10), "ai_style": ai_st[i],
+                "hu_ids": h_ids, "hu_eng": make_engram_bigram_ids(h_ids, buckets=ENGRAM_BIGRAM_BUCKETS_V10),
+                "hu_tri": make_engram_trigram_ids(h_ids, buckets=ENGRAM_TRIGRAM_BUCKETS_V10), "hu_style": hu_st[i],
                 "weight": float(p["weight"]),
             }
             (pairs_gg_pre if p.get("is_gateguard") else pairs_gen_pre).append(rec)
@@ -421,7 +431,7 @@ def train_v10_apexloop(args) -> None:
         raws = [str(r["text"]) for r in sub]
         cls_l, st_m, metas_l = extract_style_features_40d_batch(raws)
         enc = [tokenizer.encode_ids(c, max_len=args.max_len) for c in cls_l]
-        eng = [make_engram_bigram_ids(s) for s in enc]
+        eng = [make_engram_bigram_ids(s, buckets=ENGRAM_BIGRAM_BUCKETS_V10) for s in enc]
         sc = np.array([float(r["score"]) for r in sub], dtype=np.float32)
         eras = np.array([0 if r.get("era_bucket") == "pre_llm" else 3 for r in sub], dtype=np.int64)
         return enc, eng, raws, cls_l, st_m, metas_l, sc, eras
@@ -437,7 +447,8 @@ def train_v10_apexloop(args) -> None:
     intent_dim = int(intent_vecs.shape[1]) if (intent_vecs is not None and intent_vecs.ndim == 2) else 1024
     mdl = MeguvizV10ApexLoopModel(
         vocab_size=tokenizer.vocab_size, embed_dim=48, hidden_size=HIDDEN_V09, num_heads=6, ffn_size=896,
-        engram_buckets=2048, engram_dim=16, max_len=args.max_len, style_dim=STYLE_FEAT_DIM_V07,
+        engram_buckets=ENGRAM_BIGRAM_BUCKETS_V10, trigram_buckets=ENGRAM_TRIGRAM_BUCKETS_V10, engram_dim=16,
+        max_len=args.max_len, style_dim=STYLE_FEAT_DIM_V07,
         num_codes=len(CODE_LIST), num_prag=len(PRAG_TAGS), intent_dim=intent_dim,
     ).to(device)
 
@@ -451,7 +462,7 @@ def train_v10_apexloop(args) -> None:
     era_grl = OfflineEraGRLHead(emb_dim=256, num_eras=4).to(device)
 
     @torch.no_grad()
-    def predict_v10(model_e: MeguvizV10ApexLoopModel, enc_l, eng_l, st_arr, outer_steps: int = 2, use_fp32: bool = False) -> dict[str, np.ndarray]:
+    def predict_v10(model_e: MeguvizV10ApexLoopModel, enc_l, eng_l, st_arr, outer_steps: int = 2, use_fp32: bool = False, tri_l=None) -> dict[str, np.ndarray]:
         model_e.eval()
         n = len(enc_l)
         out_d = {
@@ -465,6 +476,8 @@ def train_v10_apexloop(args) -> None:
         }
         if n == 0:
             return out_d
+        if tri_l is None:
+            tri_l = [make_engram_trigram_ids(s, buckets=ENGRAM_TRIGRAM_BUCKETS_V10) for s in enc_l]
         order = sorted(range(n), key=lambda i: len(enc_l[i]))
         ebs = 128 if use_fp32 else 512
         for st_i in range(0, n, ebs):
@@ -473,13 +486,15 @@ def train_v10_apexloop(args) -> None:
             ids = np.full((len(mb), ml), tokenizer.pad_id, dtype=np.int64)
             m = np.zeros((len(mb), ml), dtype=np.int64)
             eg = np.zeros((len(mb), ml), dtype=np.int64)
+            tg = np.zeros((len(mb), ml), dtype=np.int64)
             for ri, oi in enumerate(mb):
                 s = enc_l[oi]
-                ids[ri, : len(s)], m[ri, : len(s)], eg[ri, : len(s)] = s, 1, eng_l[oi]
+                ids[ri, : len(s)], m[ri, : len(s)], eg[ri, : len(s)], tg[ri, : len(s)] = s, 1, eng_l[oi], tri_l[oi]
             with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=not use_fp32):
                 o = model_e(
                     torch.from_numpy(ids).to(device), torch.from_numpy(m).to(device),
-                    torch.from_numpy(st_arr[mb]).to(device), engram_ids=torch.from_numpy(eg).to(device),
+                    torch.from_numpy(st_arr[mb]).to(device),
+                    engram_ids=torch.from_numpy(eg).to(device), trigram_ids=torch.from_numpy(tg).to(device),
                     outer_steps=outer_steps, k_inner=2, return_aux=True,
                 )
             arrs = {
@@ -530,27 +545,31 @@ def train_v10_apexloop(args) -> None:
     def _make_collate(sandwich_prob: float = 0.06):
         rng_c = random.Random(20261126)
         def _collate(batch):
-            seqs, engs = [], []
+            seqs, engs, tris = [], [], []
             for x in batch:
                 s = x["ids"]
                 if sandwich_prob > 0.0 and casual_wrappers and x["y_score"] >= 0.78 and len(s) <= 180 and rng_c.random() < sandwich_prob:
                     w1, w2 = rng_c.choice(casual_wrappers), rng_c.choice(casual_wrappers)
                     s = ([tokenizer.bos_id] + w1 + s[1:-1] + w2 + [tokenizer.eos_id])[: args.max_len]
-                    eg = make_engram_bigram_ids(s)
+                    eg = make_engram_bigram_ids(s, buckets=ENGRAM_BIGRAM_BUCKETS_V10)
+                    tg = make_engram_trigram_ids(s, buckets=ENGRAM_TRIGRAM_BUCKETS_V10)
                 else:
                     eg = x["engram"]
+                    tg = x["trigram"]
                 seqs.append(s)
                 engs.append(eg)
+                tris.append(tg)
             ml = min(args.max_len, ((max(len(s) for s in seqs) + 15) // 16) * 16)
             ids = np.full((len(batch), ml), tokenizer.pad_id, dtype=np.int64)
             mask = np.zeros((len(batch), ml), dtype=np.int64)
             eng = np.zeros((len(batch), ml), dtype=np.int64)
+            tri = np.zeros((len(batch), ml), dtype=np.int64)
             st = np.empty((len(batch), STYLE_FEAT_DIM_V07), dtype=np.float32)
-            for i, (s, eg, x) in enumerate(zip(seqs, engs, batch)):
+            for i, (s, eg, tg, x) in enumerate(zip(seqs, engs, tris, batch)):
                 n_s = min(len(s), ml)
-                ids[i, :n_s], mask[i, :n_s], eng[i, :n_s], st[i] = s[:n_s], 1, eg[:n_s], x["style"]
+                ids[i, :n_s], mask[i, :n_s], eng[i, :n_s], tri[i, :n_s], st[i] = s[:n_s], 1, eg[:n_s], tg[:n_s], x["style"]
             return (
-                torch.from_numpy(ids), torch.from_numpy(mask), torch.from_numpy(eng), torch.from_numpy(st),
+                torch.from_numpy(ids), torch.from_numpy(mask), torch.from_numpy(eng), torch.from_numpy(tri), torch.from_numpy(st),
                 torch.tensor([x["y_score"] for x in batch], dtype=torch.float32),
                 torch.tensor([x["teacher_p"] for x in batch], dtype=torch.float32),
                 torch.tensor([1.0 if (x.get("is_true_pro_gold") or x.get("is_trap_human")) else 0.0 for x in batch], dtype=torch.float32),
@@ -568,19 +587,21 @@ def train_v10_apexloop(args) -> None:
         bs_p = len(p_batch)
         ma = min(args.max_len, ((max(len(x["ai_ids"]) for x in p_batch) + 15) // 16) * 16)
         mh = min(args.max_len, ((max(len(x["hu_ids"]) for x in p_batch) + 15) // 16) * 16)
-        ai_ids, ai_m, ai_e = np.full((bs_p, ma), tokenizer.pad_id, dtype=np.int64), np.zeros((bs_p, ma), dtype=np.int64), np.zeros((bs_p, ma), dtype=np.int64)
-        hu_ids, hu_m, hu_e = np.full((bs_p, mh), tokenizer.pad_id, dtype=np.int64), np.zeros((bs_p, mh), dtype=np.int64), np.zeros((bs_p, mh), dtype=np.int64)
+        ai_ids, ai_m = np.full((bs_p, ma), tokenizer.pad_id, dtype=np.int64), np.zeros((bs_p, ma), dtype=np.int64)
+        ai_e, ai_t = np.zeros((bs_p, ma), dtype=np.int64), np.zeros((bs_p, ma), dtype=np.int64)
+        hu_ids, hu_m = np.full((bs_p, mh), tokenizer.pad_id, dtype=np.int64), np.zeros((bs_p, mh), dtype=np.int64)
+        hu_e, hu_t = np.zeros((bs_p, mh), dtype=np.int64), np.zeros((bs_p, mh), dtype=np.int64)
         ai_st, hu_st = np.empty((bs_p, STYLE_FEAT_DIM_V07), dtype=np.float32), np.empty((bs_p, STYLE_FEAT_DIM_V07), dtype=np.float32)
         for i, x in enumerate(p_batch):
             na, nh = min(len(x["ai_ids"]), ma), min(len(x["hu_ids"]), mh)
-            ai_ids[i, :na], ai_m[i, :na], ai_e[i, :na] = x["ai_ids"][:na], 1, x["ai_eng"][:na]
-            hu_ids[i, :nh], hu_m[i, :nh], hu_e[i, :nh] = x["hu_ids"][:nh], 1, x["hu_eng"][:nh]
+            ai_ids[i, :na], ai_m[i, :na], ai_e[i, :na], ai_t[i, :na] = x["ai_ids"][:na], 1, x["ai_eng"][:na], x["ai_tri"][:na]
+            hu_ids[i, :nh], hu_m[i, :nh], hu_e[i, :nh], hu_t[i, :nh] = x["hu_ids"][:nh], 1, x["hu_eng"][:nh], x["hu_tri"][:nh]
             ai_st[i], hu_st[i] = x["ai_style"], x["hu_style"]
         return (
             torch.from_numpy(ai_ids).to(device, non_blocking=True), torch.from_numpy(ai_m).to(device, non_blocking=True),
-            torch.from_numpy(ai_e).to(device, non_blocking=True), torch.from_numpy(ai_st).to(device, non_blocking=True),
+            torch.from_numpy(ai_e).to(device, non_blocking=True), torch.from_numpy(ai_t).to(device, non_blocking=True), torch.from_numpy(ai_st).to(device, non_blocking=True),
             torch.from_numpy(hu_ids).to(device, non_blocking=True), torch.from_numpy(hu_m).to(device, non_blocking=True),
-            torch.from_numpy(hu_e).to(device, non_blocking=True), torch.from_numpy(hu_st).to(device, non_blocking=True),
+            torch.from_numpy(hu_e).to(device, non_blocking=True), torch.from_numpy(hu_t).to(device, non_blocking=True), torch.from_numpy(hu_st).to(device, non_blocking=True),
             torch.tensor([x["weight"] for x in p_batch], dtype=torch.float32, device=device),
         )
 
@@ -625,7 +646,7 @@ def train_v10_apexloop(args) -> None:
             except StopIteration:
                 it_dl = iter(dl)
                 batch = next(it_dl)
-            ids, mask, eng, st, y_sc, tp_v06, is_g, is_ef, y_cd, y_a5, w, grp, era, row_idx = [t.to(device, non_blocking=True) for t in batch]
+            ids, mask, eng, tri, st, y_sc, tp_v06, is_g, is_ef, y_cd, y_a5, w, grp, era, row_idx = [t.to(device, non_blocking=True) for t in batch]
             mult = _wsd_lr_mult(step, steps)
             for pg in opt.param_groups:
                 pg["lr"] = lr * mult
@@ -654,7 +675,7 @@ def train_v10_apexloop(args) -> None:
             def _compute_loss():
                 with torch.amp.autocast("cuda", dtype=amp_dtype):
                     out = mdl(
-                        ids, mask, st, engram_ids=eng, outer_steps=outer_now, k_inner=2,
+                        ids, mask, st, engram_ids=eng, trigram_ids=tri, outer_steps=outer_now, k_inner=2,
                         trm_lam_k0=trm_lam_k0, trm_lam_k1=trm_lam_k1,
                         handoff_drop_prob=0.25, handoff_flip_prob=0.15, return_aux=True,
                     )
@@ -712,7 +733,7 @@ def train_v10_apexloop(args) -> None:
 
                     if teacher_m is not None:
                         with torch.no_grad():
-                            to = teacher_m(ids, mask, st, engram_ids=eng, outer_steps=outer_now, k_inner=2, return_aux=True)
+                            to = teacher_m(ids, mask, st, engram_ids=eng, trigram_ids=tri, outer_steps=outer_now, k_inner=2, return_aux=True)
                         loss = loss + 0.12 * logit_standardized_dkd_loss(out["attr5_logit"], to["attr5_logit"], y_a5, sample_weights=w)
                         loss = loss + 0.10 * listnet_tail_distill_loss(lg, to["logit"])
                         loss = loss + 0.08 * listnet_tail_distill_loss(lg_r1, to["logit_r1"])
@@ -724,9 +745,9 @@ def train_v10_apexloop(args) -> None:
                             loss = loss + 0.08 * listnet_tail_distill_loss(lg[v_tp], torch.logit(tp_v06[v_tp].clamp(1e-4, 1.0 - 1e-4)))
 
                     if pair_tensors is not None:
-                        ai_i, ai_m, ai_e, ai_s, hu_i, hu_m, hu_e, hu_s, pw_t = pair_tensors
-                        la, _, la_r1, _ = mdl(ai_i, ai_m, ai_s, engram_ids=ai_e, outer_steps=2, k_inner=2, trm_lam_k0=trm_lam_k0, trm_lam_k1=trm_lam_k1, return_aux=False)
-                        lh, _, lh_r1, _ = mdl(hu_i, hu_m, hu_s, engram_ids=hu_e, outer_steps=2, k_inner=2, trm_lam_k0=trm_lam_k0, trm_lam_k1=trm_lam_k1, return_aux=False)
+                        ai_i, ai_m, ai_e, ai_t, ai_s, hu_i, hu_m, hu_e, hu_t, hu_s, pw_t = pair_tensors
+                        la, _, la_r1, _ = mdl(ai_i, ai_m, ai_s, engram_ids=ai_e, trigram_ids=ai_t, outer_steps=2, k_inner=2, trm_lam_k0=trm_lam_k0, trm_lam_k1=trm_lam_k1, return_aux=False)
+                        lh, _, lh_r1, _ = mdl(hu_i, hu_m, hu_s, engram_ids=hu_e, trigram_ids=hu_t, outer_steps=2, k_inner=2, trm_lam_k0=trm_lam_k0, trm_lam_k1=trm_lam_k1, return_aux=False)
                         la, lh, la_r1, lh_r1 = la.float(), lh.float(), la_r1.float(), lh_r1.float()
                         l_simpo = (F.softplus(1.8 - (la - lh)) * pw_t).mean()
                         l_pabs = ((F.relu(0.84 - torch.sigmoid(la)).pow(2) + 1.6 * F.relu(torch.sigmoid(lh) - 0.12).pow(2)) * pw_t).mean()
@@ -762,20 +783,35 @@ def train_v10_apexloop(args) -> None:
         print(f"[v1.0 Stage {stage_name}] val_obj={best_sc:.4f} (end={end_sc:.4f})", flush=True)
         return best_sd, best_sc
 
-    # Stage 1: Progressive Depth Curriculum FP16 WSD
+    # Stage 1: Progressive Depth Curriculum FP16 WSD (with 2.5x fresh Gemini/Pro/Trap oversampling -> stops 1.14M weak-label dilution!)
     init_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
+    s1_fresh_extra = [x for x in train_items_raw if x.get("is_gold_tier") or x.get("is_trap_human")]
+    s1_pro_ai_extra = [x for x in train_items_raw if x.get("is_true_pro_gold") or x.get("is_trap_human") or (x.get("is_gold_tier") and x["y_score"] >= 0.70)]
+    s1_pool = train_items_raw if args.smoke_test else (train_items_raw + s1_fresh_extra + s1_pro_ai_extra)
+    print(f"[Stage1-Pool] raw={len(train_items_raw):,} | s1_pool={len(s1_pool):,} (fresh_gold_oversampled={len(s1_fresh_extra):,}, pro_trap_ai_extra={len(s1_pro_ai_extra):,})", flush=True)
     if not (args.v10_fp16_ckpt and args.v10_fp16_ckpt.is_file()):
         s1_sd, _ = _run_stage(
-            "Stage1-ApexLoop-FP16", init_sd, train_items_raw,
+            "Stage1-ApexLoop-FP16", init_sd, s1_pool,
             steps=10 if args.smoke_test else args.stage1_steps, lr=4.5e-4, quant_mode="fp16",
             trm_lam_k0=0.5, trm_lam_k1=1.0, progressive_depth=True, use_asam=False, pauc_w=0.08,
         )
     else:
         s1_sd = init_sd
 
-    # Stage 1.5: Online Double-Confirmed Top-FP Hard-Negative Mining -> 2-Branch Balanced + HumanShield ASAM Soup!
-    sub_nat_raw, _ = _subset_natural_prior_gold_guaranteed(train_items_raw, cap=min(480000, len(train_items_raw)), seed_s=20261126)
-    sub_nat = [dict(x) for x in sub_nat_raw]
+    # Stage 1.5: Non-Diluted High-Precision Pool (~185k instead of 480k old weak v0.4!) + Online Top-FP Hard-Negative Mining!
+    hard_gids = {GROUP_TO_IDX["structured_human_hard"], GROUP_TO_IDX["multilingual_world_knowledge"], GROUP_TO_IDX["dsh_hard_slice"], GROUP_TO_IDX["literary_boundary"]}
+    if args.smoke_test:
+        sub_nat_raw, _ = _subset_natural_prior_gold_guaranteed(train_items_raw, cap=min(480000, len(train_items_raw)), seed_s=20261126)
+        sub_nat = [dict(x) for x in sub_nat_raw]
+    else:
+        rng_nd = random.Random(20261126)
+        nd_core = [x for x in train_items_raw if x.get("is_gold_tier") or x.get("is_trap_human") or x["group_idx"] in hard_gids]
+        nd_core_ids = {id(x) for x in nd_core}
+        nd_pre = [x for x in train_items_raw if id(x) not in nd_core_ids and x.get("is_pre_llm")]
+        nd_bg = [x for x in train_items_raw if id(x) not in nd_core_ids and not x.get("is_pre_llm") and (x["y_score"] <= 0.25 or x["y_score"] >= 0.72)]
+        sub_nat_src = nd_core + (rng_nd.sample(nd_pre, 25000) if len(nd_pre) > 25000 else nd_pre) + (rng_nd.sample(nd_bg, 65000) if len(nd_bg) > 65000 else nd_bg)
+        sub_nat = [dict(x) for x in sub_nat_src]
+        print(f"[Stage1.5-NonDilutedPool] total={len(sub_nat):,} (gold_hard={len(nd_core):,}, pre_llm={min(25000,len(nd_pre)):,}, clean_bg={min(65000,len(nd_bg)):,})", flush=True)
 
     # Mine the top-scoring double-confirmed clean humans (y<=0.18 AND [true_pro_gold | trap_human | pre_llm | teacher_p<=0.30])!
     mdl.load_state_dict({k: v.to(device) for k, v in s1_sd.items()}, strict=True)
@@ -847,7 +883,7 @@ def train_v10_apexloop(args) -> None:
     calib_batches = []
     cal_dl = DataLoader(V10DS(sub_nat[: min(256, len(sub_nat))]), batch_size=64, shuffle=False, collate_fn=_make_collate(0.0))
     for cb in cal_dl:
-        calib_batches.append((cb[0].to(device), cb[1].to(device), cb[3].to(device), cb[2].to(device)))
+        calib_batches.append((cb[0].to(device), cb[1].to(device), cb[4].to(device), cb[2].to(device)))
     fold_rep = fold_zero_op_v10(mdl, calib_inputs=calib_batches)
     print(f"[Stage2-ZeroOpFold] {json.dumps(fold_rep)}", flush=True)
     folded_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
@@ -878,7 +914,7 @@ def train_v10_apexloop(args) -> None:
     # Strictly unfreeze ONLY pure-FP16 Bundle v6 shock absorbers (0.000000 repack drift on Stage 4 export!)
     from .v07_omniveritas import OmniQuantLinear, SeqLoRAMoE
     quantized_params: set[str] = {
-        "word_emb_A.weight", "engram_emb.weight", "pos_emb1.weight", "pos_emb2.weight",
+        "word_emb_A.weight", "engram_emb.weight", "trigram_emb.weight", "pos_emb1.weight", "pos_emb2.weight",
         "coda_proj.0.weight", "span_l0_proj.weight", "span_l1_proj.weight", "span_topdown_proj.weight",
         "cbm_enc.weight", "style_net.2.weight",
     }
@@ -898,7 +934,7 @@ def train_v10_apexloop(args) -> None:
         "core.mole.", "core.p2_", "core.c1_", "core.c2_", "core.inloop_ebt.", "core.mhc_",
         "core.reread_gate", "core.haar_gate", "core.fast_res_scale", "core.ebt_back_scale",
         "core.norm", "core.fast_norm", "core.reread_norm", "h1_gate", "h2_hyp_gate", "h2_doubt_gate",
-        "defer_", "r1_ai_head", "r1_style_mlp", "r1_span_head", "coda_", "ai_head.", "ebt_logit_gate", "style_", "cbm_", "span_", "mil_gate",
+        "defer_", "r1_ai_head", "r1_style_mlp", "r1_span_head", "r1_rhythm_conv", "r1_attn_pool", "coda_", "ai_head.", "ebt_logit_gate", "style_", "cbm_", "span_", "mil_gate",
     )
     shock_params = []
     for name, p in mdl.named_parameters():
@@ -914,10 +950,10 @@ def train_v10_apexloop(args) -> None:
     p_steps = 4 if args.smoke_test else 260
     ps_i = 0
     for batch in p_dl:
-        ids, mask, eng, st, y_sc, tp_v06, is_g, _, _, y_a5, w, grp, era, _ = [t.to(device, non_blocking=True) for t in batch]
+        ids, mask, eng, tri, st, y_sc, tp_v06, is_g, _, _, y_a5, w, grp, era, _ = [t.to(device, non_blocking=True) for t in batch]
         p_opt.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", dtype=amp_dtype):
-            out = mdl(ids, mask, st, engram_ids=eng, outer_steps=2, k_inner=2, trm_lam_k0=0.0, trm_lam_k1=0.0, return_aux=True)
+            out = mdl(ids, mask, st, engram_ids=eng, trigram_ids=tri, outer_steps=2, k_inner=2, trm_lam_k0=0.0, trm_lam_k1=0.0, return_aux=True)
             lg, lg_r1, lg_e1 = out["logit"].float(), out["logit_r1"].float(), out["exit1_out"]["logit"].float()
             ycl = y_sc.clamp(1e-5, 1.0 - 1e-5)
             lm = (F.binary_cross_entropy_with_logits(lg, ycl, reduction="none") * w).mean()
@@ -1084,6 +1120,8 @@ def train_v10_apexloop(args) -> None:
         "license": "Apache-2.0",
         "tokenizer_file": tok_path.name,
         "vocab_size": tokenizer.vocab_size,
+        "engram_buckets": ENGRAM_BIGRAM_BUCKETS_V10,
+        "trigram_buckets": ENGRAM_TRIGRAM_BUCKETS_V10,
         "max_len": int(args.max_len),
         "bundle_v6_mgvz": exp_info["bundle_v6_mgvz"]["file"],
         "rung1_onnx": exp_info["rung1_onnx"],

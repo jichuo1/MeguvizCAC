@@ -327,6 +327,18 @@ def make_engram_bigram_ids(token_ids: list[int], buckets: int = 2048) -> list[in
     return out
 
 
+def make_engram_trigram_ids(token_ids: list[int], buckets: int = 4096) -> list[int]:
+    """Deterministic O(1) Tensorized Engram trigram hash IDs (captures 3-token Chinese stealth-AI cadence)."""
+    n = len(token_ids)
+    out = [0] * n
+    p2, p1 = 0, 0
+    for i, tid in enumerate(token_ids):
+        h = ((p2 * 2246822519) ^ (p1 * 1315423911) ^ (tid * 2654435761)) & 0xFFFFFFFF
+        out[i] = (h % (buckets - 1)) + 1
+        p2, p1 = p1, tid
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 3. Tail-Preserving Strictly Increasing Spline-Temp Calibration (0 Top Ties!)
 # ---------------------------------------------------------------------------

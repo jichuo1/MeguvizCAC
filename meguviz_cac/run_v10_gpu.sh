@@ -39,6 +39,7 @@ fi
 
 EXTRA_ARGS=()
 for pf in \
+  "$REPO_DIR/meguviz_cac/data/v10-topic-debias-pairs.jsonl" \
   "$DATA_DIR/stage2/stage2-literary-pairs.jsonl" \
   "$DATA_DIR/stage2/qwen38_27b_twins.jsonl" \
   "$DATA_DIR/v04-qwen38-twins.jsonl" \
