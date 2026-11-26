@@ -114,8 +114,8 @@ class DynamicPiKEGroupSamplerV11:
 
     def __init__(self, init_weights: dict[str, float] | None = None):
         default_w = {
-            "t0_ai": 0.34, "t1_ai": 0.35, "t2_mid": 0.03, "ai_protect": 0.04,
-            "dual_gold": 0.09, "uot_pseudo": 0.10, "hard_neg": 0.05,
+            "t0_ai": 0.38, "t1_ai": 0.32, "t2_mid": 0.02, "ai_protect": 0.04,
+            "dual_gold": 0.10, "uot_pseudo": 0.09, "hard_neg": 0.05,
         }
         w_d = init_weights or default_w
         self.w = np.array([float(w_d[k]) for k in self.POOL_NAMES], dtype=np.float64)
@@ -408,7 +408,8 @@ def build_v11_param_groups(model: MeguvizV11OmniGuardModel, stage: str = "1b") -
             groups["trunk"].append(p)
 
     if stage == "1a":
-        lr_map = {"new_heads": 1.5e-3, "new_rows": 1.0e-3, "core_new": 4.0e-4, "long": 1.0e-3, "style_l0": 1.0e-3, "old_router": 0.0, "half_trunk": 0.0, "trunk": 0.0}
+        # Freeze core_new in 1a so MoLE routing never drifts before full AI loss + KD unfreeze in 1b!
+        lr_map = {"new_heads": 1.5e-3, "new_rows": 8.0e-4, "core_new": 0.0, "long": 1.0e-3, "style_l0": 6.0e-4, "old_router": 0.0, "half_trunk": 0.0, "trunk": 0.0}
     elif stage == "1.5":
         lr_map = {"new_heads": 2.0e-4, "new_rows": 1.5e-4, "core_new": 1.0e-4, "long": 2.0e-4, "style_l0": 6.0e-5, "old_router": 1.5e-5, "half_trunk": 2.0e-5, "trunk": 4.0e-5}
     else:  # stage 1b
@@ -845,20 +846,60 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
         txts_t = [x["raw_text"] for x in train_raw[: (512 if args.smoke_test else 200000)]]
         tokenizer = BiliPickyBPETokenizer.train_from_texts(txts_t, tok_path, vocab_size=2048 if args.smoke_test else BPE_VOCAB_SIZE_V07)
 
-    # 3. Apply Epistemic Refinery (`T0..T3`: drop T3, soften T2 x0.30) + `5x8` Length x Domain IPW
+    # 3. Hydrate exact original `score_source` + true Gemini override provenance (never rely on v06 broad is_gold_tier!)
+    #    then apply 4-Tier Epistemic Refinery (`T0..T3`: purge ~45k+ poisoned qwen38/multi_teacher False-AI rows!) + IPW
+    orig_src_by_sid: dict[str, str] = {}
+    with (gzip.open(args.data.resolve(), "rt", encoding="utf-8") if args.data.suffix == ".gz" else args.data.resolve().open("r", encoding="utf-8")) as f_src:
+        for line in f_src:
+            if not line.strip():
+                continue
+            r_s = json.loads(line)
+            if r_s.get("split", "train") == "train":
+                sid_s = str(r_s.get("sample_id", r_s.get("id", "")))
+                if sid_s:
+                    orig_src_by_sid[sid_s] = str(r_s.get("score_source") or "")
+
+    gem_pro_sids: set[str] = set()
+    gem_flash_sids: set[str] = set()
+    if args.v08_gemini_gold and args.v08_gemini_gold.is_file():
+        op_g = gzip.open(args.v08_gemini_gold, "rt", encoding="utf-8") if args.v08_gemini_gold.suffix == ".gz" else args.v08_gemini_gold.open("r", encoding="utf-8")
+        with op_g as f_g:
+            for line in f_g:
+                if not line.strip():
+                    continue
+                r_g = json.loads(line)
+                if r_g.get("split", "train") != "train":
+                    continue
+                sid_g = str(r_g.get("sample_id", r_g.get("id", "")))
+                src_g = str(r_g.get("score_source", "")).lower()
+                if "pro" in src_g:
+                    gem_pro_sids.add(sid_g)
+                else:
+                    gem_flash_sids.add(sid_g)
+
     refined_items: list[dict[str, Any]] = []
     t3_dropped = 0
+    tier_counts: Counter = Counter()
     for it in train_raw:
+        sid_it = str(it.get("sample_id", ""))
+        src_it = orig_src_by_sid.get(sid_it, str(it.get("score_source", "")))
+        if not src_it and it.get("is_pre_llm"):
+            src_it = "pre_llm_human_prior"
+        it["score_source"] = src_it
+        is_gem_pro = sid_it in gem_pro_sids
+        is_gem_any = is_gem_pro or (sid_it in gem_flash_sids)
         tier, tw, _ = classify_epistemic_tier(
             score=float(it["y_score"]) * 100.0,
-            score_source=str(it.get("score_source", "")),
-            overridden_by_gemini=bool(it.get("is_gold_tier")),
-            gemini_is_pro=bool(it.get("is_true_pro_gold")),
+            score_source=src_it,
+            overridden_by_gemini=is_gem_any,
+            gemini_is_pro=is_gem_pro,
         )
+        tier_counts[tier] += 1
         if tier == "T3_QUARANTINE" or tw <= 0.0:
             t3_dropped += 1
             continue
         it["epistemic_tier"] = tier
+        it["is_true_pro_gold"] = bool(tier == "T0_DIAMOND_GOLD")
         it["weight"] = float(it["weight"]) * float(tw)
         it["y_promo"] = -1.0
         it["has_promo"] = 0.0
@@ -869,7 +910,7 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
     ipw_w = compute_joint_length_domain_ipw([{"text": x["raw_text"], "y_score": x["y_score"]} for x in refined_items])
     for it, iw in zip(refined_items, ipw_w):
         it["weight"] = float(it["weight"]) * float(iw)
-    print(f"[Stage0-Refinery] kept={len(refined_items):,} | T3_quarantined={t3_dropped:,}", flush=True)
+    print(f"[Stage0-Refinery] kept={len(refined_items):,} | T3_quarantined={t3_dropped:,} | tiers={dict(tier_counts)}", flush=True)
 
     # 4. Ingest Wave-1 (5,880) + Wave-2 (4,410) + optional Wave-2.5 + UOT (123+55+80k) + P10-3 2k k-NN + CC Split Guard!
     pt_map = {"none": 0, "coupon_commerce": 1, "self_promo_funnel": 2, "soft_shill": 3, "tool_boilerplate": 4}
@@ -1018,6 +1059,13 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
             t2_pool.append(it)
         else:
             t1_pool.append(it)
+
+    print(
+        f"[Stage0-AIPools] t0={len(t0_pool):,} (ai%={100*np.mean([x['y_score']>=0.7 for x in t0_pool]) if t0_pool else 0:.1f}%) | "
+        f"t1={len(t1_pool):,} (ai%={100*np.mean([x['y_score']>=0.7 for x in t1_pool]) if t1_pool else 0:.1f}%) | "
+        f"t2={len(t2_pool):,} | protect={len(protect_pool):,} | legacy_pairs={len(legacy_pairs):,}",
+        flush=True,
+    )
 
     # Build Online 12-Archetype LongMix Synthesizer from verified clean T0/T1 anchors
     hu_clean = [x["clean_text"] for x in (t0_pool + t1_pool) if x["y_score"] <= 0.15 and 40 <= len(x["clean_text"]) <= 220][:4000]
@@ -1296,7 +1344,7 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
                 out_m["long_pr_auroc"] = float(roc_auc_score(ypr_a, pr_a))
         return out_m
 
-    # 7. Stage 1a: Frozen-Trunk Warmup + Steps 0..600 P1.2 `40->56` Bridge Distill!
+    # 7. Stage 1a: Frozen-Trunk Warmup + Full-Stage P1.2 `40->56` Bridge Distill + R1 AI Retention Anchor!
     s1a_steps = 4 if args.smoke_test else int(args.s1a_steps)
     pg_1a = build_v11_param_groups(mdl, stage="1a")
     opt_1a = torch.optim.AdamW(pg_1a, betas=(0.9, 0.95))
@@ -1308,22 +1356,27 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
         opt_1a.zero_grad(set_to_none=True)
         b_it = _sample_short_batch(min(bs, 256 if args.smoke_test else bs), pike.w)
         b_ids, b_m, b_e, b_t, b_s56, y_ai, y_pr, has_pr, sub4_i, w_b, a5_b, is_t0, is_res, l_pc, grp, era = _collate_items(b_it)
+        b_s40 = _get_s40_batch(b_it)
         with torch.amp.autocast("cuda", dtype=amp_dtype):
             out = mdl(b_ids, b_m, b_s56, engram_ids=b_e, trigram_ids=b_t, outer_steps=2, bal_frozen=True, return_aux=True)
-            loss = out["logit_promo"].sum() * 0.0
-            if step < (2 if args.smoke_test else 600):
-                b_s40 = _get_s40_batch(b_it)
-                with torch.no_grad():
-                    t_r1s = v10_teacher.r1_style_mlp[0](b_s40)
-                    t_st0 = v10_teacher.style_net[0](b_s40)
-                loss = loss + 2.0 * (F.mse_loss(mdl.r1_style_mlp[0](b_s56), t_r1s) + F.mse_loss(mdl.style_net[0](b_s56), t_st0))
+            with torch.no_grad():
+                t_r1s = v10_teacher.r1_style_mlp[0](b_s40)
+                t_st0 = v10_teacher.style_net[0](b_s40)
+                to_1a = v10_teacher(b_ids, b_m, b_s40, engram_ids=b_e, trigram_ids=b_t, outer_steps=2, return_aux=True)
+            # Keep 40->56 bridge distillation + R1 AI logit retention active across ALL Stage 1a steps -> ZERO AI drift!
+            loss = 2.0 * (F.mse_loss(mdl.r1_style_mlp[0](b_s56), t_r1s) + F.mse_loss(mdl.style_net[0](b_s56), t_st0))
+            loss = loss + 1.5 * (
+                F.mse_loss(out["logit"].float(), to_1a["logit"].float())
+                + 0.8 * F.mse_loss(out["logit_r1"].float(), to_1a["logit_r1"].float())
+            )
+            # Full-batch EBT6 partial-label CE (so E5 stays HIGH on AI samples and NEVER collapses ebt_margin!)
+            loss = loss + 0.10 * compute_ebt6_partial_label_ce(out["ebt_energies"], y_ai, y_pr, has_pr, a5_b)
+            loss = loss + compute_dual_axis_ebt_margin_loss(out["ebt_margin"], out["ebt_promo_margin"], y_ai, y_pr, has_pr)
             if (has_pr > 0.5).any():
                 pm = has_pr > 0.5
                 loss = loss + (F.binary_cross_entropy_with_logits(out["logit_promo"][pm].float(), y_pr[pm].clamp(1e-4, 1 - 1e-4), reduction="none") * w_b[pm]).mean()
                 loss = loss + 0.35 * (F.binary_cross_entropy_with_logits(out["logit_promo_r1"][pm].float(), y_pr[pm].clamp(1e-4, 1 - 1e-4), reduction="none") * w_b[pm]).mean()
                 loss = loss + 0.15 * compute_sub4_masked_loss(out["promo_sub4_logit"], out["logit_promo"], sub4_i, y_pr, has_pr)
-                loss = loss + 0.10 * compute_ebt6_partial_label_ce(out["ebt_energies"], y_ai, y_pr, has_pr, a5_b)
-                loss = loss + compute_dual_axis_ebt_margin_loss(out["ebt_margin"], out["ebt_promo_margin"], y_ai, y_pr, has_pr)
             if step % 4 == 3:
                 cs_b = collate_chronostream_docs(_sample_long_batch(4 if args.smoke_test else 48), tokenizer, max_chunks=3, max_chunk_toks=192)
                 cs_o = mdl.forward_chronostream_batch(
@@ -1337,9 +1390,11 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
         opt_1a.step()
         if not args.smoke_test and (step + 1) % 300 == 0:
             pl_m = _eval_promo_and_long(mdl)
-            print(f"[Stage1a step={step+1}/{s1a_steps}] loss={float(loss.item()):.4f} | promo_auc={pl_m['promo_auroc']:.4f} pr={pl_m['promo_pr_auc']:.4f} | long_ai={pl_m['long_ai_auroc']:.4f} hyb={pl_m['long_hyb_auroc']:.4f} | elapsed={time.monotonic()-t_start:.0f}s", flush=True)
+            ai_m1a = _eval_ai_metrics(mdl)
+            print(f"[Stage1a step={step+1}/{s1a_steps}] loss={float(loss.item()):.4f} | ai_obj={ai_m1a['ai_obj']:.5f} auroc_vg={ai_m1a['auroc_vg']:.4f} | promo_auc={pl_m['promo_auroc']:.4f} pr={pl_m['promo_pr_auc']:.4f} | long_ai={pl_m['long_ai_auroc']:.4f} hyb={pl_m['long_hyb_auroc']:.4f} | elapsed={time.monotonic()-t_start:.0f}s", flush=True)
             mdl.train()
     s1a_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
+    rb_mon.last_pass_sd = {k: v.clone() for k, v in s1a_sd.items()}
     print(f"[Stage1a DONE] steps={s1a_steps} | ai_eval={json.dumps({k: round(v, 5) for k, v in _eval_ai_metrics(mdl).items()})} | dual={json.dumps({k: round(v, 4) for k, v in _eval_promo_and_long(mdl).items()})}", flush=True)
 
     # 8. Shared Stage Runner for Stage 1b, Stage 1.5 ASAM Branches, & Stage 2a/2b QAT!
@@ -1467,8 +1522,9 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
                     l_perp = compute_v11_orthogonality_loss(mdl, lg, y_ai, y_pr, has_pr)
                     l_sp = compute_l2_sp_loss(mdl, r1_anchor_params, wd_sp=0.02) if quant_mode == "fp16" else (lg.sum() * 0.0)
 
-                    # Dual-axis counterfactual minimal pairs every 2nd step
+                    # Dual-axis counterfactual minimal pairs (even steps) + v1.0 AI GateGuard/Debias/Literary legacy_pairs (odd steps!)
                     l_pair = lg.sum() * 0.0
+                    l_ai_pair = lg.sum() * 0.0
                     if dual_pairs_train and step % 2 == 0:
                         pb = rng_tr.sample(dual_pairs_train, min(16 if not args.smoke_test else 4, len(dual_pairs_train)))
                         p_it, o_it = [], []
@@ -1483,7 +1539,28 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
                         oo = mdl(oi, om_, os_, engram_ids=oe, trigram_ids=ot_, outer_steps=1, return_aux=True)
                         ia_t = torch.tensor([1.0 if x.get("promo_is_ai") else 0.0 for x in pb], device=device)
                         l_pair = 0.20 * orthogonal_dual_axis_pair_loss(op["logit"].float(), oo["logit"].float(), op["logit_promo"].float(), oo["logit_promo"].float(), ia_t)
-                    return l_ai + lam_kd * l_kd + l_ebt + l_sp, lam_p * lam_p_mult * l_pr_tot + l_pair + l_perp
+                    elif legacy_pairs and step % 2 == 1:
+                        lpb = rng_tr.sample(legacy_pairs, min(16 if not args.smoke_test else 4, len(legacy_pairs)))
+                        ai_it, hu_it, pw_l = [], [], []
+                        for lp in lpb:
+                            if "_ai_rec" not in lp:
+                                lp["_ai_rec"] = _make_item(str(lp["ai_text"]), 1.0, -1.0, 0.0, "none", 1.0)
+                                lp["_hu_rec"] = _make_item(str(lp["human_text"]), 0.0, -1.0, 0.0, "none", 1.0)
+                            ai_it.append(lp["_ai_rec"])
+                            hu_it.append(lp["_hu_rec"])
+                            pw_l.append(float(lp.get("weight", 1.0)))
+                        ai_i, ai_m, ai_e, ai_t, ai_s, *_ = _collate_items(ai_it)
+                        hu_i, hu_m, hu_e, hu_t, hu_s, *_ = _collate_items(hu_it)
+                        oa = mdl(ai_i, ai_m, ai_s, engram_ids=ai_e, trigram_ids=ai_t, outer_steps=2, return_aux=True)
+                        oh = mdl(hu_i, hu_m, hu_s, engram_ids=hu_e, trigram_ids=hu_t, outer_steps=2, return_aux=True)
+                        la_p, lh_p = oa["logit"].float(), oh["logit"].float()
+                        lar1, lhr1 = oa["logit_r1"].float(), oh["logit_r1"].float()
+                        pw_t = torch.tensor(pw_l, dtype=torch.float32, device=device)
+                        l_simpo = (F.softplus(1.8 - (la_p - lh_p)) * pw_t).mean()
+                        l_pabs = ((F.relu(0.84 - torch.sigmoid(la_p)).pow(2) + 1.6 * F.relu(torch.sigmoid(lh_p) - 0.12).pow(2)) * pw_t).mean()
+                        l_sr1 = (F.softplus(1.4 - (lar1 - lhr1)) * pw_t).mean()
+                        l_ai_pair = 0.18 * (l_simpo + 0.9 * l_pabs + 0.25 * l_sr1)
+                    return l_ai + l_ai_pair + lam_kd * l_kd + l_ebt + l_sp, lam_p * lam_p_mult * l_pr_tot + l_pair + l_perp
 
             opt.zero_grad(set_to_none=True)
             loss_ai_p, loss_pr_p = _loss_fn()
@@ -1520,7 +1597,9 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
             if not args.smoke_test and (step + 1) % 300 == 0:
                 cur_m = _eval_ai_metrics(mdl)
                 pl_m = _eval_promo_and_long(mdl)
-                status_rb = rb_mon.check(cur_m, mdl.state_dict()) if enable_rollback else "N/A"
+                # 600-step grace warmup window before RollbackMonitor counts T-hard strikes!
+                rb_active = enable_rollback and ((step + 1) >= 900)
+                status_rb = rb_mon.check(cur_m, mdl.state_dict()) if rb_active else ("WARMUP" if enable_rollback else "N/A")
                 print(
                     f"[{name} step={step+1}/{steps}] ai_obj={cur_m['ai_obj']:.5f} auroc_vg={cur_m['auroc_vg']:.4f} "
                     f"rp95_vg={cur_m['rp95_vg']:.4f} r1={cur_m['r1_auroc']:.4f} | promo_auc={pl_m['promo_auroc']:.4f} "
@@ -1530,12 +1609,12 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
                 if cur_m["ai_obj"] >= best_m["ai_obj"]:
                     best_m = cur_m
                     best_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
-                if enable_rollback:
+                if rb_active:
                     if status_rb == "T-soft":
                         lam_kd_scale = min(2.0, lam_kd_scale * 1.5); lr_scale_rb *= 0.7; sh_lam_cur *= 0.5
                     elif status_rb == "T-hard" and rb_mon.last_pass_sd is not None:
                         mdl.load_state_dict({k: v.to(device) for k, v in rb_mon.last_pass_sd.items()}, strict=True)
-                        lr_scale_rb *= 0.5; sh_lam_cur = 0.0
+                        lr_scale_rb *= 0.6; sh_lam_cur = 0.0
                     elif status_rb == "T-abort":
                         print(f"[{name}] T-abort triggered -> falling back to last passing checkpoint!", flush=True)
                         break
