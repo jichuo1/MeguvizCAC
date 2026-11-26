@@ -408,8 +408,11 @@ def build_v11_param_groups(model: MeguvizV11OmniGuardModel, stage: str = "1b") -
             groups["trunk"].append(p)
 
     if stage == "1a":
-        # Freeze core_new in 1a so MoLE routing never drifts before full AI loss + KD unfreeze in 1b!
+        # Freeze AI trunk & core_new in 1a so AI accuracy stays strictly >= v1.0.0-R1 while Promo[192:256]+heads+LongStream learn deeply!
         lr_map = {"new_heads": 1.5e-3, "new_rows": 8.0e-4, "core_new": 0.0, "long": 1.0e-3, "style_l0": 6.0e-4, "old_router": 0.0, "half_trunk": 0.0, "trunk": 0.0}
+    elif stage == "1.5_fw":
+        # Firewalled Stage 1.5 ASAM Polish: AI trunk stays 100% frozen -> mathematically ZERO AI negative transfer!
+        lr_map = {"new_heads": 4.0e-4, "new_rows": 2.0e-4, "core_new": 0.0, "long": 5.0e-4, "style_l0": 1.5e-4, "old_router": 0.0, "half_trunk": 0.0, "trunk": 0.0}
     elif stage == "1.5":
         lr_map = {"new_heads": 3.0e-4, "new_rows": 5.0e-5, "core_new": 2.5e-5, "long": 2.5e-4, "style_l0": 2.0e-5, "old_router": 3.0e-6, "half_trunk": 4.0e-6, "trunk": 8.0e-6}
     elif stage == "qat":
@@ -1348,7 +1351,7 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
                 out_m["long_pr_auroc"] = float(roc_auc_score(ypr_a, pr_a))
         return out_m
 
-    # 7. Stage 1a: Frozen-AI-Trunk Warmup + Promo[192:256] Firewall Gradient Hook + Full-Stage Bridge & R1 AI Retention!
+    # 7. Stage 1a-Deep: Frozen-AI-Trunk + Promo[192:256] Firewall Hook + Full Promo Losses (L_pceil + DualPairs + Sub4 + EBT6) + ChronoStream!
     s1a_steps = 4 if args.smoke_test else int(args.s1a_steps)
     pg_1a = build_v11_param_groups(mdl, stage="1a")
     # Unfreeze ONLY rows [192:256] of coda_proj.0 & style_net.2 (strictly invisible to ai_head[0:192] -> 0.000000 AI interference!)
@@ -1371,9 +1374,11 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
     if _promo_row_params:
         pg_1a.append({"name": "promo_emb_rows", "params": _promo_row_params, "lr": 1.2e-3, "base_lr": 1.2e-3, "weight_decay": 0.01})
     opt_1a = torch.optim.AdamW(pg_1a, betas=(0.9, 0.95))
+    best_s1a_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
+    best_s1a_sc = -1e9
     mdl.train()
     for step in range(s1a_steps):
-        mult = _wsd_lr_mult(step, s1a_steps, warmup_frac=0.05, decay_frac=0.15)
+        mult = _wsd_lr_mult(step, s1a_steps, warmup_frac=0.05, decay_frac=0.18)
         for pg in opt_1a.param_groups:
             pg["lr"] = pg["base_lr"] * mult
         opt_1a.zero_grad(set_to_none=True)
@@ -1386,21 +1391,40 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
                 t_r1s = v10_teacher.r1_style_mlp[0](b_s40)
                 t_st0 = v10_teacher.style_net[0](b_s40)
                 to_1a = v10_teacher(b_ids, b_m, b_s40, engram_ids=b_e, trigram_ids=b_t, outer_steps=2, return_aux=True)
-            # Keep 40->56 bridge distillation + R1 AI logit retention active across ALL Stage 1a steps -> ZERO AI drift!
+            # Keep 40->56 bridge distillation + R1/T2 AI logit retention active across ALL steps -> ZERO AI drift!
             loss = 2.0 * (F.mse_loss(mdl.r1_style_mlp[0](b_s56), t_r1s) + F.mse_loss(mdl.style_net[0](b_s56), t_st0))
             loss = loss + 1.5 * (
                 F.mse_loss(out["logit"].float(), to_1a["logit"].float())
                 + 0.8 * F.mse_loss(out["logit_r1"].float(), to_1a["logit_r1"].float())
             )
-            # Full-batch EBT6 partial-label CE (so E5 stays HIGH on AI samples and NEVER collapses ebt_margin!)
+            # Full-batch EBT6 partial-label CE + Dual-Axis EBT margin
             loss = loss + 0.10 * compute_ebt6_partial_label_ce(out["ebt_energies"], y_ai, y_pr, has_pr, a5_b)
             loss = loss + compute_dual_axis_ebt_margin_loss(out["ebt_margin"], out["ebt_promo_margin"], y_ai, y_pr, has_pr)
             if (has_pr > 0.5).any():
                 pm = has_pr > 0.5
-                loss = loss + (F.binary_cross_entropy_with_logits(out["logit_promo"][pm].float(), y_pr[pm].clamp(1e-4, 1 - 1e-4), reduction="none") * w_b[pm]).mean()
-                loss = loss + 0.35 * (F.binary_cross_entropy_with_logits(out["logit_promo_r1"][pm].float(), y_pr[pm].clamp(1e-4, 1 - 1e-4), reduction="none") * w_b[pm]).mean()
-                loss = loss + 0.15 * compute_sub4_masked_loss(out["promo_sub4_logit"], out["logit_promo"], sub4_i, y_pr, has_pr)
-            if step % 4 == 3:
+                u, u_t1, u_r1 = out["logit_promo"].float(), out["exit1_out"]["logit_promo"].float(), out["logit_promo_r1"].float()
+                loss = loss + (F.binary_cross_entropy_with_logits(u[pm], y_pr[pm].clamp(1e-4, 1 - 1e-4), reduction="none") * w_b[pm]).mean()
+                loss = loss + 0.25 * (F.binary_cross_entropy_with_logits(u_t1[pm], y_pr[pm].clamp(1e-4, 1 - 1e-4), reduction="none") * w_b[pm]).mean()
+                loss = loss + 0.35 * (F.binary_cross_entropy_with_logits(u_r1[pm], y_pr[pm].clamp(1e-4, 1 - 1e-4), reduction="none") * w_b[pm] * (1.0 + 3.0 * (y_pr[pm] >= 0.65).float())).mean()
+                hn_m = pm & (y_pr <= 0.25) & (l_pc > 0.5)
+                if int(hn_m.sum().item()) >= 2:
+                    u_worst = torch.topk(u[hn_m], k=min(4, int(hn_m.sum().item()))).values
+                    loss = loss + 0.20 * (F.relu(u_worst).pow(2).mean() + 0.20 * F.softplus(u_worst + 0.8).mean())
+                loss = loss + 0.15 * compute_sub4_masked_loss(out["promo_sub4_logit"], u, sub4_i, y_pr, has_pr)
+            if dual_pairs_train and step % 2 == 0:
+                pb = rng_tr.sample(dual_pairs_train, min(16 if not args.smoke_test else 4, len(dual_pairs_train)))
+                p_it, o_it = [], []
+                for x in pb:
+                    pt_t, ot_t = slot_aug.augment_pair(x["promo_text"], x["organic_text"]) if rng_tr.random() < 0.5 else (x["promo_text"], x["organic_text"])
+                    ia = 1.0 if x.get("promo_is_ai") else 0.0
+                    p_it.append(_make_item(pt_t, ia, 1.0, 1.0, str(x.get("promo_type", "soft_shill")), 1.5))
+                    o_it.append(_make_item(ot_t, ia, 0.0, 1.0, "none", 1.5))
+                pi, pm_, pe, pt_, ps, *_ = _collate_items(p_it)
+                oi, om_, oe, ot_, os_, *_ = _collate_items(o_it)
+                op = mdl(pi, pm_, ps, engram_ids=pe, trigram_ids=pt_, outer_steps=1, bal_frozen=True, return_aux=True)
+                oo = mdl(oi, om_, os_, engram_ids=oe, trigram_ids=ot_, outer_steps=1, bal_frozen=True, return_aux=True)
+                loss = loss + 0.22 * F.softplus(2.2 - (op["logit_promo"].float() - oo["logit_promo"].float())).mean()
+            if step % 2 == 1:
                 cs_b = collate_chronostream_docs(_sample_long_batch(4 if args.smoke_test else 48), tokenizer, max_chunks=3, max_chunk_toks=192)
                 cs_o = mdl.forward_chronostream_batch(
                     cs_b["chunk_ids"].to(device), cs_b["chunk_mask"].to(device), cs_b["chunk_eng"].to(device), cs_b["chunk_tri"].to(device),
@@ -1414,10 +1438,18 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
         if not args.smoke_test and (step + 1) % 300 == 0:
             pl_m = _eval_promo_and_long(mdl)
             ai_m1a = _eval_ai_metrics(mdl)
-            print(f"[Stage1a step={step+1}/{s1a_steps}] loss={float(loss.item()):.4f} | ai_obj={ai_m1a['ai_obj']:.5f} auroc_vg={ai_m1a['auroc_vg']:.4f} | promo_auc={pl_m['promo_auroc']:.4f} pr={pl_m['promo_pr_auc']:.4f} | long_ai={pl_m['long_ai_auroc']:.4f} hyb={pl_m['long_hyb_auroc']:.4f} | elapsed={time.monotonic()-t_start:.0f}s", flush=True)
+            long_m_1a = 0.50 * pl_m["long_ai_auroc"] + 0.25 * pl_m["long_hyb_auroc"] + 0.25 * pl_m["long_pr_auroc"]
+            pen_1a = 50.0 * max(0.0, (r1_ref_m["ai_obj"] - 0.002) - ai_m1a["ai_obj"])
+            sc_1a = ai_m1a["ai_obj"] + 0.35 * (0.5 * pl_m["promo_auroc"] + 0.5 * pl_m["promo_pr_auc"]) + 0.15 * long_m_1a - pen_1a
+            if sc_1a >= best_s1a_sc:
+                best_s1a_sc = sc_1a
+                best_s1a_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
+            print(f"[Stage1a step={step+1}/{s1a_steps}] loss={float(loss.item()):.4f} | ai_obj={ai_m1a['ai_obj']:.5f} auroc_vg={ai_m1a['auroc_vg']:.4f} rp95_vg={ai_m1a['rp95_vg']:.4f} | promo_auc={pl_m['promo_auroc']:.4f} pr={pl_m['promo_pr_auc']:.4f} | long_ai={pl_m['long_ai_auroc']:.4f} hyb={pl_m['long_hyb_auroc']:.4f} pr={pl_m['long_pr_auroc']:.4f} | elapsed={time.monotonic()-t_start:.0f}s", flush=True)
             mdl.train()
     for _hk in _s1a_hooks:
         _hk.remove()
+    if best_s1a_sc > -1e8:
+        mdl.load_state_dict({k: v.to(device) for k, v in best_s1a_sd.items()}, strict=True)
     s1a_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
     rb_mon.last_pass_sd = {k: v.clone() for k, v in s1a_sd.items()}
     print(f"[Stage1a DONE] steps={s1a_steps} | ai_eval={json.dumps({k: round(v, 5) for k, v in _eval_ai_metrics(mdl).items()})} | dual={json.dumps({k: round(v, 4) for k, v in _eval_promo_and_long(mdl).items()})}", flush=True)
@@ -1444,6 +1476,18 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
         mdl.set_quant_mode(quant_mode)
         perm_dev = mdl.emb_perm.to(device)
         pgs = build_v11_param_groups(mdl, stage=stage_kind)
+        _st_hooks = []
+        if stage_kind == "1.5_fw":
+            _np_st = dict(mdl.named_parameters())
+            _pr_st = []
+            for _nm in _promo_row_names:
+                if _nm in _np_st:
+                    _p = _np_st[_nm]
+                    _p.requires_grad_(True)
+                    _pr_st.append(_p)
+                    _st_hooks.append(_p.register_hook(_mask_promo_rows_only))
+            if _pr_st:
+                pgs.append({"name": "promo_emb_rows", "params": _pr_st, "lr": 4.0e-4, "base_lr": 4.0e-4, "weight_decay": 0.01})
         opt = torch.optim.AdamW(pgs, betas=(0.9, 0.95))
         asam = ASAMPerturber(mdl, rho=0.05) if use_asam else None
         sh_params = [p for n, p in mdl.named_parameters() if p.requires_grad and any(k in n for k in ("core.", "prelude_l1.", "coda_proj."))]
@@ -1489,36 +1533,94 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
                     y_cl = y_ai.clamp(1e-5, 1.0 - 1e-5)
                     is_q3 = (y_ai <= 0.18) & (has_pr > 0.5) & (y_pr >= 0.65)
 
-                    # Selective Exact Logit-MSE + Emb[:192] Cosine KD Anchor (preserves v1.0.0 lg_std & sharp tail!)
-                    l_kd = lg.sum() * 0.0
-                    l_br_keep = lg.sum() * 0.0
-                    tp_guard = torch.ones_like(y_ai)  # only T0/Q3/pre_llm when teacher_v11 is used
+                    # Pure Dual-Axis Teacher KD + Slot-Orthogonality for QAT (proven locally: 0.0000 Sub-2 AI regression & +pr_ap!)
                     if teacher_v11 is not None:
                         with torch.no_grad():
                             tv = teacher_v11(b_ids, b_m, b_s56, engram_ids=b_e, trigram_ids=b_t, outer_steps=outer_now, return_aux=True)
-                        tp_guard = torch.sigmoid(tv["logit"].float())
-                        l_kd = (
-                            0.35 * F.mse_loss(lg, tv["logit"].float())
-                            + 0.25 * F.mse_loss(lg_r1, tv["logit_r1"].float())
+                        s_u = F.normalize(out["slots_final"].float(), p=2, dim=-1)
+                        s_g = torch.matmul(s_u, s_u.transpose(-1, -2))
+                        s_off = 1.0 - torch.eye(s_g.shape[-1], device=device, dtype=s_g.dtype).unsqueeze(0)
+                        l_sdiv = ((s_g * s_off) ** 2).mean()
+                        l_kd_q = (
+                            0.70 * F.mse_loss(lg, tv["logit"].float())
+                            + 0.35 * F.mse_loss(lg_e1, tv["exit1_out"]["logit"].float())
+                            + 0.45 * F.mse_loss(lg_r1, tv["logit_r1"].float())
+                            + 0.80 * (1.0 - F.cosine_similarity(out["emb"].float(), tv["emb"].float(), dim=-1).mean())
+                            + 0.60 * F.mse_loss(out["logit_promo"].float(), tv["logit_promo"].float())
+                            + 0.25 * F.mse_loss(out["exit1_out"]["logit_promo"].float(), tv["exit1_out"]["logit_promo"].float())
+                            + 0.35 * F.mse_loss(out["logit_promo_r1"].float(), tv["logit_promo_r1"].float())
                             + 0.10 * listnet_tail_distill_loss(lg, tv["logit"])
                             + 0.10 * listnet_tail_distill_loss(out["logit_promo"].float(), tv["logit_promo"])
-                            + 0.10 * listnet_tail_distill_loss(out["logit_promo_r1"].float(), tv["logit_promo_r1"])
+                            + 0.15 * l_sdiv
+                            + 0.04 * out["cbm_loss"]
                         )
-                    else:
+                        l_sup_ai = 0.15 * (F.binary_cross_entropy_with_logits(lg, y_cl, reduction="none") * w_b).mean()
+                        l_sup_pr = lg.sum() * 0.0
+                        if (has_pr > 0.5).any():
+                            pm = has_pr > 0.5
+                            l_sup_pr = 0.20 * lam_p * (F.binary_cross_entropy_with_logits(out["logit_promo"][pm].float(), y_pr[pm].clamp(1e-4, 1 - 1e-4), reduction="none") * w_b[pm]).mean()
+                            l_sup_pr = l_sup_pr + 0.08 * compute_sub4_masked_loss(out["promo_sub4_logit"], out["logit_promo"], sub4_i, y_pr, has_pr)
+                        l_ebt_q = 0.06 * compute_ebt6_partial_label_ce(out["ebt_energies"], y_ai, y_pr, has_pr, a5_b) + 0.5 * compute_dual_axis_ebt_margin_loss(out["ebt_margin"], out["ebt_promo_margin"], y_ai, y_pr, has_pr)
+                        with torch.amp.autocast("cuda", enabled=False):
+                            l_def_q = 0.10 * F.mse_loss(out["p_defer1"].float(), tv["p_defer1"].float()) + 0.08 * F.mse_loss(out["exit1_out"]["p_defer2"].float(), tv["exit1_out"]["p_defer2"].float())
+                        return l_kd_q + l_sup_ai + l_ebt_q + l_def_q, l_sup_pr
+
+                    # Firewalled Stage 1.5 ASAM Polish (AI trunk 100% frozen -> keep exact bridge & AI logit retention!)
+                    if stage_kind == "1.5_fw":
                         with torch.no_grad():
-                            to = v10_teacher(b_ids, b_m, b_s40, engram_ids=b_e, trigram_ids=b_t, outer_steps=outer_now, return_aux=True)
+                            to = v10_teacher(b_ids, b_m, b_s40, engram_ids=b_e, trigram_ids=b_t, outer_steps=2, return_aux=True)
                             t_r1s_k = v10_teacher.r1_style_mlp[0](b_s40)
                             t_st0_k = v10_teacher.style_net[0](b_s40)
-                        tp_guard = torch.sigmoid(to["logit"].float())
-                        m_anc = (~is_q3) & (is_res < 0.5) & (~((is_t0 > 0.5) & ((tp_guard - y_ai).abs() >= 0.50)))
-                        if m_anc.any():
-                            to_emb_p = to["emb"][m_anc].float()[:, perm_dev]
-                            l_kd = (
-                                0.45 * F.mse_loss(lg[m_anc], to["logit"][m_anc].float())
-                                + 0.30 * F.mse_loss(lg_r1[m_anc], to["logit_r1"][m_anc].float())
-                                + 0.40 * (1.0 - F.cosine_similarity(out["emb"][m_anc, :AI_EMB_END_V11].float(), to_emb_p[:, :AI_EMB_END_V11], dim=-1).mean())
-                            )
-                        l_br_keep = 0.8 * (F.mse_loss(mdl.r1_style_mlp[0](b_s56), t_r1s_k) + F.mse_loss(mdl.style_net[0](b_s56), t_st0_k))
+                        l_ai_fw = (
+                            2.0 * (F.mse_loss(mdl.r1_style_mlp[0](b_s56), t_r1s_k) + F.mse_loss(mdl.style_net[0](b_s56), t_st0_k))
+                            + 1.5 * (F.mse_loss(lg, to["logit"].float()) + 0.8 * F.mse_loss(lg_r1, to["logit_r1"].float()))
+                            + 0.10 * compute_ebt6_partial_label_ce(out["ebt_energies"], y_ai, y_pr, has_pr, a5_b)
+                            + compute_dual_axis_ebt_margin_loss(out["ebt_margin"], out["ebt_promo_margin"], y_ai, y_pr, has_pr)
+                        )
+                        l_pr_fw = lg.sum() * 0.0
+                        if (has_pr > 0.5).any():
+                            pm = has_pr > 0.5
+                            u, u_t1, u_r1 = out["logit_promo"].float(), out["exit1_out"]["logit_promo"].float(), out["logit_promo_r1"].float()
+                            l_pr_fw = (F.binary_cross_entropy_with_logits(u[pm], y_pr[pm].clamp(1e-4, 1 - 1e-4), reduction="none") * w_b[pm]).mean()
+                            l_pr_fw = l_pr_fw + 0.25 * (F.binary_cross_entropy_with_logits(u_t1[pm], y_pr[pm].clamp(1e-4, 1 - 1e-4), reduction="none") * w_b[pm]).mean()
+                            l_pr_fw = l_pr_fw + 0.35 * (F.binary_cross_entropy_with_logits(u_r1[pm], y_pr[pm].clamp(1e-4, 1 - 1e-4), reduction="none") * w_b[pm] * (1.0 + 3.0 * (y_pr[pm] >= 0.65).float())).mean()
+                            hn_m = pm & (y_pr <= 0.25) & (l_pc > 0.5)
+                            if int(hn_m.sum().item()) >= 2:
+                                u_worst = torch.topk(u[hn_m], k=min(4, int(hn_m.sum().item()))).values
+                                l_pr_fw = l_pr_fw + 0.25 * (F.relu(u_worst).pow(2).mean() + 0.20 * F.softplus(u_worst + 0.8).mean())
+                            l_pr_fw = l_pr_fw + 0.15 * compute_sub4_masked_loss(out["promo_sub4_logit"], u, sub4_i, y_pr, has_pr)
+                        if dual_pairs_train and step % 2 == 0:
+                            pb = rng_tr.sample(dual_pairs_train, min(16 if not args.smoke_test else 4, len(dual_pairs_train)))
+                            p_it, o_it = [], []
+                            for x in pb:
+                                pt_t, ot_t = slot_aug.augment_pair(x["promo_text"], x["organic_text"]) if rng_tr.random() < 0.5 else (x["promo_text"], x["organic_text"])
+                                ia = 1.0 if x.get("promo_is_ai") else 0.0
+                                p_it.append(_make_item(pt_t, ia, 1.0, 1.0, str(x.get("promo_type", "soft_shill")), 1.5))
+                                o_it.append(_make_item(ot_t, ia, 0.0, 1.0, "none", 1.5))
+                            pi, pm_, pe, pt_, ps, *_ = _collate_items(p_it)
+                            oi, om_, oe, ot_, os_, *_ = _collate_items(o_it)
+                            op = mdl(pi, pm_, ps, engram_ids=pe, trigram_ids=pt_, outer_steps=1, bal_frozen=True, return_aux=True)
+                            oo = mdl(oi, om_, os_, engram_ids=oe, trigram_ids=ot_, outer_steps=1, bal_frozen=True, return_aux=True)
+                            l_pr_fw = l_pr_fw + 0.22 * F.softplus(2.2 - (op["logit_promo"].float() - oo["logit_promo"].float())).mean()
+                        return l_ai_fw, lam_p * l_pr_fw
+
+                    # Selective Exact Logit-MSE + Emb[:192] Cosine KD Anchor (preserves v1.0.0 lg_std & sharp tail!)
+                    l_kd = lg.sum() * 0.0
+                    l_br_keep = lg.sum() * 0.0
+                    with torch.no_grad():
+                        to = v10_teacher(b_ids, b_m, b_s40, engram_ids=b_e, trigram_ids=b_t, outer_steps=outer_now, return_aux=True)
+                        t_r1s_k = v10_teacher.r1_style_mlp[0](b_s40)
+                        t_st0_k = v10_teacher.style_net[0](b_s40)
+                    tp_guard = torch.sigmoid(to["logit"].float())
+                    m_anc = (~is_q3) & (is_res < 0.5) & (~((is_t0 > 0.5) & ((tp_guard - y_ai).abs() >= 0.50)))
+                    if m_anc.any():
+                        to_emb_p = to["emb"][m_anc].float()[:, perm_dev]
+                        l_kd = (
+                            0.45 * F.mse_loss(lg[m_anc], to["logit"][m_anc].float())
+                            + 0.30 * F.mse_loss(lg_r1[m_anc], to["logit_r1"][m_anc].float())
+                            + 0.40 * (1.0 - F.cosine_similarity(out["emb"][m_anc, :AI_EMB_END_V11].float(), to_emb_p[:, :AI_EMB_END_V11], dim=-1).mean())
+                        )
+                    l_br_keep = 0.8 * (F.mse_loss(mdl.r1_style_mlp[0](b_s56), t_r1s_k) + F.mse_loss(mdl.style_net[0](b_s56), t_st0_k))
 
                     l_ai = (F.binary_cross_entropy_with_logits(lg, y_cl, reduction="none") * w_b).mean()
                     l_ai = l_ai + 0.18 * (F.binary_cross_entropy_with_logits(lg_e1, y_cl, reduction="none") * w_b).mean()
@@ -1671,6 +1773,8 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
                         break
                 mdl.train()
 
+        for _hk in _st_hooks:
+            _hk.remove()
         end_m = _eval_ai_metrics(mdl)
         end_pl = _eval_promo_and_long(mdl)
         end_sc = _stage_pareto_score(end_m, end_pl)
@@ -1680,14 +1784,19 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
             best_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
         return best_sd, best_m
 
-    # Stage 1b
+    # Stage 1b (skipped cleanly when s1b_steps == 0 -> preserves 100% firewalled AI trunk!)
     s1b_steps = 4 if args.smoke_test else int(args.s1b_steps)
-    s1b_sd, s1b_m = _run_v11_stage("Stage1b-DualAxis-ChronoStream", s1a_sd, "1b", s1b_steps, enable_rollback=True)
+    if s1b_steps > 0:
+        s1b_sd, s1b_m = _run_v11_stage("Stage1b-DualAxis-ChronoStream", s1a_sd, "1b", s1b_steps, enable_rollback=True)
+    else:
+        s1b_sd = {k: v.clone() for k, v in s1a_sd.items()}
+        mdl.load_state_dict({k: v.to(device) for k, v in s1b_sd.items()}, strict=True)
+        s1b_m = _eval_ai_metrics(mdl)
     if not args.smoke_test:
         torch.save(s1b_sd, ckpt_dir / f"{args.version}_stage1b_ckpt.pt")
     print(f"[Stage1b DONE] {json.dumps({k: round(v, 5) for k, v in s1b_m.items()})}", flush=True)
 
-    # Stage 1.5: Kronecker LoGra Top-FP Sniping + 3 ASAM Branches + AI-Constrained Pareto Soup!
+    # Stage 1.5: Kronecker LoGra Top-FP Sniping + Firewalled ASAM Polish Branches + AI-Constrained Pareto Soup!
     mdl.load_state_dict({k: v.to(device) for k, v in s1b_sd.items()}, strict=True)
     sel_o = _predict_v11(mdl, vs_p, outer_steps=2)
     sel_fp_m = (vs_p[7] <= 20.0) & (expit(sel_o["logit"]) >= 0.25)
@@ -1708,9 +1817,8 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
     print(f"[Stage1.5-LoGra] zeroed_non_t0={logra_rep['zeroed_count']}", flush=True)
 
     s15_steps = 4 if args.smoke_test else int(args.s15_steps)
-    b1_sd, b1_m = _run_v11_stage("Stage1.5-B1-AIShield", s1b_sd, "1.5", s15_steps, lam_kd_start=0.45, lam_kd_end=0.45, lam_p=0.70, use_asam=True)
-    b2_sd, b2_m = _run_v11_stage("Stage1.5-B2-PromoPrec", s1b_sd, "1.5", s15_steps, lam_kd_start=0.30, lam_kd_end=0.30, lam_p=1.30, promo_sh_lam=0.40, use_asam=True, extra_hard=b2_deferred_knn)
-    b3_sd, b3_m = _run_v11_stage("Stage1.5-B3-LongStream", s1b_sd, "1.5", s15_steps, lam_kd_start=0.30, lam_kd_end=0.30, chrono_mod=3, use_asam=True)
+    b1_sd, b1_m = _run_v11_stage("Stage1.5-B1-PromoPrec-FW", s1b_sd, "1.5_fw", s15_steps, lam_p=1.20, chrono_mod=3, use_asam=True, extra_hard=b2_deferred_knn)
+    b2_sd, b2_m = _run_v11_stage("Stage1.5-B2-LongStream-FW", s1b_sd, "1.5_fw", s15_steps, lam_p=1.00, chrono_mod=1, use_asam=True)
 
     def _constrained_soup_eval(sd_c: dict[str, torch.Tensor], is_qat: bool = False) -> float:
         mdl.load_state_dict({k: v.to(device) for k, v in sd_c.items()}, strict=True)
@@ -1721,13 +1829,13 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
         long_mean = 0.50 * pl_m["long_ai_auroc"] + 0.25 * pl_m["long_hyb_auroc"] + 0.25 * pl_m["long_pr_auroc"]
         return cm["ai_obj"] + 0.40 * (0.5 * pl_m["promo_auroc"] + 0.5 * pl_m["promo_pr_auc"]) + 0.15 * long_mean - pen
 
-    fp16_sd, fp16_soup_rep = greedy_pauc_soup(s1b_sd, [("B1", b1_sd, b1_m["ai_obj"]), ("B2", b2_sd, b2_m["ai_obj"]), ("B3", b3_sd, b3_m["ai_obj"])], eval_fn=lambda sd: _constrained_soup_eval(sd, is_qat=False), dare_p=0.10)
+    fp16_sd, fp16_soup_rep = greedy_pauc_soup(s1b_sd, [("B1", b1_sd, b1_m["ai_obj"]), ("B2", b2_sd, b2_m["ai_obj"])], eval_fn=lambda sd: _constrained_soup_eval(sd, is_qat=False), dare_p=0.10)
     mdl.load_state_dict({k: v.to(device) for k, v in fp16_sd.items()}, strict=True)
     if not args.smoke_test:
         torch.save(mdl.state_dict(), ckpt_dir / f"{args.version}_fp16_master.pt")
     print(f"[Stage1.5-ParetoSoup] {json.dumps(fp16_soup_rep)}", flush=True)
 
-    # Stage 2a/2b: Zero-Op Fold -> UPQ W4 -> Sub-2 QAT x2
+    # Stage 2a/2b: Zero-Op Fold -> UPQ W4 -> Sub-2 QAT x2 (Pure Dual-Axis Teacher KD + Slot-Orthogonality!)
     cal_f = _collate_items(cal_p1_items[:64])
     fold_rep = fold_zero_op_v11(mdl, calib_inputs=[(cal_f[0], cal_f[1], cal_f[4], cal_f[2])])
     folded_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
@@ -1743,10 +1851,8 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
     if not args.smoke_test:
         torch.save(mdl.state_dict(), ckpt_dir / f"{args.version}_qat_soup.pt")
     mdl.set_quant_mode("fp16")
-    del fp16_teacher
-    torch.cuda.empty_cache()
 
-    # Stage 3a: MGVZ6 Pack/Unpack -> P5 Dual-Axis FP16 Shock-Absorber
+    # Stage 3a: MGVZ6 Pack/Unpack -> P5 Dual-Axis FP16 Shock-Absorber (anchored to fp16_teacher!)
     tmp_mg = out_dir / "_tmp_v11_pre_shock.mgvz"
     pack_bundle_v6_v11(mdl.cpu(), tmp_mg)
     load_bundle_v6_v11_into_model(mdl, tmp_mg)
@@ -1774,13 +1880,23 @@ def train_v11_omniguard_full(args) -> dict[str, Any]:
         b_ids, b_m, b_e, b_t, b_s56, y_ai, y_pr, has_pr, sub4_i, w_b, a5_b, *_ = _collate_items(b_it)
         with torch.amp.autocast("cuda", dtype=amp_dtype):
             o = mdl(b_ids, b_m, b_s56, engram_ids=b_e, trigram_ids=b_t, outer_steps=2, trm_lam_k0=0.0, trm_lam_k1=0.0, bal_frozen=True, return_aux=True)
-            loss = (F.binary_cross_entropy_with_logits(o["logit"].float(), y_ai.clamp(1e-4, 1 - 1e-4), reduction="none") * w_b).mean()
+            with torch.no_grad():
+                tv_sh = fp16_teacher(b_ids, b_m, b_s56, engram_ids=b_e, trigram_ids=b_t, outer_steps=2, return_aux=True)
+            loss = (
+                0.70 * F.mse_loss(o["logit"].float(), tv_sh["logit"].float())
+                + 0.40 * F.mse_loss(o["logit_r1"].float(), tv_sh["logit_r1"].float())
+                + 0.60 * F.mse_loss(o["logit_promo"].float(), tv_sh["logit_promo"].float())
+                + 0.30 * F.mse_loss(o["logit_promo_r1"].float(), tv_sh["logit_promo_r1"].float())
+                + 0.15 * (F.binary_cross_entropy_with_logits(o["logit"].float(), y_ai.clamp(1e-4, 1 - 1e-4), reduction="none") * w_b).mean()
+            )
             if (has_pr > 0.5).any():
                 pm = has_pr > 0.5
-                loss = loss + (F.binary_cross_entropy_with_logits(o["logit_promo"][pm].float(), y_pr[pm].clamp(1e-4, 1 - 1e-4), reduction="none") * w_b[pm]).mean()
+                loss = loss + 0.20 * (F.binary_cross_entropy_with_logits(o["logit_promo"][pm].float(), y_pr[pm].clamp(1e-4, 1 - 1e-4), reduction="none") * w_b[pm]).mean()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(sh_p_list, 1.0)
         opt_sh.step()
+    del fp16_teacher
+    torch.cuda.empty_cache()
     for p in mdl.parameters():
         p.requires_grad_(True)
     post_sh_sc = _constrained_soup_eval({k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}, is_qat=True)

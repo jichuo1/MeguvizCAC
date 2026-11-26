@@ -145,11 +145,11 @@ python3 -u -m meguviz_cac.train_v11_omniguard \
   --version "$VERSION" \
   --max-len 256 \
   --batch-size "$BS" \
-  --s1a-steps "${S1A_STEPS_OVERRIDE:-1200}" \
-  --s1b-steps "${S1B_STEPS_OVERRIDE:-3600}" \
-  --s15-steps "${S15_STEPS_OVERRIDE:-1200}" \
+  --s1a-steps "${S1A_STEPS_OVERRIDE:-2400}" \
+  --s1b-steps "${S1B_STEPS_OVERRIDE:-0}" \
+  --s15-steps "${S15_STEPS_OVERRIDE:-600}" \
   --s2a-steps "${S2A_STEPS_OVERRIDE:-600}" \
-  --s2b-steps "${S2B_STEPS_OVERRIDE:-1200}" \
+  --s2b-steps "${S2B_STEPS_OVERRIDE:-1000}" \
   --s3a-steps "${S3A_STEPS_OVERRIDE:-300}" \
   2>&1 | tee "$LOG_TRAIN"
 

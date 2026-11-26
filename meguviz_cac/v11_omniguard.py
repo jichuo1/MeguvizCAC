@@ -1799,9 +1799,9 @@ def export_v11_modular_onnx_and_bundle_v6(
     d_eng = torch.randint(1, mdl_cpu.engram_buckets, (2, 40), dtype=torch.long)
     d_tri = torch.randint(1, mdl_cpu.trigram_buckets, (2, 40), dtype=torch.long)
 
-    # 1. R1 Prefix
+    # 1. R1 Prefix (FP32-Exact unpacked from Sub-2-Bit MGVZ6 -> avoids Dynamic INT8 tail collapse & compresses smaller in ZIP!)
     w1 = _V11Rung1Export(mdl_cpu).eval()
-    r1_fp, r1_i8 = out_dir / "_v11_r1_fp32.onnx", out_dir / "v11_r1_prefix_int8.onnx"
+    r1_fp = out_dir / "v11_r1_prefix_fp32.onnx"
     r1_in_names = ["input_ids", "attention_mask", "style_feats", "engram_ids", "trigram_ids"]
     r1_out_names = ["logit_r1", "logit_promo_r1", "p_defer1", "r1_span_max", "x1_in", "h0_1", "r1_pkt"]
     torch.onnx.export(
@@ -1815,17 +1815,15 @@ def export_v11_modular_onnx_and_bundle_v6(
         },
         **exp_kw,
     )
-    _quant_excluding_sensitive(r1_fp, r1_i8)
     with torch.no_grad():
         o1 = w1(d_ids, d_m, d_st, d_eng, d_tri)
     s1 = ort.InferenceSession(str(r1_fp), providers=["CPUExecutionProvider"])
     ox1 = s1.run(None, dict(zip(r1_in_names, [d_ids.numpy(), d_m.numpy(), d_st.numpy(), d_eng.numpy(), d_tri.numpy()])))
     r1_diff = float(max(np.max(np.abs(o1[0].numpy() - ox1[0])), np.max(np.abs(o1[1].numpy() - ox1[1]))))
-    r1_fp.unlink(missing_ok=True)
 
-    # 2. R2 T1
+    # 2. R2 T1 (FP32-Exact)
     w2 = _V11Rung2T1Export(mdl_cpu).eval()
-    r2_fp, r2_i8 = out_dir / "_v11_r2_fp32.onnx", out_dir / "v11_r2_t1_int8.onnx"
+    r2_fp = out_dir / "v11_r2_t1_fp32.onnx"
     r2_in_names = ["input_ids", "attention_mask", "style_feats", "engram_ids", "trigram_ids", "x1_in", "h0_1", "r1_pkt"]
     r2_out_names = [
         "logit_t1", "logit_promo_t1", "sub4_t1", "emb_t1", "p_defer2", "slot_spread", "ebt_margin_t1", "ebt_grad_t1",
@@ -1847,17 +1845,15 @@ def export_v11_modular_onnx_and_bundle_v6(
         },
         **exp_kw,
     )
-    _quant_excluding_sensitive(r2_fp, r2_i8)
     with torch.no_grad():
         o2 = w2(d_ids, d_m, d_st, d_eng, d_tri, o1[4], o1[5], o1[6])
     s2 = ort.InferenceSession(str(r2_fp), providers=["CPUExecutionProvider"])
     ox2 = s2.run(None, dict(zip(r2_in_names, [d_ids.numpy(), d_m.numpy(), d_st.numpy(), d_eng.numpy(), d_tri.numpy(), o1[4].numpy(), o1[5].numpy(), o1[6].numpy()])))
     r2_diff = float(max(np.max(np.abs(o2[0].numpy() - ox2[0])), np.max(np.abs(o2[1].numpy() - ox2[1]))))
-    r2_fp.unlink(missing_ok=True)
 
-    # 3. R3 Step
+    # 3. R3 Step (FP32-Exact)
     w3 = _V11Rung3StepExport(mdl_cpu, outer_idx=1).eval()
-    r3_fp, r3_i8 = out_dir / "_v11_r3_fp32.onnx", out_dir / "v11_r3_step_int8.onnx"
+    r3_fp = out_dir / "v11_r3_step_fp32.onnx"
     c1_c = (2.0 * torch.sigmoid(o2[0]) - 1.0).abs().unsqueeze(-1)
     d_uds = torch.cat([c1_c, o2[5].unsqueeze(-1), o2[4].unsqueeze(-1), o2[7].unsqueeze(-1)], dim=-1)
     r3_in = (o2[8], o2[9], o2[10], o2[11], o2[12], o2[13], o2[14], o2[15], o2[16], o2[17], d_m, o2[18], o2[19], d_st, d_uds)
@@ -1884,25 +1880,23 @@ def export_v11_modular_onnx_and_bundle_v6(
         },
         **exp_kw,
     )
-    _quant_excluding_sensitive(r3_fp, r3_i8)
     with torch.no_grad():
         o3 = w3(*r3_in)
     s3 = ort.InferenceSession(str(r3_fp), providers=["CPUExecutionProvider"])
     ox3 = s3.run(None, dict(zip(r3_in_names, [t.numpy() for t in r3_in])))
     r3_diff = float(max(np.max(np.abs(o3[0].numpy() - ox3[0])), np.max(np.abs(o3[1].numpy() - ox3[1]))))
-    r3_fp.unlink(missing_ok=True)
 
     # 4. Unquantized DynaSeam ONNX (P5: never INT8-quantized!)
     ds_info = export_dynaseam_onnx_and_verify(mdl_cpu.longstream, out_dir / "v11_dynaseam_fp32.onnx")
 
     return {
         "bundle_v6_mgvz": mgvz_info,
-        "rung1_onnx": r1_i8.name,
-        "rung1_bytes": int(r1_i8.stat().st_size),
-        "rung2_onnx": r2_i8.name,
-        "rung2_bytes": int(r2_i8.stat().st_size),
-        "rung3_onnx": r3_i8.name,
-        "rung3_bytes": int(r3_i8.stat().st_size),
+        "rung1_onnx": r1_fp.name,
+        "rung1_bytes": int(r1_fp.stat().st_size),
+        "rung2_onnx": r2_fp.name,
+        "rung2_bytes": int(r2_fp.stat().st_size),
+        "rung3_onnx": r3_fp.name,
+        "rung3_bytes": int(r3_fp.stat().st_size),
         "dynaseam_onnx": ds_info,
         "r1_fp32_max_diff": round(r1_diff, 7),
         "r2_fp32_max_diff": round(r2_diff, 7),
