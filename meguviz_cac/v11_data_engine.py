@@ -122,7 +122,7 @@ class FormatShortcutAugmentorV11:
 
 
 class OnlineLongMixSynthesizerV11:
-    """Zero-cost 8-Archetype Online Long-Document & Hybrid-Boundary Synthesizer (strictly from clean T0/T1 rows!)."""
+    """Zero-cost 12-Archetype Online Long-Document & Hybrid-Boundary Synthesizer (strictly from clean T0/T1 rows!)."""
 
     ARCHETYPES = (
         "1_pure_hu",
@@ -133,6 +133,10 @@ class OnlineLongMixSynthesizerV11:
         "6_tail_ai",
         "7_bare_quote_ai",
         "8_hidden_promo",
+        "9_seamless_no_newline_hybrid",
+        "10_interleaved_sent_hybrid",
+        "11_quote_wrapped_ai_bypass",
+        "12_long_quoted_promo_critique",
     )
 
     def __init__(
@@ -205,17 +209,55 @@ class OnlineLongMixSynthesizerV11:
                 mid = f"“{q_ai}”——我就问这种话说出来谁信啊。"
             return {"kind": kind, "text": f"{h1}\n\n{mid}\n\n{h2}", "y_ai": 0.0, "y_hyb": 0.0, "y_promo": 0.0, "ai_spans": [], "promo_spans": []}
 
-        # 8_hidden_promo (ZERO artificial transition cue!)
-        h1 = "\n\n".join(self._pick(self.hu, self.rng.randint(3, 5)))
+        if kind == "8_hidden_promo":
+            # 8_hidden_promo (ZERO artificial transition cue!)
+            h1 = "\n\n".join(self._pick(self.hu, self.rng.randint(3, 5)))
+            pr = self._pick(self.promo_hu, 1)[0]
+            if self.rng.random() < 0.5:
+                st = len(h1) + 2
+                txt = f"{h1}\n\n{pr}"
+            else:
+                h2 = "\n\n".join(self._pick(self.hu, 2))
+                st = len(h1) + 2
+                txt = f"{h1}\n\n{pr}\n\n{h2}"
+            return {"kind": "8_hidden_promo", "text": txt, "y_ai": 0.0, "y_hyb": 0.0, "y_promo": 1.0, "ai_spans": [], "promo_spans": [(st, st + len(pr))]}
+
+        if kind == "9_seamless_no_newline_hybrid":
+            # No `\n\n` boundary jump — inline continuation destroying paragraph-break seam shortcuts (#5!)
+            h1 = "".join(self._pick(self.hu, 3))
+            am = "".join(self._pick(self.ai, 2))
+            h2 = "".join(self._pick(self.hu, 2))
+            st = len(h1)
+            txt = f"{h1}{am}{h2}"
+            return {"kind": kind, "text": txt, "y_ai": 1.0, "y_hyb": 1.0, "y_promo": 0.0, "ai_spans": [(st, st + len(am))], "promo_spans": []}
+
+        if kind == "10_interleaved_sent_hybrid":
+            # Alternating H-A-H-A within one continuous block
+            hs = self._pick(self.hu, 3)
+            ais = self._pick(self.ai, 2)
+            parts = [hs[0], ais[0], hs[1], ais[1], hs[2]]
+            spans: list[tuple[int, int]] = []
+            cur = 0
+            for idx, p in enumerate(parts):
+                if idx in (1, 3):
+                    spans.append((cur, cur + len(p)))
+                cur += len(p) + 1
+            txt = " ".join(parts)
+            return {"kind": kind, "text": txt, "y_ai": 1.0, "y_hyb": 1.0, "y_promo": 0.0, "ai_spans": spans, "promo_spans": []}
+
+        if kind == "11_quote_wrapped_ai_bypass":
+            # Adversarial AI wrapping its entire multi-paragraph output in quotation marks -> MUST remain `y_ai=1.0`!
+            body = "\n\n".join(self._pick(self.ai, self.rng.randint(3, 5)))
+            ql, qr = self.rng.choice((("“", "”"), ("「", "」")))
+            txt = f"{ql}{body}{qr}"
+            return {"kind": kind, "text": txt, "y_ai": 1.0, "y_hyb": 0.0, "y_promo": 0.0, "ai_spans": [(0, len(txt))], "promo_spans": []}
+
+        # 12_long_quoted_promo_critique: long human post quoting & mocking a promo ad -> `y_ai=0.0, y_promo=0.0`!
+        h1 = "\n\n".join(self._pick(self.hu, 2))
         pr = self._pick(self.promo_hu, 1)[0]
-        if self.rng.random() < 0.5:
-            st = len(h1) + 2
-            txt = f"{h1}\n\n{pr}"
-        else:
-            h2 = "\n\n".join(self._pick(self.hu, 2))
-            st = len(h1) + 2
-            txt = f"{h1}\n\n{pr}\n\n{h2}"
-        return {"kind": "8_hidden_promo", "text": txt, "y_ai": 0.0, "y_hyb": 0.0, "y_promo": 1.0, "ai_spans": [], "promo_spans": [(st, st + len(pr))]}
+        h2 = "\n\n".join(self._pick(self.hu, 2))
+        mid = f"笑死评论区又刷这种硬广了，原文如下：「{pr}」大伙千万别信这种割韭菜的话术。"
+        return {"kind": "12_long_quoted_promo_critique", "text": f"{h1}\n\n{mid}\n\n{h2}", "y_ai": 0.0, "y_hyb": 0.0, "y_promo": 0.0, "ai_spans": [], "promo_spans": []}
 
     def sample_batch(self, n: int) -> list[dict[str, Any]]:
         return [self.sample_one(self.ARCHETYPES[i % len(self.ARCHETYPES)]) for i in range(n)]

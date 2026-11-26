@@ -36,8 +36,8 @@ class DynaSeamMILAggregatorV11(nn.Module):
 
     def __init__(
         self,
-        chunk_emb_dim: int = 32,
-        hidden: int = 48,
+        chunk_emb_dim: int = 16,
+        hidden: int = 32,
         num_heads: int = 2,
         style_dim: int = STYLE_FEAT_DIM_V11,
         chunk_meta_dim: int = CHUNK_META_DIM_V11,
@@ -86,6 +86,7 @@ class DynaSeamMILAggregatorV11(nn.Module):
         self.attn_promo_v = nn.Linear(hidden, 20)
         self.attn_promo_u = nn.Linear(hidden, 20)
         self.attn_promo_w = nn.Linear(20, 1)
+        self.promo_quote_suppress = nn.Parameter(torch.tensor(-4.0))  # learned softplus penalty for quoted-promo critiques!
 
         # 5. Document-Level Macro-Stylometry Projection (`56-d -> 24-d`)
         self.doc_macro = nn.Sequential(nn.Linear(style_dim, 24), nn.SiLU())
@@ -152,15 +153,27 @@ class DynaSeamMILAggregatorV11(nn.Module):
         h = (h + 0.25 * dw) * m_f.unsqueeze(-1)
         h = (h + self.ffn(self.ffn_norm(h))) * m_f.unsqueeze(-1)
 
-        # Quote-Gated Attention MIL for AI Authorship (penalizes quoted third-party AI snippets!)
-        q_pen = F.softplus(self.quote_suppress) * (chunk_qfrac + 0.80 * chunk_qintro)
+        # Multi-chunk residual gate + Full-Doc Quote-Wrap Anti-Bypass Guard (closes F3 & #5 Quote-Wrap Bypass!):
+        #   - `multi_gate == 0.0` at M==1 guarantees bit-exact identity for ALL short/single-chunk docs (even quoted/promo!)
+        #   - `g_q -> 0` when `quote_ratio >= 0.65` (full-doc quote wrap adversary) so quoting the whole post CANNOT evade AI!
+        #   - `g_q -> 1` when `quote_ratio <= 0.45` (genuine human post quoting a snippet) preserving quote-critique protection!
+        multi_gate = ((m_den - 1.0).clamp(0.0, 1.0)).squeeze(-1)  # (B,)
+        multi_gate_2d = multi_gate.unsqueeze(-1)  # (B, 1)
+        doc_q_ratio = doc_style56[:, 36:37].clamp(0.0, 1.0)  # (B, 1)
+        g_q = torch.sigmoid(12.0 * ((1.0 - doc_q_ratio) - 0.35))  # (B, 1)
+        quote_gate = multi_gate_2d * g_q  # (B, 1)
+
+        # Quote-Gated Attention MIL for AI Authorship (penalizes quoted third-party AI snippets unless full-doc wrapped!)
+        q_pen_raw = F.softplus(self.quote_suppress) * (chunk_qfrac + 0.80 * chunk_qintro)
+        q_pen = quote_gate * q_pen_raw
         a_ai = self.attn_ai_w(torch.tanh(self.attn_ai_v(h)) * torch.sigmoid(self.attn_ai_u(h))).squeeze(-1)
         w_ai = F.softmax((a_ai - q_pen).masked_fill(~m_bool, -1e4), dim=-1)
         mil_ai = (h * w_ai.unsqueeze(-1)).sum(dim=1)  # (B, H)
 
-        # Asymmetric Tail/Localized Gated Attention MIL for Commercial Promo / Soft-Shill
+        # Asymmetric Tail/Localized Gated Attention MIL for Commercial Promo / Soft-Shill (with quoted-promo critique guard!)
+        q_pen_pr = quote_gate * F.softplus(self.promo_quote_suppress) * (chunk_qfrac + 0.80 * chunk_qintro)
         a_pr = self.attn_promo_w(torch.tanh(self.attn_promo_v(h)) * torch.sigmoid(self.attn_promo_u(h))).squeeze(-1)
-        w_pr = F.softmax(a_pr.masked_fill(~m_bool, -1e4), dim=-1)
+        w_pr = F.softmax((a_pr - q_pen_pr).masked_fill(~m_bool, -1e4), dim=-1)
         mil_promo = (h * w_pr.unsqueeze(-1)).sum(dim=1)  # (B, H)
 
         mean_h = (h * m_f.unsqueeze(-1)).sum(dim=1) / m_den
@@ -169,8 +182,9 @@ class DynaSeamMILAggregatorV11(nn.Module):
         seam_mean = seam_scores.sum(dim=-1, keepdim=True) / m_den
         seam_std = torch.sqrt((((seam_scores - seam_mean) ** 2) * m_f).sum(dim=-1, keepdim=True) / m_den + 1e-6)
 
-        # Quote-discounted authorship chunk logit summary
-        q_keep = (1.0 - 0.85 * chunk_qfrac.clamp(0.0, 1.0)) * (1.0 - 0.50 * chunk_qintro)
+        # Quote-discounted authorship chunk logit summary (strictly gated by `multi_gate * g_q`!)
+        q_keep_raw = (1.0 - 0.85 * chunk_qfrac.clamp(0.0, 1.0)) * (1.0 - 0.50 * chunk_qintro)
+        q_keep = 1.0 - quote_gate * (1.0 - q_keep_raw)
         eff_ai = chunk_ai_logit * q_keep
         max_nq_ai = eff_ai.masked_fill(~m_bool, -10.0).amax(dim=-1, keepdim=True)
         mean_nq_ai = (eff_ai * m_f).sum(dim=-1, keepdim=True) / m_den
@@ -182,13 +196,10 @@ class DynaSeamMILAggregatorV11(nn.Module):
         doc_ai_feat = torch.cat([mil_ai, mean_h, std_h, max_seam, seam_std, mean_nq_ai, max_nq_ai, macro_h], dim=-1)
         doc_pr_feat = torch.cat([mil_promo, max_pr_l, mean_pr_l, max_seam, macro_h], dim=-1)
 
-        # Identity-Safe Multi-Chunk Residual Gate:
-        #   - When M == 1 (`m_den == 1.0`), `multi_gate == 0.0` so short/single-chunk docs preserve calibrated base logit!
-        #   - When M >= 2, `multi_gate == 1.0` activates full DynaSeam cross-chunk elevation & quote/copy-pasta suppression!
-        multi_gate = ((m_den - 1.0).clamp(0.0, 1.0)).squeeze(-1)  # (B,)
+        # Identity-Safe Multi-Chunk Residual Gate on BOTH AI and Promo doc heads!
         base_ai_anchor = (0.5 * mean_nq_ai + 0.5 * max_nq_ai).squeeze(-1)
         logit_ai_doc = base_ai_anchor + multi_gate * self.head_ai_delta(doc_ai_feat).squeeze(-1)
-        logit_promo_doc = max_pr_l.squeeze(-1) + self.head_promo_delta(doc_pr_feat).squeeze(-1)
+        logit_promo_doc = max_pr_l.squeeze(-1) + multi_gate * self.head_promo_delta(doc_pr_feat).squeeze(-1)
 
         return {
             "logit_ai_doc": logit_ai_doc,
@@ -350,13 +361,20 @@ def run_v11_longstream_ci() -> dict[str, Any]:
 
     ci: dict[str, Any] = {}
 
-    # V11-F1: Strict Zero-PII invariance (`@username` perturbation diff === 0.000000)
-    t_a = "回复 @用户A_01 : 我觉得 @测试B 说的很客观，这款耳机降噪稳但夏天戴久有点闷。"
-    t_b = "回复 @OtherUser_999 : 我觉得 @RandomHandle 说的很客观，这款耳机降噪稳但夏天戴久有点闷。"
+    # V11-F1: Strict Zero-PII invariance (`@username` + `<CONTACT_ID>` perturbation diff === 0.000000, zero emote CJK-space leak!)
+    t_a = "回复 @用户A_01 : 我觉得 @测试B 说的很客观[doge]交流2群 168688884 助理老师：xhs54199 降噪稳但有点闷。"
+    t_b = "回复 @OtherUser_999 : 我觉得 @RandomHandle 说的很客观[doge]交流2群 999000111 助理老师：abc98765 降噪稳但有点闷。"
     ca, fa, _ = extract_style_features_56d(t_a)
     cb, fb, _ = extract_style_features_56d(t_b)
     pii_diff = float(np.max(np.abs(fa - fb)))
-    ci["V11_F1_zero_pii"] = {"clean_equal": ca == cb, "max_diff": pii_diff, "pass": bool(ca == cb and pii_diff == 0.0)}
+    cjk_sp_clean = float(fa[10])  # `[doge]` between CJK chars must NOT trigger artificial CJK spacing!
+    ci["V11_F1_zero_pii"] = {
+        "clean_equal": ca == cb,
+        "max_diff": pii_diff,
+        "emote_cjk_space": round(cjk_sp_clean, 6),
+        "contact_scrubbed": "<CONTACT_ID>" in ca,
+        "pass": bool(ca == cb and pii_diff == 0.0 and cjk_sp_clean == 0.0 and "<CONTACT_ID>" in ca),
+    }
 
     # V11-F2: Smoothness across 512-char boundary (eliminates v05's 0.3148 cliff!)
     base = ("这款耳机我戴了两周降噪确实稳，但夏天有点闷，建议线下试戴。个人打分画面不错配乐在线剧情略拖沓。" * 14)
@@ -375,25 +393,48 @@ def run_v11_longstream_ci() -> dict[str, Any]:
         "pass": bool(m_cp["rep4_ratio"] > 0.7 and m_cp["emote_cnt"] == 6 and f_os[55] == 0.0 and f_ad[55] == 1.0),
     }
 
-    # V11-L1: M=1 Single-Chunk Identity-Safe Residual Anchor (unquoted M=1 -> logit_ai_doc === chunk_ai_logit!)
-    agg = DynaSeamMILAggregatorV11(chunk_emb_dim=16, hidden=32, num_heads=2).eval()
-    # Perturb head_ai_delta weights aggressively to prove multi_gate === 0.0 blocks ALL interference at M=1!
+    # V11-L1: M=1 Identity-Safe Residual Anchor (EVEN for quoted M=1 AND promo!) + Full-Doc Quote-Wrap Anti-Bypass!
+    agg = DynaSeamMILAggregatorV11().eval()  # tests exact default `(16, 32, 2)` <= 36 KB!
     with torch.no_grad():
         agg.head_ai_delta.weight.fill_(3.0)
         agg.head_ai_delta.bias.fill_(5.0)
+        agg.head_promo_delta.weight.fill_(3.0)
+        agg.head_promo_delta.bias.fill_(5.0)
         cx1 = torch.randn(4, 1, agg.in_dim)
         ai1 = torch.tensor([[-2.3], [0.4], [3.1], [-0.8]], dtype=torch.float32)
-        pr1 = torch.zeros(4, 1)
-        qf1 = torch.zeros(4, 1)
-        qi1 = torch.zeros(4, 1)
+        pr1 = torch.tensor([[2.1], [-1.5], [0.7], [3.3]], dtype=torch.float32)
+        # Include fully quoted M=1 rows (qfrac=1.0, qintro=1.0) to verify F3 fix!
+        qf1 = torch.tensor([[0.0], [1.0], [0.8], [0.0]], dtype=torch.float32)
+        qi1 = torch.tensor([[0.0], [1.0], [1.0], [0.0]], dtype=torch.float32)
         mk1 = torch.ones(4, 1)
         ds1 = torch.randn(4, STYLE_FEAT_DIM_V11)
         o1 = agg(cx1, ai1, pr1, qf1, qi1, mk1, ds1)
-        m1_diff = float((o1["logit_ai_doc"] - ai1.squeeze(-1)).abs().max().item())
-    ci["V11_L1_m1_identity_safe"] = {"m1_max_diff": round(m1_diff, 8), "pass": m1_diff < 1e-6}
+        m1_ai_diff = float((o1["logit_ai_doc"] - ai1.squeeze(-1)).abs().max().item())
+        m1_pr_diff = float((o1["logit_promo_doc"] - pr1.squeeze(-1)).abs().max().item())
+
+        # Full-doc quote-wrap anti-bypass test (M=4, all chunks AI=+4.0 wrapped in quotes -> must NOT collapse!)
+        agg.head_ai_delta.weight.zero_()
+        agg.head_ai_delta.bias.zero_()
+        cx4 = torch.zeros(1, 4, agg.in_dim)
+        ai4 = torch.full((1, 4), 4.0)
+        pr4 = torch.zeros(1, 4)
+        qf4 = torch.full((1, 4), 0.95)
+        qi4 = torch.zeros(1, 4)
+        mk4 = torch.ones(1, 4)
+        ds_wrap = torch.zeros(1, STYLE_FEAT_DIM_V11)
+        ds_wrap[0, 36] = 0.95  # full-doc quote_ratio = 95%
+        o_wrap = agg(cx4, ai4, pr4, qf4, qi4, mk4, ds_wrap)
+        wrap_logit = float(o_wrap["logit_ai_doc"].item())
+
+    ci["V11_L1_m1_identity_and_quotewrap"] = {
+        "m1_ai_max_diff": round(m1_ai_diff, 8),
+        "m1_pr_max_diff": round(m1_pr_diff, 8),
+        "full_quotewrap_ai_logit": round(wrap_logit, 4),
+        "pass": bool(m1_ai_diff < 1e-6 and m1_pr_diff < 1e-6 and wrap_logit > 3.5),
+    }
 
     # V11-L2: Static ONNX opset-17 export + dynamic M in {1, 2, 6, 16} parity + FP16 KB budget
-    agg_clean = DynaSeamMILAggregatorV11(chunk_emb_dim=16, hidden=32, num_heads=2).eval()
+    agg_clean = DynaSeamMILAggregatorV11().eval()
     with tempfile.TemporaryDirectory() as td:
         onnx_res = export_dynaseam_onnx_and_verify(agg_clean, Path(td) / "v11_dynaseam_ci.onnx")
     ci["V11_L2_onnx_and_size"] = onnx_res

@@ -52,13 +52,17 @@ _QUOTE_INTRO_RE = re.compile(
 # Long quote spans (up to 600 chars for multi-sentence quotes inside long posts!)
 _LONG_QUOTE_SPAN_RE = re.compile(r"([「『“\"][^\n」』”\"]{8,600}[」』”\"]|```[\s\S]{12,800}```)")
 
-# Zero-PII pure-text commercial/promo cues (v1.1.0 Dual-Axis)
+# Zero-PII pure-text commercial/promo cues (v1.1.0 Dual-Axis, hardened with PCR-ToxiCN Chinese evasion variants)
+_CONTACT_ID_PII_RE = re.compile(
+    r"((?:加微|加v|vx|v信|薇信|威信|微信|绿泡泡|扣群|q群|qq群?|交流\d*群|粉丝[群裙]|进[群裙]|君羊|小红书|xhs|助理(?:老师)?|微信号|扣扣|🐧|🛰️)\s*[:：号是]?\s*)[A-Za-z0-9_\-]{5,20}",
+    re.I,
+)
 _PROMO_PRICE_RE = re.compile(
-    r"(?:券后|领券|券\d+元|满\d+减\d+|到手价|史低|直降|百亿补贴|国补|秒杀价|折合|实付\d+|神券|优惠券|返佣|蓝链|置顶链接|评论区置顶|凑单|抄作业)"
+    r"(?:券后|领[券劵]|券\d+元|满\d+减\d+|到手价|史低|直降|百亿补贴|国补|秒杀价|折合|实付\d+|神券|优惠[券劵]|返佣|蓝链|蓝色文字|小蓝字|置顶链接|评论区置顶|凑单|抄作业)"
 )
 _PROMO_MULTI_SKU_RE = re.compile(r"(?:[|｜/]\s*(?:券|满|到手|\d+元|华为|小米|索尼|苹果|OPPO|vivo|红米|罗技))")
 _PROMO_CTA_RE = re.compile(
-    r"(?:关注一下|求关注|互关|互粉|点个关注|私信领|私信发|私信我|回复[「“\"].{1,8}[」”\"]|免费领|戳我主页|看我主页|主页置顶|主页橱窗|简介自取|加微|vx|薇信|扣群|粉丝群|进群|公众号|接单|代做|晚八点|手慢无|冲就完了)",
+    r"(?:关注一下|求关注|互关|互粉|点个关注|私信领|私信发|私信我|思信|滴我|回复[「“\"].{1,8}[」”\"]|免费领|戳我主页|看我主页|主页置顶|主页橱窗|简介自取|加微|加v|vx|薇信|威信|绿泡泡|扣群|粉丝[群裙]|进[群裙]|君羊|公[众粽]号|工种号|功重号|\bgzh\b|\bxhs\b|接单|代做|晚八点|手慢无|冲就完了|🛰️|🐧|🍠|<CONTACT_ID>)",
     re.I,
 )
 _PROMO_SHILL_RE = re.compile(
@@ -146,10 +150,12 @@ def extract_style_features_56d(text: str, max_chars: int = 8192) -> tuple[str, n
       - Preserves paragraph breaks (`\\n+`) before collapsing spaces to capture true paragraph burstiness CV.
     """
     clean, meta = canonicalize_zero_pii_v07(text, max_chars=max_chars)
-    # Strip Bilibili emotes only for lexical/burstiness computation (count them separately so emote spam doesn't spoof AI!)
+    # Strict Zero-PII scrubbing of raw QQ/WeChat/group contact IDs (preserves funnel cue token before `<CONTACT_ID>`)
+    clean = _CONTACT_ID_PII_RE.sub(r"\1<CONTACT_ID>", clean)
+    # Strip Bilibili emotes with "" (NOT " " — avoids injecting synthetic CJK intra-word spaces into `_CJK_SPACE_RE`!)
     emotes = _BILI_EMOTE_V11_RE.findall(clean)
     emote_cnt = len(emotes)
-    clean_no_emote = _BILI_EMOTE_V11_RE.sub(" ", clean)
+    clean_no_emote = _BILI_EMOTE_V11_RE.sub("", clean)
 
     # Preserve paragraph structure BEFORE whitespace collapsing!
     paras = [p.strip() for p in re.split(r"\n+", clean_no_emote) if p.strip()]

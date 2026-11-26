@@ -33,15 +33,39 @@ import torch.nn.functional as F
 _ZW_CHARS = ("\u200b", "\u200c", "\u200d", "\u2060")
 _HOMO_LATIN = {"a": "а", "e": "е", "o": "о", "p": "р", "c": "с", "x": "х", "y": "у"}
 _CTA_SPLIT_PAT = re.compile(r"(领券|私信|关注|加微|网盘|闭眼入|闭眼冲|百亿补贴|蓝链|置顶|回购|进群|公众号)")
-# Real-world Bilibili Chinese homophone ad-evasion substitutions discovered in corpus harvest (`工种号`, `蓝色文字`, etc.)
+# Real-world Bilibili PCR-ToxiCN Chinese evasion substitutions (homophones, pinyin initials, emoji cloaking, char-split)
 _ZH_HOMOPHONE_AD_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("公众号", ("工种号", "功重号", "公粽号")),
-    ("微信", ("薇信", "威信", "V信", "绿泡泡")),
-    ("加微", ("加v", "➕微", "加绿泡泡")),
-    ("蓝链", ("蓝色文字", "蓝色字", "小蓝字")),
-    ("私信", ("思信", "滴我", "私聊")),
-    ("网盘", ("网盼", "夸克盘", "度盘")),
-    ("优惠券", ("隐藏福利", "专属优惠", "福利券")),
+    ("公众号", ("工种号", "功重号", "公粽号", "gzh")),
+    ("微信", ("薇信", "威信", "V信", "绿泡泡", "vx", "🛰️")),
+    ("加微", ("加v", "➕微", "加绿泡泡", "加🛰️")),
+    ("蓝链", ("蓝色文字", "蓝色字", "小蓝字", "👇蓝字")),
+    ("私信", ("思信", "滴我", "私聊", "sx")),
+    ("网盘", ("网盼", "夸克盘", "度盘", "wp", "qk盘")),
+    ("优惠券", ("隐藏福利", "专属优惠", "福利劵", "隐藏劵")),
+    ("领券", ("领劵", "拿劵", "薅劵")),
+    ("粉丝群", ("粉丝裙", "交流裙", "粉丝君羊")),
+    ("进群", ("进裙", "进君羊", "加🐧群")),
+    ("小红书", ("🍠", "xhs", "某书")),
+    ("拼多多", ("pdd", "拼夕夕", "并夕夕")),
+    ("淘宝", ("tb", "某宝", "桃宝")),
+    ("京东", ("jd", "东哥家", "某东")),
+    ("置顶", ("评论区👆", "楼顶", "首评")),
+)
+_FANDOM_HYPE_HARD_NEGS: tuple[str, ...] = (
+    "黑神话这美术和配乐直接封神！国产单机真的站起来了，趁周末闭眼冲绝不后悔！",
+    "这季番剧作画质量质感封神，强烈安利给全宿舍一起追，每周蹲更新太爽了！",
+    "UP主这期开源架构拆解太顶了，真良心推荐，比我之前看的一堆水视频强十倍，已一键三连！",
+    "空洞骑士丝之歌要是真发了我直接无脑入首发，老玩家早买早享受不踩雷哈哈！",
+    "这个开源免费字体排版效果亲测好用，没有任何收费套路，强烈建议做PPT的同学都去GitHub下！",
+    "老头环DLC这地图立体设计性价比无敌，几十块钱玩一百多小时真的入股不亏，魂游粉必冲！",
+)
+_HART_FORMAL_TO_CASUAL: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("然而，", ("但是吧，", "不过说实话，")),
+    ("此外，", ("还有就是，", "另外")),
+    ("综上所述，", ("说白了，", "反正总结下来，")),
+    ("总而言之，", ("归根结底说白了，", "讲真，")),
+    ("值得注意的是，", ("有个点要注意，", "其实")),
+    ("不仅如此，", ("而且更绝的是，", "不止这样，")),
 )
 _PRICE_NUM_PAT = re.compile(r"(?<![A-Za-z0-9])([1-9]\d{1,3})(?=(?:元|块|减|\-|折|\s|$|，|。|！))")
 _CODEWORD_PAT = re.compile(r"[「“\"]([0-9A-Za-z\u4e00-\u9fff]{1,6})[」”\"]")
@@ -81,7 +105,15 @@ class AdversarialObfuscationAug:
         s = str(text or "")
         if len(s) < 8:
             return s
-        mode = self.rng.choice(("zw_cta", "space_cta", "zh_homophone", "fullwidth_ascii", "homoglyph_mix", "math_ascii"))
+        # Reallocate 80% budget to attacks that SURVIVE `canonicalize_zero_pii_v07()` (PCR Chinese homophones, emoji/pinyin
+        # cloaking, CTA intra-word spacing) & 20% to canonicalizer-handled Unicode tricks (zw/fullwidth/homoglyph/math)!
+        roll = self.rng.random()
+        if roll < 0.55:
+            mode = "zh_homophone"
+        elif roll < 0.80:
+            mode = "space_cta"
+        else:
+            mode = self.rng.choice(("zw_cta", "fullwidth_ascii", "homoglyph_mix", "math_ascii"))
         if mode == "zh_homophone":
             out_s = s
             changed = False
@@ -91,7 +123,7 @@ class AdversarialObfuscationAug:
                     changed = True
             if changed:
                 return out_s
-            mode = "zw_cta"
+            mode = "space_cta"
         if mode == "zw_cta":
             # Insert zero-width chars inside CTA/promo keywords or random CJK boundaries
             zw = self.rng.choice(_ZW_CHARS)
@@ -201,6 +233,16 @@ class QuadSpliceAug:
             "aug_kind": "negated_hype_hard_neg",
         }
 
+    def make_fandom_hype_hard_neg(self) -> dict[str, Any]:
+        """Generate genuine non-commercial fandom/game/anime/OSS hype (`"闭眼冲/封神/强烈安利"` -> `y_ai=0, y_promo=0`)."""
+        return {
+            "text": self.rng.choice(_FANDOM_HYPE_HARD_NEGS),
+            "y_ai": 0.0,
+            "y_promo": 0.0,
+            "promo_type": "none",
+            "aug_kind": "fandom_hype_hard_neg",
+        }
+
     def make_q2_long_ai_soft_shill(self, pure_ai_paras: list[str], q2_shill_snippet: str) -> dict[str, Any]:
         """Synthesize rare long-form Q2 Dual-High (75% neutral AI discourse + 25% hidden tail AI soft-shill)."""
         body = "\n\n".join(p.strip() for p in pure_ai_paras)
@@ -215,6 +257,33 @@ class QuadSpliceAug:
             "promo_spans": [(st, len(txt))],
             "aug_kind": "q2_long_ai_soft_shill",
         }
+
+
+class LightHumanPostEditAug:
+    """HART Type-2 Light Human Post-Edit Simulator (AI text lightly humanized: em-dash strip, casual connector/tail; preserves `y_ai=1.0`)."""
+
+    def __init__(self, seed: int = 20261126):
+        self.rng = random.Random(seed)
+
+    def light_humanize_ai(self, ai_text: str) -> str:
+        out = str(ai_text or "").strip()
+        if len(out) < 20:
+            return out
+        # 1. Strip telltale em-dash (`——`) -> comma
+        if "——" in out and self.rng.random() < 0.85:
+            out = out.replace("——", "，")
+        # 2. Swap 1 formal AI connector with colloquial Chinese discourse marker
+        for formal, casuals in _HART_FORMAL_TO_CASUAL:
+            if formal in out:
+                out = out.replace(formal, self.rng.choice(casuals), 1)
+                break
+        # 3. Optional light humanizer tail (`[doge]` / `哈哈` / strip final period)
+        r = self.rng.random()
+        if r < 0.35 and out.endswith("。"):
+            out = out[:-1]
+        elif r < 0.70:
+            out = out + self.rng.choice(("[doge]", "[笑哭]", " 哈哈", " 确实"))
+        return out
 
 
 class ContiguousCadenceCropAug:
@@ -272,15 +341,18 @@ def run_v11_augment_ci() -> dict[str, Any]:
     slot = BrandPriceSlotAug(seed=2)
     qs = QuadSpliceAug(seed=3)
     cropper = ContiguousCadenceCropAug(seed=4)
+    hart = LightHumanPostEditAug(seed=5)
 
-    p_ex = "【券后299】京东满300-50，关注公众号回复「666」领网盘资料！"
+    p_ex = "【券后299】京东满300-50，关注公众号回复「666」领网盘资料，进群领券！"
     o_ex = "去年京东卖299今年涨到399，真贵。"
     p2, o2 = slot.augment_pair(p_ex, o_ex)
-    obf_samples = {obf.obfuscate_promo_or_ai(p_ex, intensity=0.8) for _ in range(12)}
+    obf_samples = {obf.obfuscate_promo_or_ai(p_ex, intensity=0.8) for _ in range(16)}
     qpc = qs.make_quoted_promo_critique(p_ex)
     nhc = qs.make_negated_shill_critique()
-    long_ai = "第一句是铺垫背景，说明整个系统设计的初衷与约束。第二句指出真正决定韧性的从来不是纸面参数，而是可追溯的底层边界。第三句总结工程克制的稀缺性。"
+    fhn = qs.make_fandom_hype_hard_neg()
+    long_ai = "第一句是铺垫背景，说明整个系统设计的初衷与约束。然而，真正决定韧性的从来不是纸面参数——而是可追溯的底层边界。综上所述，工程克制最为稀缺。"
     cropped = cropper.crop(long_ai)
+    hart_ai = hart.light_humanize_ai(long_ai)
 
     # Check orthogonal_dual_axis_pair_loss gradient flows cleanly
     ai_p = torch.tensor([-2.0, 2.0], requires_grad=True)
@@ -295,16 +367,19 @@ def run_v11_augment_ci() -> dict[str, Any]:
         loss_bad = float(orthogonal_dual_axis_pair_loss(-ai_p, -ai_o, -pr_p, -pr_o, is_ai).item())
 
     ok = bool(
-        len(obf_samples) >= 3
+        len(obf_samples) >= 4
         and len(p2) >= 10 and len(o2) >= 8
         and qpc["y_ai"] == 0.0 and qpc["y_promo"] == 0.0
         and nhc["y_ai"] == 0.0 and nhc["y_promo"] == 0.0
+        and fhn["y_ai"] == 0.0 and fhn["y_promo"] == 0.0
         and cropped is not None and 32 <= len(cropped) <= 120
+        and hart_ai != long_ai and len(hart_ai) >= 30
         and grad_ok and float(loss.item()) < 0.50 and loss_bad > 4.0
     )
     return {
         "obf_variants": len(obf_samples),
         "cropped_len": len(cropped) if cropped else 0,
+        "hart_changed": hart_ai != long_ai,
         "orth_pair_loss_aligned": round(float(loss.item()), 5),
         "orth_pair_loss_inverted": round(loss_bad, 5),
         "grad_ok": grad_ok,
