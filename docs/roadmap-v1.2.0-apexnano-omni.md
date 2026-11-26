@@ -70,59 +70,93 @@
 
 ---
 
-## 3. `v1.2.0-ApexNano-Omni` 五大技术支柱总体设计
+## 3. 架构决策记录（ADR-v1.2）：去伪存真 —— 回归「高密度稠密底座 + FP16 共享量化残差核 + 显式正交防火墙插槽」
+
+### 3.1 硅片级解剖实证（为什么要退役现役 8 专家软路由 MoLE？）
+直接对现役 `v1.0.0-R1` (`bundle_v6_apexloop.mgvz`) 执行字节、路由熵与在线归零消融，得出三条铁律：
+1. **现役架构本质已是 `99.16%` 稠密**：`DynaCore-MoLE` 仅占 `0.84%` 参数（`51.3K`）与 `2.04%` 字节（`38.6 KB`）；
+2. **软路由退化为近均匀平均**：`test_bili_gold` 上 Tick-0/Tick-1 有效专家数 $\exp(H) = \mathbf{7.96 / 8.00}$ 与 $\mathbf{7.97 / 8.00}$（完全均匀 `8.00`），最大专家概率均值仅 `0.141`，AI vs 人类最大负载差仅 `0.0182`；
+3. **在线归零消融证实真正功臣是 FP16 共享残差核**：
+   - 完整 `Full_DynaCore_MoLE`：`test_bili_gold AUC=0.9506 / R@P95=64.8%` | 盲测 `v2 T1 ROC=0.9474 / PR=0.7166 / R@P95=34.4%`；
+   - **清零全部 8 个路由专家 (`Shared_Dense_NoRouted`)**：`gold AUC=0.9503 / R@P95=64.8%` | `v2 T1 ROC=0.9473 / PR=0.7161 / R@P95=34.4%`（几乎零损！）；
+   - **连同 `core_shared` 清零 (`Pure_Dense_NoMoLE`)**：`gold R@P95` 跌至 `63.0%`（**`-1.8%`**）——证明 **FP16 共享低秩残差核** 在吸收 Sub-2-Bit FFN 量化噪声上有不可替代的硬收益！
+
+### 3.2 `v1.2.0-ApexNano-Omni` 推荐终态总体架构图
 
 ```mermaid
 flowchart TD
     RAW["Zero-PII Raw Comment (UTF-16 / UTF-32)"] --> R0["Session R0: Zero-BPE Char-Hash 1/3-gram DW-CNN (110 KB, 0.05-0.11 ms)"]
     R0 --> G0{"Dual-Axis LTT Gate 0 (p_ai<=tau0 & p_promo<=tau0_p & spoof=0 & len<=160)"}
     G0 -->|"Safe Organic Exit (~70-80%, ~0.10 ms)"| OUT0["Fast Certified Human Output"]
-    G0 -->|"Defer (~20-30%): Pass 32-d Char-MicroRhythm Vec z_char"| BPE["Picky-BPE 12k + PIFE-56d + Engram"]
-    BPE --> R1["Session R1: Matryoshka Prefix + Char-Fusion (FP32/MatMulNBits)"]
+    G0 -->|"Defer (~20-30%): Reuse 32-d Char-MicroRhythm Vec z_char"| BPE["Picky-BPE 12k + PIFE-56d + Engram"]
+    BPE --> R1["Session R1: Dense Matryoshka Prefix + z_char Gate (FP32-Exact / MatMulNBits)"]
     R1 --> G1{"Dual-Axis LTT Gate 1"}
     G1 -->|"Exit (~10-12%)"| OUT1["Rung-1 Calibrated Output"]
-    G1 -->|"Defer (~10-15%)"| R2["Session R2: SymplectLoop T=1 + LogitNorm Head + L0-Haar(z_char)"]
-    R2 --> G2{"Gate 2: EBT Free-Energy + Margin + VA-Width"}
+    G1 -->|"Defer (~10-15%)"| R2["Session R2: Pure-Dense SymplectLoop T=1 + 8KB FP16 Shared Quant-Residual (No Soft-MoLE!) + L0-Haar(z_char)"]
+    R2 --> G2{"Gate 2: 6-Way LogitNorm-EBT + VA-Width"}
     G2 -->|"Resolved (~8-10%)"| OUT2["Calibrated Log-Odds Fusion (T=1 + EBT)"]
-    G2 -->|"Hard Gray-Zone (~2-5%)"| R3["Session R3: Spectrally-Damped T=2/T=3 Re-Read + 6-Way LogitNorm-EBT"]
-    R3 --> OUT3["Final Dual-Axis Verdict (AI x Promo x 6-Way Origin + 4-Sub Promo)"]
+    G2 -->|"Hard Gray-Zone (~2-5%)"| R3["Session R3: Spectrally-Damped Dense T=2/T=3 Re-Read + 6-Way LogitNorm-EBT"]
+    R3 --> SUB["Orthogonal Firewall Embedding (256-d): AI[0:192] | Promo+Governance[192:256] (Zero AI Interference!)"]
+    SUB --> OUT3["Final Dual-Axis Verdict (AI x Promo x 6-Way Origin + 4-Sub Promo + ChronoStream LongDoc)"]
 ```
 
-### 支柱一：Zero-BPE `Rung-0` 微门卫与双轴早退认证（`+110 KB`，速度 `3×–6×`）
-- **双轴联合输出**：`Rung-0` 同步预测 `[logit_ai_r0, logit_promo_r0, logit_defer_r0]` + `32-d` 字符微节律特征 `z_char`；
-- **严格安全门控（LTT Certified）**：仅当 `p_ai_r0 <= τ_ai` **且** `p_promo_r0 <= τ_pr` **且** `spoof_any == 0` **且** `char_len <= 160` 时放行，避免把任何长文三明治或字符混淆漏掉；
-- **教师精馏**：由冻结的 `v1.1.0-R1` 双轴 FP16 Master 用 **Asymmetric FN-Weighted BCE + Top-Tail ListNet + Logit-MSE** 联合蒸馏，并在无泄露 `val_cal_cert` 上做固定序列 LTT 双轴认证。
+### 3.3 `MGVZ7` 精确字节预算表（严守 `<= 2.20 MB` 红线！）
 
-### 支柱二：新一代 ONNX 序列化双轨制（告别 Dynamic INT8！）
-- **桌面 / 高精默认轨**：`MGVZ6 (<= 2.20 MB)` -> 启动时内存零拷贝解包 **`FP32 Exact` 4-Stage ONNX**（或直接分发 `<= 8.9 MB` ZIP），确保 `mae < 0.005`、`R@P95` 100% 满血无损且延迟仅 `1.74 ms`（叠加 Rung-0 后 `< 0.50 ms`）；
-- **低内存 / 浏览器 WebGPU 轨**：`MatMulNBits W4 (blk=128, symmetric, accuracy_level=4)`，ZIP 体积再减 `33%` 至 `~6.1 MB`，完整保留 `31.1%+` `R@P95`；
-- **体积预算守恒**：`Bundle v7 (MGVZ7)` = `v1.1.0` 主干（`~2.04 MB`）+ `Rung-0` INT8（`+0.11 MB`）= **`~2.15 MB <= 2.20 MB`**（仍严守 `2.20 MB` 红线！）。
+通过**退役 `38.6 KB` 弱分化 8/10 专家软路由 MoLE**，仅保留 **`~10 KB` FP16 共享低秩量化残差核**（净回收 **`-28.6 KB`**），并将全部预算精准再分配给高收益模块：
 
-### 支柱三：`LogitNorm` + 循环谱阻尼（彻底根治 G3 高精尾段过自信与 `T=2` 过锐化）
-- **Cosine `LogitNorm` 分类头**：将 `ai_head` 与 `promo_head` 升级为 `logit = (w·z / (||z||_2 + ε)) / τ_norm`（配合可学习标尺 `τ_norm` 约束 logit 范数上限），数学上消除难人类样本被冲到 `p=0.9999` 压死 `R@P95/R@P99` 的过自信病灶；
-- **外环谱阻尼（Loop Spectral Damping）**：对 `T=2, T=3` 的状态增量引入递减阻尼系数 `α_t = α_0 / sqrt(t)` + **跨步单调保序损失 `L_mono(T2 >= T1)`**，确保 `T=2` 在高精尾段与 `PR-AUC` 上严格不低于 `T=1`；
-- **无痛融合出分**：在验证集上学习零过拟合的 3 参数对数几率融合：
-  $$\text{logit}_{\text{final}} = w_1 \cdot \text{logit}_{T1} + w_2 \cdot \text{logit}_{T2} + w_e \cdot \text{margin}_{\text{EBT}}$$
-  （实测仅简单 50/50 融合即已将 `v1.0.0-R1` 盲测 `v2 R@P95` 从 `31.1%` 推至 **`32.8%`**、`v1 PR` 推至 **`0.8479`**！）。
-
-### 支柱四：字符级微节律直连主干（终结 G4）
-- 将 `Rung-0` 已算好的 `32-d` 字符微节律向量 `z_char` 零重算透传给 `Rung-1` 与 `Rung-2`，经 `Zero-Init` 门控并入 `style_net` 与 `P3 L0-Haar` 高通表层通道，在几乎零算力成本（`+4 KB`）下为深层模型补齐标点间距、单字重现与异体字符微信号。
-
-### 支柱五：`Wave-2.5` + `Wave-3` 2026 多模型隐蔽 AI 与难人类数据飞轮
-1. **接入已验收入库的 `Wave-2.5`（243 条 7/7 金丝雀满分野生分歧料）**：`v1.1.0-R1` 盲测验收完毕后并入 `v1.2.0` 训练集，外科手术式消灭 `p_nn` 与词法冲突的 161 条高难有机人类误报；
-2. **定向采集 `Wave-3`（~3,000 条高杠杆精标对，严禁触碰任何盲测集）**：
-   - **2026 极短隐蔽口语 AI（`stealth_ai`）**：涵盖最新主流模型（DeepSeek-R1/V3、Qwen3、Gemini 2.5/3、Doubao、Claude、GPT-5）生成的 `< 40` 字伪装 B 站短评、贴吧腔、无标点口语与轻颜文字；
-   - **高结构化有机人类反事实对**：重点扩充影评/评测评分卡（`H06_scorecard` 类）、分点技术总结、科普长评与学术/开源指路评论，彻底拉宽 `R@P95 / R@P99` 安全余量；
-   - **长尾双轴边界补齐**：针对 `v1.1.0-R1` 在 `Wave-2.5` 与 `PromoBench` 上的错题做定向二轮分歧挖掘。
+| 模块 | `v1.1.0 (MGVZ6)` 实占 | `v1.2.0 (MGVZ7)` 预算 | 变更说明 |
+| :--- | ---: | ---: | :--- |
+| Picky-BPE 12k 分词器 + Manifest | `~180 KB` *(ZIP)* | `~180 KB` | 不变 |
+| **新增 `Session R0` Zero-BPE 字符哈希 DW-CNN** | `0 KB` | **`+110 KB`** | `4096×12 + 8192×8` + DWConv (`0.10 ms`, 省 70%–80% 深层算力) |
+| 稠密词表 & Bi/Tri-Engram (`Sub-2 / W4`) | `331 KB` | `331 KB` | 保持不变 |
+| 稠密 Prelude L0/L1 + Funnel + `z_char` 注入门 | `621 KB` | **`625 KB`** | `+4 KB` 零初值 `z_char (32-d)` 微节律直连门 |
+| 稠密 Core Attn + Sub-2B FFN (`384→896→384`) | `~595 KB` | `~595 KB` | 纯稠密静态图，彻底清除动态路由分支与 `bal_bias` |
+| **FP16 共享低秩量化残差核 (`SharedQuantRes`, r=24)** | `38.6 KB` *(10-exp MoLE)* | **`10.5 KB`** | **净省 `-28.1 KB`！** 100% 保留 Sub-2B `+1.8% R@P95` 缓冲红利 |
+| `LogitNorm` 双轴头 + 6-Way EBT + 显式防火墙 `[192:256]` + `ChronoStream` | `~275 KB` | `~280 KB` | 新增 `LogitNorm` 温度标尺 + 3 参数 `T1/T2/EBT` 融合器 |
+| **总压缩包 (`Bundle v7` ZIP)** | **`~2.04 MB`** | **`~2.13 MB <= 2.20 MB`** | **仍留 `~70 KB` 安全余量；WebGPU SRAM `<= 32 KB`；`Zero-PII diff === 0.000000`！** |
 
 ---
 
-## 4. 执行阶段规划与验收门禁（Release Gates）
+## 4. `v1.2.0` 五大核心技术支柱与数据/训练闭环
 
-| 阶段 | 核心工作 | 硬件 | 验收硬指标 |
+### 支柱一：Zero-BPE `Rung-0` 微门卫与字符微节律复用（`+110 KB`，摊销速度 `4×`）
+- **零分词极速前哨**：原生 `UTF-16/UTF-32` 码点 `1/3-gram` 滚动哈希 + 16 维无正则结构标量，双轴联合预测 `[logit_ai_r0, logit_promo_r0, logit_defer_r0]`，并透传 `32-d` 字符微节律特征 `z_char` 给 `Rung-1/Rung-2`（同时根治 G1 延迟与 G4 字符微节律缺失）；
+- **固定序列双轴 LTT 认证门控**：仅当 `p_ai_r0 <= τ_ai` 且 `p_promo_r0 <= τ_pr` 且 `spoof_any == 0` 且 `len <= 160` 时放行，严守 AI `FNR <= 0.5%`、Promo `FNR <= 1.0%`；
+- **教师精馏**：由冻结 `v1.1.0-R1` / `v1.2.0` FP16 Master 用 **Asymmetric FN-Weighted BCE + Logit-MSE + Top-Tail ListNet** 蒸馏，目标 4T-CPU 摊销延迟压进 **`0.25–0.42 ms`**。
+
+### 支柱二：纯稠密递归核心 + `LogitNorm` + 循环谱阻尼（根治 G3 高精尾段过自信与 `T=2` 过锐化）
+- **退役软路由 MoLE -> `SharedQuantRes` (FP16, `10.5 KB`)**：保留与 `core.ffn` 并联的纯稠密 FP16 低秩残差通路 `W_up @ silu(W_down @ x)`，零路由器震荡、零 `bal_bias` 漂移、ONNX 图更干净；
+- **Cosine `LogitNorm` 双轴分类头**：`logit = (w·z / (||z||_2 + ε)) / τ_norm`，从几何上限制 logit 范数，阻止少量难人类评论（如 `H06_scorecard` 评分卡）冲到 `p=0.9999` 砸穿 `R@P95/R@P99`；
+- **循环谱阻尼 + `T1/T2/EBT` 对数几率融合**：外环 `t >= 2` 状态更新施加 `α_t = α_0 / sqrt(t)` 递减阻尼与单调排序损失 `L_mono(T2 >= T1)`，并在独立验证集上拟合 3 参数线性对数几率融合 `w1·logit_T1 + w2·logit_T2 + we·margin_EBT`。
+
+### 支柱三：显式正交防火墙插槽（已被 G4 `v1.1.0-R1` 实战证实的零负迁移范式！）
+- **两阶段解耦训练铁律**（彻底杜绝多任务联合微调时的主干漂移）：
+  1. **Phase A（纯 AI 稠密主干铸造）**：全量干净 AI 语料 + `Gold-v2` + `Wave-3` 隐蔽短 AI，完整保留 `l_slot_div (0.15)` + 软目标平滑 + `LogitNorm` + 谱阻尼，专心把纯 AI 稠密主干与 `Rung-0` 推到新 SOTA；
+  2. **Phase B（AI 主干 100% 冻结 + 正交防火墙 `[192:256]` 挂载）**：锁死 AI 稠密主干，以梯度掩码钩子 `grad[:192] = 0.0` 专训 `[192:256]` 商业推广/软广/引流插槽 + `ChronoStream` 长文本流 + 未来治理能力（反诈/引战等）；
+  3. **Phase C（纯双轴教师 Logit-MSE + Emb-Cosine + `l_slot_div` Sub-2-Bit QAT）**：以冻结的 FP16 Master 为双轴全套教师蒸馏至 `W4 -> Sub-2-Bit -> Shock-Absorber`，数学锁死量化零退化！
+
+### 支柱四：新一代双轨 ONNX 导出（彻底告别 Dynamic INT8！）
+- **桌面 / 高精默认轨**：由 `MGVZ7 (<= 2.15 MB)` 解包导出 **`FP32 Exact` 5-Stage ONNX**（`R0 + R1 + R2 + R3 + DynaSeam`），压缩包比原 Dynamic INT8 更小，彻底保住 `31%–55%` 高精尾段 `R@P95`；
+- **极低内存 / WebGPU 轨**：同步提供 **`MatMulNBits W4 (blk=128, sym, acc=4)`** 导出选项（体积再减 `33%`）。
+
+### 支柱五：`Gold-v2` 标尺升级 + 零成本数据炼油厂 v1.2 + `Wave-3` 2026 数据飞轮
+基于全仓库法医体检，落地 4 项数据升级（严禁触碰任何外部盲测集）：
+1. **零成本炼油厂规则升级（`v12_data_refinery.py`）**：
+   - 对 `v04_confirmed_ai_plugin (250k)` 中 **`len < 15` 且无强 AI 语用锚点的 `~14,750` 条无区分度短句**撤销硬标 `94`（降为 `T2` 或剔除，直接挽救短评误报）；
+   - 将漏网的 `v04_qwen_inkling_joint (349, 36.4% 假AI)` 纳入 `T3` 隔离；
+   - 将所有 `30 < score < 70` 中带样本（含 `v08_gemini_pro_gold` 388 条中 `91.5%` 中带）统一降入 `T2_SOFT_MIDBAND`，严禁拿 `1.4×` `T0` 权重；
+2. **`Gold-v2` 39 分片盲审回炉包（已打包待标注：`1,950` 条含 `50` 金丝雀）**：全量重标早期 `hydrogen_xhigh_direct (1,433)` 根除漏标本鱼 Bot 与 8.9% 推广混杂，平行建立 `val_gold_v2` / `test_bili_gold_v2`（原 `test_bili_gold_v1` 永不覆盖），同步手术提纯 `467` 条 `v08_flash / colab_distilled / pro388` 最高冲突边界；
+3. **并入已验收的 `Wave-2.5`（`243` 条 7/7 金丝雀满分野生分歧料，含 `161` 条高难有机人类防误报硬负样本）**（在完成 `v1.1.0-R1` 盲探之后正式入库训练）；
+4. **定向补充 `Wave-3`（~2,500–3,000 条）**：2026 主流多模型 `<40` 字极短隐蔽口语 AI + 影评评分卡/技术排障/开源指路等高结构化有机人类反事实对。
+
+---
+
+## 5. 执行阶段规划与验收门禁（Release Gates）
+
+| 阶段 | 核心交付 | 硬件 | 验收硬指标 |
 | :--- | :--- | :--- | :--- |
-| **Phase 0（已完成）** | `MatMulNBits / FP32 Exact` 实证 + `Rung-0` 110 KB 原型实证 + 路线图定稿 | 本地 RTX 4060 Ti + CPU | `v2 R@P95 3.3% -> 31.1%–32.8%`；`Rung-0 0.108 ms / 0.9896 wild AUC / 68% 0-miss exit`（**已全部达成！**） |
-| **Phase 1（紧随 `v1.1.0-R1` 出炉）** | 用 `v1.1.0-R1` 跑 `OjinjinBench v1/v2` + `Wave-2.5` 243 条盲探 + 立即升级 `v1.1.0` ONNX 导出器为 `FP32 Exact / MatMulNBits` 双轨 | 本地 | 核验 `v1.1.0-R1` 纯 AI 零负迁移、Promo `>= 0.92+`、Longform `>= 0.985+` |
-| **Phase 2（数据飞轮）** | 构建 `Wave-3` 2026 多模型短口语隐蔽 AI + 结构化真人评分卡反事实对（含金丝雀 Vault 审计） | 外部精标 + 本地质检 | 金丝雀双轴 `>= 95%`，与所有冻结/盲测集 `0` 碰撞 |
-| **Phase 3（架构与训练）** | 实现 `MeguvizV12ApexNanoModel`（`Rung-0` 联合蒸馏 + `LogitNorm` + 谱阻尼 + `z_char` 融合 + `T1+T2+EBT` 融合），由 `v1.1.0-R1` 热启后训 | Colab G4 Pro 6000 / A100 | `Bundle v7 <= 2.20 MB`；Zero-PII `diff === 0.000000` |
-| **Phase 4（盲测验收）** | 全套 4 冻结基准 + `OjinjinBench v1/v2` 严格盲测 + 23 陷阱 + 4T/1T 延迟压测 | 本地 CPU | **盲测 `v1 ROC >= 0.935 / PR >= 0.87+`**；**`v2 ROC >= 0.960 / PR >= 0.78+ / R@P95 >= 45%–55%+`**；**4T 摊销延迟 `<= 0.45 ms`**；**`Promo AUROC >= 0.94+`** |
+| **Phase 0（已完成）** | `FP32 Exact / MatMulNBits` 实证 + `Rung-0` 110 KB 原型实证 + 稠密 vs MoLE 硅片解剖 + `Gold-v2` 39 分片回炉包 + 终态路线图定稿 | 本地 RTX 4060 Ti + CPU | `v2 R@P95 3.3% -> 32.8%`；`Rung-0 0.108 ms / 0.9896 wild AUC / 68% 0-miss exit`；确认 `SharedQuantRes` 替代软路由 MoLE（**全部达成！**） |
+| **Phase 1（紧随 `v1.1.0-R1` 出炉）** | 用 `v1.1.0-R1` 跑全套冻结基准 + `OjinjinBench v1/v2` + `Wave-2.5 (243)` 零泄露野生分歧盲探 | 本地 CPU/GPU | 核验 `v1.1.0-R1` 纯 AI `>= v1.0.0-R1`、FP32-Exact ONNX 无坍缩、Promo `>= 0.92+` |
+| **Phase 2（数据飞轮升级）** | 验收回传的 `Gold-v2 (39 shards)`（50/50 金丝雀审核）+ 实现 `v12_data_refinery.py` 零成本清洗 + 筹备 `Wave-3` 隐蔽短 AI | 本地质检 + 外部精标 | 金丝雀双轴 `>= 96%`，与所有冻结/盲测集 `0` 碰撞，建立 `val_gold_v2` / `test_gold_v2` |
+| **Phase 3（`v1.2.0` 架构与训练）** | 实现 `v12_apexnano.py`（`Rung-0` + 稠密 `SymplectLoop` + `10.5 KB SharedQuantRes` + `LogitNorm` + 谱阻尼 + 防火墙 `[192:256]`）+ 三阶段训练（Phase A 纯 AI 稠密 -> Phase B 冻结防火墙双轴 -> Phase C 纯教师 KD Sub-2 QAT） | Colab G4 Pro 6000 / A100 | `Bundle v7 <= 2.20 MB`；`Zero-PII diff === 0.000000`；`V12_F6` 防火墙 `0.000000` 泄露 |
+| **Phase 4（盲测验收发布）** | 全套 `Gold-v1` + `Gold-v2` + `OjinjinBench v1/v2` + `PromoBench` + `LongBench` + 23 陷阱 + 4T/1T 延迟压测 | 本地 CPU | **盲测 `v1 ROC >= 0.935 / PR >= 0.87+`**；**`v2 ROC >= 0.960 / PR >= 0.78+ / R@P95 >= 45%–55%+`**；**4T 摊销延迟 `<= 0.45 ms`**；**`Promo AUROC >= 0.945+`**；**`Long AI >= 0.990+`** |
