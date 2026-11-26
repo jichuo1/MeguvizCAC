@@ -136,7 +136,7 @@ python3 -u -m meguviz_cac.train_v12_apexnano \
   --version "$VERSION" \
   --max-len 256 \
   --batch-size "$BS" \
-  --pa-steps "${PA_STEPS_OVERRIDE:-1800}" \
+  --pa-steps "${PA_STEPS_OVERRIDE:-1200}" \
   --pb-steps "${PB_STEPS_OVERRIDE:-2400}" \
   --pc-w4-steps "${PC_W4_STEPS_OVERRIDE:-600}" \
   --pc-sub2-steps "${PC_SUB2_STEPS_OVERRIDE:-1000}" \

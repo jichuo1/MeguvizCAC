@@ -183,11 +183,12 @@ def build_v12_param_groups(model: MeguvizV12ApexNanoModel, phase: str) -> tuple[
 
     hooks: list[Any] = []
     if phase == "phase_a":
-        # Phase A: Pure-AI dense polish + LogitNorm + Spectral Damping + Rung-0 AI warmup!
-        # Promo-only heads, emb[192:256], and z_char gates stay 100% frozen (zero drift when Rung-0 distills in Phase B!)
+        # Firewalled Dense-Adapter Phase A (ZERO fresh-AdamW trunk shock on converged v1.1.0-R1!):
+        # Freeze deep dense trunk (`word_emb/prelude/core.attn+ffn/slot/ebt_old`); train ONLY
+        # `CosineLogitNormHeadV12` + `SharedQuantResV12` + `spectral_damp` + `coda[:192]` + `r1_ai_head` + `rung0`!
         lr_map = {
             "rung0": 1.8e-3, "promo_heads": 0.0, "long": 0.0, "zchar_ai": 0.0,
-            "fast_ai": 2.2e-4, "emb_split": 2.5e-5, "half_trunk": 8.0e-6, "trunk": 1.6e-5,
+            "fast_ai": 7.0e-5, "emb_split": 6.0e-5, "half_trunk": 0.0, "trunk": 0.0,
         }
 
         def _mask_ai_rows_only(grad: torch.Tensor) -> torch.Tensor:
@@ -464,7 +465,7 @@ def train_v12_apexnano_full(args) -> dict[str, Any]:
             "l_pceil_admit": bool(l_pceil), "attr5": 3 if y_ai >= 0.70 else (1 if y_ai > 0.30 else 0),
             "group_idx": GROUP_TO_IDX["current_2026_real"], "era_idx": 3,
             "epistemic_tier": "T0_DIAMOND_GOLD" if is_t0 else "T1_VERIFIED_CLEAN",
-            "code_id": 0, "prag_vec": [0.0] * len(PRAG_TAGS),
+            "code_idx": -100, "prag_vec": [0.0] * len(PRAG_TAGS),
         }
 
     dual_gold_train: list[dict[str, Any]] = []
@@ -578,7 +579,7 @@ def train_v12_apexnano_full(args) -> dict[str, Any]:
         it["trigram"] = make_engram_trigram_ids(ids, buckets=ENGRAM_TRIGRAM_BUCKETS_V10)
         it["attr5"] = _derive_attr5_label(it)
         it["era_idx"] = 0 if it.get("is_pre_llm") else ERA_TO_IDX.get(str(it.get("era_bucket", "current_2026")), 3)
-        it["code_id"] = int(it.get("code_id", 0))
+        it["code_idx"] = int(it.get("code_idx", -100))
         it["prag_vec"] = it.get("prag_vec") or [0.0] * len(PRAG_TAGS)
         if it.get("is_trap_human") or it.get("is_pre_llm") or it.get("group_idx") in struct_gids:
             protect_pool.append(it)
@@ -683,7 +684,7 @@ def train_v12_apexnano_full(args) -> dict[str, Any]:
             torch.tensor([1.0 if x.get("l_pceil_admit") else 0.0 for x in batch_it], dtype=torch.float32, device=device),
             torch.tensor([x["group_idx"] for x in batch_it], dtype=torch.long, device=device),
             torch.tensor([x["era_idx"] for x in batch_it], dtype=torch.long, device=device),
-            torch.tensor([int(x.get("code_id", 0)) for x in batch_it], dtype=torch.long, device=device),
+            torch.tensor([int(x.get("code_idx", -100)) for x in batch_it], dtype=torch.long, device=device),
         )
 
     # Calibrate CosineLogitNormHeadV12 scale from real v1.1 embeddings
@@ -844,13 +845,17 @@ def train_v12_apexnano_full(args) -> dict[str, Any]:
     qs_aug = QuadSpliceAug(20261128)
     hart_aug = LightHumanPostEditAug(20261129)
     rng_tr = random.Random(20261126)
-    pike_ai = DynamicPiKEGroupSamplerV11({"t0_ai": 0.44, "t1_ai": 0.34, "t2_mid": 0.02, "ai_protect": 0.08, "dual_gold": 0.08, "uot_pseudo": 0.02, "hard_neg": 0.02})
+    pike_ai = DynamicPiKEGroupSamplerV11({"t0_ai": 0.38, "t1_ai": 0.34, "t2_mid": 0.02, "ai_protect": 0.10, "dual_gold": 0.12, "uot_pseudo": 0.02, "hard_neg": 0.02})
     pike_dual = DynamicPiKEGroupSamplerV11({"t0_ai": 0.25, "t1_ai": 0.20, "t2_mid": 0.01, "ai_protect": 0.04, "dual_gold": 0.24, "uot_pseudo": 0.14, "hard_neg": 0.12})
 
-    def _sample_short_batch(bs_now: int, w_vec: np.ndarray) -> list[dict[str, Any]]:
+    def _sample_short_batch(bs_now: int, w_vec: np.ndarray, gold_v2_frac: float = 0.0) -> list[dict[str, Any]]:
         out_b: list[dict[str, Any]] = []
-        counts = np.maximum(1, np.round(w_vec * bs_now).astype(int))
-        counts[0] += max(0, bs_now - int(counts.sum()))
+        n_g2 = min(bs_now // 4, int(round(bs_now * gold_v2_frac))) if (gold_v2_frac > 0.0 and gold_v2_t0_items) else 0
+        for _ in range(n_g2):
+            out_b.append(gold_v2_t0_items[rng_tr.randrange(len(gold_v2_t0_items))])
+        rem_bs = max(1, bs_now - n_g2)
+        counts = np.maximum(1, np.round(w_vec * rem_bs).astype(int))
+        counts[0] += max(0, rem_bs - int(counts.sum()))
         for pname, cnt in zip(DynamicPiKEGroupSamplerV11.POOL_NAMES, counts):
             src_p = pools[pname]
             for _ in range(int(cnt)):
@@ -883,8 +888,8 @@ def train_v12_apexnano_full(args) -> dict[str, Any]:
         return docs_out[:n_docs]
 
     # =========================================================================
-    # PHASE A: Dense Pure-AI + CosineLogitNorm + Spectral Damping + Rung-0 AI Warmup
-    # (Full `l_slot_div=0.15` + `attr6/code` + `L_mono(T2>=T1)` + Promo `[192:256]` Frozen!)
+    # PHASE A: Firewalled Dense-Adapter Pure-AI (`CosineLogitNorm + SharedQuantRes + coda[:192] + Rung-0`)
+    # (Deep dense trunk frozen -> ZERO fresh-AdamW shock while absorbing Gold-v2 + v12_data_refinery!)
     # =========================================================================
     pa_steps = 4 if args.smoke_test else int(args.pa_steps)
     pg_a, hooks_a = build_v12_param_groups(mdl, "phase_a")
@@ -894,11 +899,12 @@ def train_v12_apexnano_full(args) -> dict[str, Any]:
     mdl.train()
     for step in range(pa_steps):
         prog = float(step) / float(max(1, pa_steps - 1))
-        mult = _wsd_lr_mult(step, pa_steps, warmup_frac=0.06, decay_frac=0.20)
+        mult = _wsd_lr_mult(step, pa_steps, warmup_frac=0.08, decay_frac=0.25)
         for pg in opt_a.param_groups:
             pg["lr"] = pg["base_lr"] * mult
         opt_a.zero_grad(set_to_none=True)
-        b_it = _sample_short_batch(min(bs, 32 if args.smoke_test else bs), pike_ai.w)
+        # Dedicated 8% Gold-v2 + Wave-2.5 slice per batch (~40 clean re-adjudicated rows/batch at BS=512!)
+        b_it = _sample_short_batch(min(bs, 32 if args.smoke_test else bs), pike_ai.w, gold_v2_frac=0.08)
         (b_ids, b_m, b_e, b_t, b_s56, c1, c3, cm, cf,
          y_ai, y_pr, has_pr, sub4_i, w_b, a5_b, is_t0, is_res, l_pc, grp, era, code_i) = _collate_items(b_it)
 
@@ -914,18 +920,22 @@ def train_v12_apexnano_full(args) -> dict[str, Any]:
             tp11 = torch.sigmoid(to11["logit"].float())
             is_q3 = (y_ai <= 0.30) & (has_pr >= 0.5) & (y_pr >= 0.65)
             # Selective v1.1 anchor: excluded on Gold-v2/Wave-2.5 rescue rows, Q3 commercial, or T0 where v1.1 erred!
-            m_anc = (~is_q3) & (is_res < 0.5) & (~((is_t0 > 0.5) & ((tp11 - y_ai).abs() >= 0.45)))
+            m_anc = (~is_q3) & (is_res < 0.5) & (~((is_t0 > 0.5) & ((tp11 - y_ai).abs() >= 0.40)))
 
             l_kd = lg.sum() * 0.0
             if m_anc.any():
+                # Clamp unbounded v1.1 teacher logits to [-12, 12] so CosineLogitNormHeadV12 never fights scale ceiling!
+                t11_lg_c = to11["logit"][m_anc].float().clamp(-12.0, 12.0)
+                t11_r1_c = to11["logit_r1"][m_anc].float().clamp(-12.0, 12.0)
                 l_kd = (
-                    0.40 * F.mse_loss(lg[m_anc], to11["logit"][m_anc].float())
-                    + 0.25 * F.mse_loss(lg_r1[m_anc], to11["logit_r1"][m_anc].float())
-                    + 0.35 * (1.0 - F.cosine_similarity(out["emb"][m_anc, :AI_EMB_END_V11].float(), to11["emb"][m_anc, :AI_EMB_END_V11].float(), dim=-1).mean())
+                    0.60 * F.mse_loss(lg[m_anc], t11_lg_c)
+                    + 0.30 * F.mse_loss(lg_e1[m_anc], t11_lg_c)
+                    + 0.35 * F.mse_loss(lg_r1[m_anc], t11_r1_c)
+                    + 0.40 * (1.0 - F.cosine_similarity(out["emb"][m_anc, :AI_EMB_END_V11].float(), to11["emb"][m_anc, :AI_EMB_END_V11].float(), dim=-1).mean())
                 )
 
             l_ai = (F.binary_cross_entropy_with_logits(lg, y_cl, reduction="none") * w_b).mean()
-            l_ai = l_ai + 0.20 * (F.binary_cross_entropy_with_logits(lg_e1, y_cl, reduction="none") * w_b).mean()
+            l_ai = l_ai + 0.25 * (F.binary_cross_entropy_with_logits(lg_e1, y_cl, reduction="none") * w_b).mean()
             l_ai = l_ai + 0.22 * (F.binary_cross_entropy_with_logits(lg_r1, y_cl, reduction="none") * w_b * (1.0 + 2.5 * (y_ai >= 0.45).float())).mean()
             l_ai = l_ai + 0.08 * listnet_tail_distill_loss(lg_r1, lg.detach()) + 0.06 * listnet_tail_distill_loss(lg_e1, lg.detach())
             l_pa, l_tp = _modern_two_way_pauc_and_top_push(lg, y_ai, w_b, grp, prog=prog)
@@ -938,14 +948,14 @@ def train_v12_apexnano_full(args) -> dict[str, Any]:
                 sgn = torch.where(y_ai[dec_m] >= 0.5, 1.0, -1.0)
                 l_mono = 0.08 * F.relu(sgn * (lg_e1[dec_m].detach() - lg[dec_m])).mean()
 
-            # Structural Regularizers (l_slot_div + attr6 + code + cbm + EBT6 + L2-SP -> zero T=2 drift!)
+            # Structural Regularizers (l_slot_div + valid code_idx + L2-SP -> zero T=2 drift!)
             l_sdiv = 0.15 * compute_slot_orthogonality_loss(out["slots_final"])
-            l_attr = 0.08 * F.cross_entropy(out["attr6_logit"][:, :5].float(), a5_b.clamp(0, 4))
-            l_code = 0.05 * F.cross_entropy(out["code_logit"].float(), code_i.clamp(0, len(CODE_LIST) - 1))
-            l_ebt = 0.10 * compute_ebt6_partial_label_ce(out["ebt_energies"], y_ai, y_pr, has_pr, a5_b) + compute_dual_axis_ebt_margin_loss(out["ebt_margin"], out["ebt_promo_margin"], y_ai, y_pr, has_pr)
-            l_sp = compute_l2_sp_loss(mdl, r11_anchor_params, wd_sp=0.015)
+            l_code = lg.sum() * 0.0
+            if (code_i >= 0).any():
+                l_code = 0.04 * F.cross_entropy(out["code_logit"].float(), code_i, ignore_index=-100)
+            l_sp = compute_l2_sp_loss(mdl, r11_anchor_params, wd_sp=0.03)
 
-            # Rung-0 AI Warmup (FN-Weighted BCE + Teacher Logit-MSE)
+            # Rung-0 AI Warmup (FN-Weighted BCE + Teacher Logit-MSE + ListNet)
             lg_r0 = r0_o["logit_ai_r0"].float()
             l_r0 = (
                 0.50 * (F.binary_cross_entropy_with_logits(lg_r0, y_cl, reduction="none") * w_b * (1.0 + 3.0 * (y_ai >= 0.45).float())).mean()
@@ -953,7 +963,7 @@ def train_v12_apexnano_full(args) -> dict[str, Any]:
                 + 0.08 * listnet_tail_distill_loss(lg_r0, lg.detach())
             )
 
-            # Legacy GateGuard / Literary / Debias AI pairs (every 2nd step)
+            # Legacy GateGuard / Literary / Inkling-WK pairs (gentle 0.06 weight -> sharpens traps without blowing tail!)
             l_ai_pair = lg.sum() * 0.0
             if legacy_pairs and step % 2 == 1:
                 lpb = rng_tr.sample(legacy_pairs, min(16 if not args.smoke_test else 4, len(legacy_pairs)))
@@ -968,32 +978,38 @@ def train_v12_apexnano_full(args) -> dict[str, Any]:
                 oa = mdl(ai_i, ai_m, ai_s, engram_ids=ai_e, trigram_ids=ai_t, outer_steps=2, return_aux=True)
                 oh = mdl(hu_i, hu_m, hu_s, engram_ids=hu_e, trigram_ids=hu_t, outer_steps=2, return_aux=True)
                 pw_t = torch.tensor(pw_l, dtype=torch.float32, device=device)
-                l_ai_pair = 0.16 * (
+                l_ai_pair = 0.06 * (
                     (F.softplus(1.8 - (oa["logit"].float() - oh["logit"].float())) * pw_t).mean()
-                    + 0.8 * ((F.relu(0.84 - torch.sigmoid(oa["logit"].float())).pow(2) + 1.6 * F.relu(torch.sigmoid(oh["logit"].float()) - 0.12).pow(2)) * pw_t).mean()
+                    + 0.6 * ((F.relu(0.84 - torch.sigmoid(oa["logit"].float())).pow(2) + 1.5 * F.relu(torch.sigmoid(oh["logit"].float()) - 0.12).pow(2)) * pw_t).mean()
                 )
 
-            loss_a = l_ai + 0.09 * l_pa + l_tp + zenith_graded_anchor_loss(lg, y_ai) + 0.18 * l_topfp + l_mono + 0.45 * l_kd + l_sdiv + l_attr + l_code + 0.04 * out["cbm_loss"] + l_ebt + l_sp + l_r0 + l_ai_pair
+            loss_a = (
+                l_ai + 0.06 * l_pa + 0.35 * l_tp + 0.15 * zenith_graded_anchor_loss(lg, y_ai) + 0.10 * l_topfp
+                + l_mono + 0.70 * l_kd + l_sdiv + l_code + l_sp + l_r0 + l_ai_pair
+            )
 
         loss_a.backward()
         torch.nn.utils.clip_grad_norm_(mdl.parameters(), 1.0)
         opt_a.step()
 
-        if not args.smoke_test and ((step + 1) % 300 == 0 or step + 1 == pa_steps):
+        if not args.smoke_test and ((step + 1) % 200 == 0 or step + 1 == pa_steps):
             cm = _eval_ai_metrics(mdl)
             if cm["ai_obj_sel"] >= best_pa_sc:
                 best_pa_sc = cm["ai_obj_sel"]
                 best_pa_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items()}
             print(
                 f"[PhaseA step={step+1}/{pa_steps}] loss={float(loss_a.item()):.4f} | ai_sel={cm['ai_obj_sel']:.5f} ai_obj={cm['ai_obj']:.5f} "
-                f"auroc_vg={cm['auroc_vg']:.4f} vg2={cm.get('auroc_vg2', 0.0):.4f} rp95_vg2={cm.get('rp95_vg2', 0.0):.4f} r1={cm['r1_auroc']:.4f} r0_ai={cm['r0_ai_auroc']:.4f} | "
-                f"elapsed={time.monotonic()-t_start:.0f}s",
+                f"auroc_vg={cm['auroc_vg']:.4f} rp95_vg={cm['rp95_vg']:.4f} vg2={cm.get('auroc_vg2', 0.0):.4f} rp95_vg2={cm.get('rp95_vg2', 0.0):.4f} "
+                f"r1={cm['r1_auroc']:.4f} r0_ai={cm['r0_ai_auroc']:.4f} | elapsed={time.monotonic()-t_start:.0f}s",
                 flush=True,
             )
             mdl.train()
 
     for hk in hooks_a:
         hk.remove()
+    # Preserve trained Rung-0 weights even if AI adapters pick an earlier snapshot!
+    r0_trained_sd = {k: v.detach().cpu().clone() for k, v in mdl.state_dict().items() if k.startswith("rung0.")}
+    best_pa_sd.update(r0_trained_sd)
     mdl.load_state_dict({k: v.to(device) for k, v in best_pa_sd.items()}, strict=True)
     del v11_teacher
     if torch.cuda.is_available():
