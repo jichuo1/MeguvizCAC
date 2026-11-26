@@ -111,6 +111,18 @@ done
 [ -f "$V07_TOKENIZER" ] && EXTRA_ARGS+=(--v07-tokenizer "$V07_TOKENIZER")
 [ -f "$GEMINI_GOLD" ] && EXTRA_ARGS+=(--v08-gemini-gold "$GEMINI_GOLD")
 [ -f "$GEMINI_PAIRS" ] && EXTRA_ARGS+=(--v08-gemini-pairs "$GEMINI_PAIRS")
+if [ -z "${WAVE25_GOLD:-}" ]; then
+  for w25c in \
+    "$V11_DATA_DIR/v11_wave25_dualaxis_gold_verified.jsonl.gz" \
+    "/content/v11_wave25_dualaxis_gold_verified.jsonl.gz" \
+    "$DRIVE_DIR/v11_wave25_dualaxis_gold_verified.jsonl.gz"
+  do
+    if [ -f "$w25c" ]; then
+      WAVE25_GOLD="$w25c"
+      break
+    fi
+  done
+fi
 [ -n "${WAVE25_GOLD:-}" ] && [ -f "$WAVE25_GOLD" ] && EXTRA_ARGS+=(--wave25-gold "$WAVE25_GOLD")
 
 GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)"
