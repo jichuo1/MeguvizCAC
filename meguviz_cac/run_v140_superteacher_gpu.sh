@@ -56,10 +56,13 @@ for zcand in \
 done
 
 if [ -n "$UNIFIED_ZIP" ]; then
-  if [ ! -f "$V123_BUNDLE_DIR/delta/delta_ext_v4B_and_v123_real_dualaxis_gold.jsonl.gz" ]; then
-    echo "[$(date +%H:%M:%S)] Unpacking unified v123 zero-leak bundle $UNIFIED_ZIP -> $V123_BUNDLE_DIR" | tee -a "$LOG_DRIVER"
+  CUR_ZIP_SHA="$(sha256sum "$UNIFIED_ZIP" | awk '{print $1}')"
+  PREV_ZIP_SHA="$(cat "$V123_BUNDLE_DIR/.zip_sha" 2>/dev/null || true)"
+  if [ "$CUR_ZIP_SHA" != "$PREV_ZIP_SHA" ] || [ ! -f "$V123_BUNDLE_DIR/delta/delta_v14_committee_1470_v11v12_overrides.jsonl.gz" ]; then
+    echo "[$(date +%H:%M:%S)] Unpacking unified v123 zero-leak bundle $UNIFIED_ZIP (sha=${CUR_ZIP_SHA:0:12}) -> $V123_BUNDLE_DIR" | tee -a "$LOG_DRIVER"
     rm -rf "$V123_BUNDLE_DIR" && mkdir -p "$V123_BUNDLE_DIR"
     python3 -c "import zipfile; zipfile.ZipFile('$UNIFIED_ZIP').extractall('$V123_BUNDLE_DIR')"
+    echo "$CUR_ZIP_SHA" > "$V123_BUNDLE_DIR/.zip_sha"
   fi
 else
   # Fallback: reuse existing /content/v122_bundle base + overlay standalone v123_delta_bundle.zip

@@ -925,7 +925,11 @@ def _is_pure_text_ai_pos_v140(
     if text_only_verifiable is False:
         return False, 0.0, True
 
-    # Newly rescued R1c pure-text verifiable real AI (1,422 rows: 273 short stealth + 87 Q2 + 1,062 textverif)
+    # Newly merged v14-committee-1470 2of2/3-judge adjudicated overrides (highest trust!)
+    if "committee_v11v12_override" in stl or "committee_1470" in stl:
+        return True, 1.35, True
+
+    # Newly rescued R1c pure-text verifiable real AI (1,304 rows post-committee-1470 pruning)
     if "r1c_rescued" in stl:
         if "short_stealth" in stl or "q2_dual_pos" in stl:
             return True, 1.40, True
@@ -1253,10 +1257,20 @@ def build_v140_superteacher_corpus(
             if y_pr > 0.5:
                 stats["admitted_promo_pos"] += 1
 
-    # 4. Ingest Sibling + Delta Dual-Axis Rows (`140,513` rows!)
+    # 4. Ingest Sibling + Delta Dual-Axis Rows (`140,826` rows, incl. v14-committee-1470 patches & overrides!)
+    quarantine_sids: set[str] = set(sib_pack.get("quarantine_sids") or ())
+    override_sids: set[str] = set(sib_pack.get("override_sids") or ())
+    override_hashes: set[str] = set()
+
     for r in sib_pack["dual_train_rows"]:
         bm = r.get("bucket_meta") or {}
         src = str(r.get("source_tag") or ("v123_delta" if r.get("is_delta") else "sibling_dual"))
+        sid_r = str(r.get("sample_id") or r.get("sid") or "")
+        if sid_r and sid_r in quarantine_sids:
+            continue
+        txt_r = str(r.get("text", "")).strip()
+        if txt_r:
+            override_hashes.add(text_sha16_v140(txt_r))
         orig = _extract_origin_v140(r)
         ai_sc = float(r.get("ai_score", 0.0)) if r.get("has_ai", True) else None
         pr_sc = float(r.get("promo_score", 0.0)) if r.get("has_promo", True) else None
@@ -1264,38 +1278,58 @@ def build_v140_superteacher_corpus(
         is_syn = bool(bm.get("is_synthetic", False)) or ("synth" in src.lower())
         e5 = sanitize_era5_v123(r.get("era_bucket"), r.get("created_ts"), is_pre_llm=is_pre, score_source=src, ai_score_0_100=ai_sc)
         _ingest_row(
-            str(r.get("text", "")), str(r.get("sample_id") or r.get("sid") or ""), src, orig, e5,
+            txt_r, sid_r, src, orig, e5,
             ai_sc, pr_sc, str(r.get("promo_type", "none")),
             is_pre_llm=is_pre,
             text_only_verifiable=r.get("text_only_verifiable", bm.get("text_only_verifiable")),
             is_synthetic=is_syn,
         )
 
-    # 5. Ingest Sibling + Delta AI-Only Real Rows (`82,154` rows!)
+    # 5. Ingest Sibling + Delta AI-Only Real Rows (`82,142` rows!)
     for r in sib_pack["ai_only_real_rows"]:
         bm = r.get("bucket_meta") or {}
         src = str(r.get("source_tag") or "sibling_ai_only")
+        sid_r = str(r.get("sample_id") or "")
+        if sid_r and sid_r in quarantine_sids:
+            continue
+        txt_r = str(r.get("text", "")).strip()
+        if not txt_r or text_sha16_v140(txt_r) in override_hashes:
+            continue
+        override_hashes.add(text_sha16_v140(txt_r))
         orig = _extract_origin_v140(r)
         ai_sc = float(r.get("ai_score", 0.0))
         is_pre = str(r.get("era_bucket", "")).lower().startswith("pre")
         is_syn = bool(bm.get("is_synthetic", False)) or ("synth" in src.lower())
         e5 = sanitize_era5_v123(r.get("era_bucket"), r.get("created_ts"), is_pre_llm=is_pre, score_source=src, ai_score_0_100=ai_sc)
         _ingest_row(
-            str(r.get("text", "")), str(r.get("sample_id") or ""), src, orig, e5, ai_sc, None,
+            txt_r, sid_r, src, orig, e5, ai_sc, None,
             is_pre_llm=is_pre,
             text_only_verifiable=r.get("text_only_verifiable", bm.get("text_only_verifiable")),
             is_synthetic=is_syn,
         )
 
-    # 6. Ingest `v12_gold_v2_train` + `v121_wave3_train` + `v11` Gold/UOT Promo
+    # 6. Ingest `v12_gold_v2_train` + `v121_wave3_train` + `v11` Gold/UOT Promo (respecting committee-1470 overrides & hygiene!)
+    def _is_superseded_legacy(r: dict[str, Any]) -> bool:
+        sid_r = str(r.get("sample_id") or r.get("sid") or "")
+        if sid_r and (sid_r in quarantine_sids or sid_r in override_sids):
+            return True
+        txt_r = str(r.get("text", "")).strip()
+        if txt_r and text_sha16_v140(txt_r) in override_hashes:
+            return True
+        return False
+
     if gold_v2_dir and gold_v2_dir.is_dir():
         for r in read_jsonl_any_v140(gold_v2_dir / "v12_gold_v2_train.jsonl.gz")[: (96 if smoke_test else 999999)]:
+            if _is_superseded_legacy(r):
+                continue
             ai_sc = float(r.get("ai_score", r.get("score", 0.0)))
             pr_sc = float(r["promo_score"]) if r.get("promo_score") is not None else None
             e5 = sanitize_era5_v123(r.get("era_bucket"), r.get("created_ts"), ai_score_0_100=ai_sc)
             _ingest_row(str(r.get("text", "")), str(r.get("sample_id") or r.get("sid") or ""), "v12_gold_v2_train", _extract_origin_v140(r), e5, ai_sc, pr_sc, str(r.get("promo_type", "none")))
     if wave3_dir and wave3_dir.is_dir():
         for r in read_jsonl_any_v140(wave3_dir / "v121_wave3_train.jsonl.gz")[: (96 if smoke_test else 999999)]:
+            if _is_superseded_legacy(r):
+                continue
             ai_sc = float(r.get("ai_score", 0.0))
             pr_sc = float(r.get("promo_score", 0.0))
             e5 = sanitize_era5_v123(r.get("era_bucket"), r.get("created_ts"), ai_score_0_100=ai_sc)
@@ -1308,15 +1342,19 @@ def build_v140_superteacher_corpus(
             ("v11_wave2_longform_gold_1200.jsonl.gz", "v11_wave2_longform"),
         ]:
             for r in read_jsonl_any_v140(v11_dir / fn)[: (64 if smoke_test else 999999)]:
-                if r.get("split", "train") != "train":
+                if r.get("split", "train") != "train" or _is_superseded_legacy(r):
                     continue
                 ai_sc = float(r.get("ai_score", 0.0))
                 pr_sc = float(r.get("promo_score", 0.0))
                 e5 = sanitize_era5_v123(r.get("era_bucket"), r.get("created_ts"), ai_score_0_100=ai_sc)
                 _ingest_row(str(r.get("text", "")), str(r.get("sample_id") or r.get("sid") or ""), tag, _extract_origin_v140(r), e5, ai_sc, pr_sc, str(r.get("promo_type", "none")))
         for r in read_jsonl_any_v140(v11_dir / "v11_uot_wild_promo_pos.jsonl")[: (32 if smoke_test else 999999)]:
+            if _is_superseded_legacy(r):
+                continue
             _ingest_row(str(r.get("text", "")), str(r.get("sample_id") or ""), "v11_uot_wild_promo", "", -1, None, 95.0, str(r.get("promo_type", "soft_shill")))
         for r in read_jsonl_any_v140(v11_dir / "v11_bge_knn_promo_hard_negatives_2k_uot_gated.jsonl")[: (48 if smoke_test else 999999)]:
+            if _is_superseded_legacy(r):
+                continue
             _ingest_row(str(r.get("text", "")), str(r.get("sample_id") or ""), "v11_promo_hn", "", -1, None, 0.0, "none")
 
     # 7. Clean EN/JA Multilingual Gold Anchors (85% train + 15% held-out `val_multilingual`!)
