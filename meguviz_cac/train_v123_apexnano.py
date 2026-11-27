@@ -120,6 +120,7 @@ from .v123_apexnano import (
 from .v123_data_refinery import (
     NUM_ERAS_V122,
     classify_epistemic_tier_v122,
+    jitter_ai_punctuation_v123,
     load_sibling_and_delta_v123,
     run_v123_refinery_ci,
     sanitize_era5_v123,
@@ -916,7 +917,29 @@ def train_v123_apexnano_full(args) -> dict[str, Any]:
                 out["emb"][oi] = o["emb"][ri].float().cpu().numpy()
         return out
 
-    def _collate_items(batch_items: list[dict[str, Any]]):
+    rng_jit = random.Random(2026112899)
+
+    def _collate_items(batch_items: list[dict[str, Any]], punct_jitter: bool = True):
+        # Online 35% punctuation-shortcut breaker on AI positives (breaks ends_period / emdash shortcut!)
+        eff_items: list[dict[str, Any]] = []
+        for x in batch_items:
+            if punct_jitter and x.get("has_ai", 0.0) > 0.5 and x.get("y_score", 0.0) >= 0.70:
+                jt = jitter_ai_punctuation_v123(x["raw_text"], rng_jit, prob=0.35)
+                if jt != x["raw_text"]:
+                    cl_j, f56_j, _ = extract_style_features_56d(jt)
+                    ids_j = tokenizer.encode_ids(cl_j, max_len=args.max_len)
+                    xj = dict(x)
+                    xj["raw_text"] = jt
+                    xj["ids"] = ids_j
+                    xj["engram"] = make_engram_bigram_ids(ids_j, buckets=ENGRAM_BIGRAM_BUCKETS_V10)
+                    xj["trigram"] = make_engram_trigram_ids(ids_j, buckets=ENGRAM_TRIGRAM_BUCKETS_V10)
+                    xj["style"] = f56_j
+                    xj["char_len"] = len(jt)
+                    eff_items.append(xj)
+                    continue
+            eff_items.append(x)
+        batch_items = eff_items
+
         ml = max(2, max(len(x["ids"]) for x in batch_items))
         if ml % 2 == 1:
             ml += 1

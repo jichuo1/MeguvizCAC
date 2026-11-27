@@ -46,8 +46,26 @@ from meguviz_cac.v122_data_refinery import (
 
 _WS_RE = re.compile(r"\s+")
 _DECORATOR_RE = re.compile(r"[✧✦❀✿★☆♪♫♡♥◆◇■□●○※➤➔➜★☆꧁꧂『』【】]")
+_TRAIL_PERIOD_RE = re.compile(r"[。\.]+(\s*)$")
+_EMDASH_JIT_RE = re.compile(r"——|—|--")
+_CORNERQ_JIT_RE = re.compile(r"[「」『』]")
 
-_NON_TEXT_ORIGINS = frozenset({"Coordinated-Latent-Cluster"})
+_NON_TEXT_ORIGINS = frozenset({"Coordinated-Latent-Cluster", "Human-Assisted"})
+_NOISY_SCRIPTBOT_SOURCES = frozenset({"sibling_god_tier_calibrated_gold", "sibling_conflict_adjudicated"})
+
+
+def jitter_ai_punctuation_v123(text: str, rng: Any, prob: float = 0.35) -> str:
+    """Online punctuation-shortcut breaker (`。`, `——`, `「」`) for AI positives during training."""
+    if not text or rng.random() >= prob:
+        return text
+    s = text
+    if rng.random() < 0.75:
+        s = _TRAIL_PERIOD_RE.sub(r"\1", s)
+    if rng.random() < 0.60 and _EMDASH_JIT_RE.search(s):
+        s = _EMDASH_JIT_RE.sub(rng.choice(["，", " ", "，"]), s)
+    if rng.random() < 0.55 and _CORNERQ_JIT_RE.search(s):
+        s = _CORNERQ_JIT_RE.sub("", s)
+    return s.strip() or text
 
 
 def _norm_sha256(text: str) -> str:
@@ -56,16 +74,23 @@ def _norm_sha256(text: str) -> str:
 
 
 def is_text_only_verifiable_v123(row: dict[str, Any]) -> bool:
-    """Return False if row is explicitly flagged non-verifiable from single-comment text alone."""
+    """Return False if row is non-verifiable from single-comment text alone or noisy behavior-cluster AI."""
     bm = row.get("bucket_meta") or {}
     if row.get("text_only_verifiable") is False or bm.get("text_only_verifiable") is False:
         return False
-    if row.get("text_only_verifiable") is True or bm.get("text_only_verifiable") is True:
-        return True
-    # Conservative fallback for v1.2.2 legacy rows lacking the explicit boolean:
-    # keep all humans & LLM-origin AI; flag pure cluster-only unlabeled AI if tagged behavior_only.
     if bool(bm.get("behavior_only", False)) or bool(row.get("behavior_only", False)):
         return False
+    # Empirical label-purity guard (from OjinjinNet v1.3 forensic audit):
+    # `Human-Assisted` (len50=258-447, 73% pure-human), `Coordinated-Latent-Cluster` (behavior-only),
+    # and `god_tier/conflict Script-Plugin-Bot` (63% non-LLM) must NOT enter binary pure-text y_ai=1!
+    sc = row.get("ai_score")
+    if sc is not None and float(sc) >= 70.0:
+        orig = str(row.get("origin_6way") or bm.get("origin_6way") or bm.get("origin") or "")
+        src = str(row.get("source_tag") or "")
+        if orig in _NON_TEXT_ORIGINS:
+            return False
+        if orig == "Script-Plugin-Bot" and src in _NOISY_SCRIPTBOT_SOURCES:
+            return False
     return True
 
 
