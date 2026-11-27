@@ -143,6 +143,77 @@ def _load_distill_pool_v130(path: Path | None, blocked_hashes: set[str], smoke_t
     return out
 
 
+_HOMOGLYPH_EN_MAP = str.maketrans({"a": "\u0430", "e": "\u0435", "o": "\u043e", "i": "\u0456", "c": "\u0441", "p": "\u0440"})
+
+
+def _augment_en_homoglyph_zw(text: str, rng: random.Random, prob: float = 0.25) -> str:
+    """Light Cyrillic homoglyph / zero-width perturbation on Latin-heavy AI positives for P01/P02 robustness."""
+    if not text or rng.random() >= prob:
+        return text
+    if rng.random() < 0.65:
+        chars = list(text)
+        for i in range(len(chars)):
+            if chars[i] in "aeoicp" and rng.random() < 0.22:
+                chars[i] = chars[i].translate(_HOMOGLYPH_EN_MAP)
+        return "".join(chars)
+    # Zero-width insertion
+    out = []
+    for ch in text:
+        out.append(ch)
+        if ch == " " and rng.random() < 0.35:
+            out.append("\u200b")
+    return "".join(out)
+
+
+def _load_v04_multilingual_anchors_v131(v04_path: Path | None, blocked_hashes: set[str], smoke_test: bool) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Harvest strictly pure EN/JA multilingual AI & Human gold anchors from `v04-merged-1m4-r3.jsonl.gz`."""
+    if v04_path is None or not v04_path.is_file():
+        return [], []
+    import gzip
+    ml_pos: list[dict[str, Any]] = []
+    ml_neg: list[dict[str, Any]] = []
+    cap_each = 40 if smoke_test else 600
+    op = gzip.open if str(v04_path).endswith(".gz") else open
+    with op(v04_path, "rt", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            if r.get("split") != "train":
+                continue
+            co = str(r.get("cohort", ""))
+            if co not in ("inkling_wk", "v04_1m", "bili"):
+                continue
+            txt = str(r.get("text", "")).strip()
+            if len(txt) < 12:
+                continue
+            head = txt[:200]
+            n_cjk = sum(0x4E00 <= ord(c) <= 0x9FFF for c in head)
+            n_lat = sum(("a" <= c <= "z") or ("A" <= c <= "Z") for c in head)
+            n_kana = sum(0x3040 <= ord(c) <= 0x30FF for c in head)
+            is_ml = (co == "inkling_wk") or (n_lat >= 25 and n_cjk <= 5) or (n_kana >= 6 and n_cjk <= 20)
+            if not is_ml:
+                continue
+            if text_sha16_v130(txt) in blocked_hashes:
+                continue
+            sc = float(r.get("score", 50.0))
+            if sc >= 70.0 and len(ml_pos) < cap_each:
+                ml_pos.append({
+                    "text": txt, "t_ai_logit": 4.0, "t_pr_logit": -4.0, "has_teacher": 0.0, "kd_w": 1.0,
+                    "y_ai": 1.0, "has_ai": 1.0, "y_pr": 0.0, "has_pr": 0.0, "sub4": -1,
+                    "hard_neg": 0.0, "era5": -1, "source_tag": f"ml_{co}", "is_ml_en": bool(n_lat >= 20),
+                })
+            elif sc <= 25.0 and len(ml_neg) < cap_each:
+                ml_neg.append({
+                    "text": txt, "t_ai_logit": -4.0, "t_pr_logit": -4.0, "has_teacher": 0.0, "kd_w": 1.0,
+                    "y_ai": 0.0, "has_ai": 1.0, "y_pr": 0.0, "has_pr": 0.0, "sub4": -1,
+                    "hard_neg": 1.0, "era5": -1, "source_tag": f"ml_{co}", "is_ml_en": bool(n_lat >= 20),
+                })
+            if len(ml_pos) >= cap_each and len(ml_neg) >= cap_each:
+                break
+    return ml_pos, ml_neg
+
+
 def _collate_student_batch(
     batch: list[dict[str, Any]],
     tokenizer: BiliPickyBPETokenizer,
@@ -158,7 +229,10 @@ def _collate_student_batch(
         t = str(r["text"])
         is_ai_pos = (r.get("has_ai", 0.0) > 0.5 and r.get("y_ai", 0.0) >= 0.70) or (r.get("has_teacher", 0.0) > 0.5 and r.get("t_ai_logit", -5.0) >= 1.2)
         if rng is not None and punct_jitter_prob > 0.0 and is_ai_pos:
-            t = jitter_ai_punctuation_v123(t, rng, prob=punct_jitter_prob)
+            if r.get("is_ml_en"):
+                t = _augment_en_homoglyph_zw(t, rng, prob=0.28)
+            else:
+                t = jitter_ai_punctuation_v123(t, rng, prob=punct_jitter_prob)
         txts.append(t)
 
     c1, c2, c3, cm, cf, _ = extract_apex_char_batch_v130(txts)
@@ -298,13 +372,14 @@ def compute_kd_plus_gold_loss_v130(
     if axis == "ai":
         hnm = (eff_v > 0.5) & (eff_y <= 0.20) & (hn > 0.5)
         if hnm.any():
-            loss = loss + 0.20 * (F.relu(lg_f[hnm] + 0.6).pow(2) * sw[hnm]).mean()
+            loss = loss + 0.28 * (F.relu(lg_f[hnm] + 0.9).pow(2) * sw[hnm]).mean()
     return loss
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train MeguvizCAC v1.3.0-XtremeApex Full Nested-Loop Student (<=5.00 MiB)")
+    parser = argparse.ArgumentParser(description="Train MeguvizCAC v1.3.1-NestedBoost Full Nested-Loop Student (<=5.00 MiB)")
     parser.add_argument("--distill-pool", type=Path, default=None, help="Path to v130_superteacher_soft_distill_pool.jsonl.gz")
+    parser.add_argument("--v04-data", type=Path, default=None, help="Optional v04-merged-1m4-r3.jsonl.gz for EN/JA multilingual anchors")
     parser.add_argument("--sibling-dir", type=Path, required=True)
     parser.add_argument("--delta-dir", type=Path, default=None)
     parser.add_argument("--gold-v2-dir", type=Path, required=True)
@@ -313,10 +388,11 @@ def main() -> None:
     parser.add_argument("--v07-tokenizer", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
-    parser.add_argument("--version", type=str, default="v1.3.0-r1-xtreme-apex")
+    parser.add_argument("--version", type=str, default="v1.3.1-r1-nested-boost")
     parser.add_argument("--p1-steps", type=int, default=2200)
-    parser.add_argument("--p2-steps", type=int, default=3200)
-    parser.add_argument("--p3-qat-steps", type=int, default=1200)
+    parser.add_argument("--p2-steps", type=int, default=4000)
+    parser.add_argument("--p3-qat-steps", type=int, default=1400)
+    parser.add_argument("--r0-drop-p", type=float, default=0.50, help="R0 modality dropout prob during Phase 2 to unlock independent Nested-Loop!")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--max-len", type=int, default=MAX_LEN_V130)
     parser.add_argument("--head-len", type=int, default=HEAD_LEN_V130)
@@ -357,18 +433,31 @@ def main() -> None:
     sib_pack = load_sibling_and_delta_v123(args.sibling_dir, args.delta_dir, smoke_test=args.smoke_test)
     cf_pairs = sib_pack["cf_mirror_pairs"]
     longform_train = read_jsonl_any_v130(args.v11_data_dir / "v11_wave2_longform_gold_1200.jsonl.gz")[: (24 if args.smoke_test else 1200)]
-
-    print(
-        f"[Stage0-Data] gold_ai+={len(corpus['train_ai_pos']):,} hu_nat={len(corpus['train_hu_natural']):,} hu_hd={len(corpus['train_hu_hard']):,} | "
-        f"distill_pool={len(distill_pool):,} (pos={len(d_pos):,}, bnd={len(d_bnd):,}, pr+={len(d_pr):,}, hn={len(d_hn):,}, nat={len(d_nat):,}) | "
-        f"cf_pairs={len(cf_pairs):,} longform={len(longform_train):,}",
-        flush=True,
-    )
+    ml_pos, ml_neg = _load_v04_multilingual_anchors_v131(args.v04_data, blocked, smoke_test=args.smoke_test)
 
     gold_pos = corpus["train_ai_pos"]
     gold_nat = corpus["train_hu_natural"]
     gold_hd = corpus["train_hu_hard"]
     gold_pr = corpus["train_promo_extra"]
+
+    # Targeted high-leverage sub-pools discovered in v1.3.0-r1 blind benchmark:
+    # 1. Short stealth AI (`<= 60` chars) to boost `v3-real le30 / 31_60` recall
+    short_pos = [r for r in (gold_pos + d_pos) if len(r["text"]) <= 60]
+    # 2. Old-video (>1y / pre-LLM) + spaced / technical / banter hard human negatives to crush Top-5 FPs & H02/H03/H04!
+    hard_old_spaced_hu = [
+        r for r in (gold_hd + d_hn)
+        if (int(r.get("era5", -1)) in (0, 1, 2) and len(r["text"]) >= 20)
+        or (r["text"].count(" ") >= 2 and len(r["text"]) >= 14)
+        or any(k in r["text"] for k in ("节点", "接口", "代理", "代码", "算法", "架构", "闲得", "同类", "聊天"))
+    ]
+
+    print(
+        f"[Stage0-Data] gold_ai+={len(gold_pos):,} hu_nat={len(gold_nat):,} hu_hd={len(gold_hd):,} | "
+        f"distill_pool={len(distill_pool):,} (pos={len(d_pos):,}, bnd={len(d_bnd):,}, pr+={len(d_pr):,}, hn={len(d_hn):,}, nat={len(d_nat):,}) | "
+        f"short_ai={len(short_pos):,} hard_old_spaced_hu={len(hard_old_spaced_hu):,} ml_en_ja=({len(ml_pos)}+, {len(ml_neg)}-) | "
+        f"cf_pairs={len(cf_pairs):,} longform={len(longform_train):,}",
+        flush=True,
+    )
 
     def _draw(pool: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
         return rng.choices(pool, k=k) if (pool and k > 0) else []
@@ -376,16 +465,23 @@ def main() -> None:
     def _sample_batch(bs_cur: int) -> list[dict[str, Any]]:
         out_b: list[dict[str, Any]] = []
         if distill_pool:
-            out_b.extend(_draw(d_pos, max(1, int(bs_cur * 0.14))))
-            out_b.extend(_draw(d_bnd, max(1, int(bs_cur * 0.12))))
-            out_b.extend(_draw(d_pr, max(1, int(bs_cur * 0.06))))
-            out_b.extend(_draw(d_hn, max(1, int(bs_cur * 0.12))))
-            out_b.extend(_draw(d_nat, max(1, int(bs_cur * 0.16))))
+            out_b.extend(_draw(d_pos, max(1, int(bs_cur * 0.12))))
+            out_b.extend(_draw(d_bnd, max(1, int(bs_cur * 0.11))))
+            out_b.extend(_draw(d_pr, max(1, int(bs_cur * 0.05))))
+            out_b.extend(_draw(d_hn, max(1, int(bs_cur * 0.10))))
+            out_b.extend(_draw(d_nat, max(1, int(bs_cur * 0.14))))
+        # High-leverage targeted slices (short stealth AI + old-video/spaced/tech hard human + EN/JA multilingual gold!)
+        out_b.extend(_draw(short_pos, max(1, int(bs_cur * 0.06))))
+        out_b.extend(_draw(hard_old_spaced_hu, max(1, int(bs_cur * 0.09))))
+        if ml_pos:
+            out_b.extend(_draw(ml_pos, max(1, int(bs_cur * 0.03))))
+        if ml_neg:
+            out_b.extend(_draw(ml_neg, max(1, int(bs_cur * 0.03))))
         rem = max(4, bs_cur - len(out_b))
-        out_b.extend(_draw(gold_pos, max(1, int(rem * 0.24))))
-        out_b.extend(_draw(gold_hd, max(1, int(rem * 0.28))))
-        out_b.extend(_draw(gold_nat, max(1, int(rem * 0.38))))
-        out_b.extend(_draw(gold_pr, max(0, rem - len(out_b) + (bs_cur - rem))))
+        out_b.extend(_draw(gold_pos, max(1, int(rem * 0.25))))
+        out_b.extend(_draw(gold_hd, max(1, int(rem * 0.25))))
+        out_b.extend(_draw(gold_nat, max(1, int(rem * 0.36))))
+        out_b.extend(_draw(gold_pr, max(0, bs_cur - len(out_b))))
         fb = gold_nat or gold_pos or distill_pool
         while len(out_b) < bs_cur and fb:
             out_b.append(rng.choice(fb))
@@ -494,9 +590,14 @@ def main() -> None:
                     target_ema[k].copy_(v.detach().cpu())
 
     def _nested_step_loss(od: dict[str, torch.Tensor], bk: dict[str, torch.Tensor], use_t3: bool) -> torch.Tensor:
-        # Base supervision across R0, R1, T1, T2
-        l_ai_t2f = compute_kd_plus_gold_loss_v130(od["logit_ai_t2_final"], bk, axis="ai")
-        l_ai_t2r = compute_kd_plus_gold_loss_v130(od["logit_ai_t2"], bk, axis="ai")
+        # Stage-wise Residual Boosting: T2 focuses 2.5x on R0's mistakes!
+        with torch.no_grad():
+            t_p_ai = torch.where(bk["has_ai"] > 0.5, bk["y_ai"], torch.sigmoid(bk["t_ai_lg"]))
+            err_r0 = (torch.sigmoid(od["logit_ai_r0"].float()) - t_p_ai).abs()
+            t2_focus_w = 1.0 + 1.5 * (err_r0 >= 0.15).float()
+
+        l_ai_t2f = compute_kd_plus_gold_loss_v130(od["logit_ai_t2_final"], bk, axis="ai", sample_weight=t2_focus_w)
+        l_ai_t2r = compute_kd_plus_gold_loss_v130(od["logit_ai_t2"], bk, axis="ai", sample_weight=t2_focus_w)
         l_ai_t1 = compute_kd_plus_gold_loss_v130(od["logit_ai_t1"], bk, axis="ai")
         l_ai_r1 = compute_kd_plus_gold_loss_v130(od["logit_ai_r1"], bk, axis="ai")
         l_ai_r0 = compute_kd_plus_gold_loss_v130(od["logit_ai_r0"], bk, axis="ai")
@@ -509,38 +610,32 @@ def main() -> None:
         l_ebt_ai = compute_kd_plus_gold_loss_v130(od["ebt_margin"], bk, axis="ai")
         l_ebt_pr = compute_kd_plus_gold_loss_v130(od["ebt_promo_margin"], bk, axis="promo")
 
-        # T3 Error-Focused Progressive Correction + Ouro Conditional Halting Utility Supervision!
+        # T3 Detached Residual Error-Correction (4.0x focus on T2 mistakes!) + Ouro Conditional Halting Utility!
         l_t3_total = l_ai_t2f * 0.0
         if use_t3:
             with torch.no_grad():
-                t_p_ai = torch.where(bk["has_ai"] > 0.5, bk["y_ai"], torch.sigmoid(bk["t_ai_lg"]))
                 p_t2 = torch.sigmoid(od["logit_ai_t2_final"].float())
                 err_t2 = (p_t2 - t_p_ai).abs()
-                # Focus 3.5x gradient power on T2 mistakes & boundary cases so T3 actively corrects T2!
-                t3_focus_w = 1.0 + 2.5 * (err_t2 >= 0.15).float()
+                t3_focus_w = 1.0 + 3.0 * (err_t2 >= 0.12).float()
 
             l_ai_t3f = compute_kd_plus_gold_loss_v130(od["logit_ai_t3_final"], bk, axis="ai", sample_weight=t3_focus_w)
             l_ai_t3r = compute_kd_plus_gold_loss_v130(od["logit_ai_t3"], bk, axis="ai", sample_weight=t3_focus_w)
             l_pr_t3f = compute_kd_plus_gold_loss_v130(od["logit_promo_t3_final"], bk, axis="promo")
 
-            # Monotonic error-shrink margin: when T2 has error >= 0.15, T3 must strictly shrink error!
             p_t3 = torch.sigmoid(od["logit_ai_t3_final"].float())
             err_t3 = (p_t3 - t_p_ai).abs()
-            hard_m = (err_t2 >= 0.15) & ((bk["has_ai"] > 0.5) | (bk["has_t"] > 0.5))
+            hard_m = (err_t2 >= 0.12) & ((bk["has_ai"] > 0.5) | (bk["has_t"] > 0.5))
             l_mono = F.relu(err_t3[hard_m] - err_t2[hard_m] + 0.02).mean() if hard_m.any() else l_ai_t2f * 0.0
 
-            # Ouro Utility Halting Gate (`escalate_t3_logit`): fire when T3 improves over T2 OR sample is uncertain!
             with torch.no_grad():
                 u_gain = err_t2 - err_t3.detach()
-                y_esc = ((u_gain >= 0.025) | ((p_t2 >= 0.12) & (p_t2 <= 0.88) & (err_t2 >= 0.18))).float()
+                y_esc = ((u_gain >= 0.020) | ((p_t2 >= 0.12) & (p_t2 <= 0.88) & (err_t2 >= 0.15))).float()
             l_halt = F.binary_cross_entropy_with_logits(od["escalate_t3_logit"].float(), y_esc)
 
-            l_t3_total = 1.00 * l_ai_t3f + 0.30 * l_ai_t3r + 0.65 * l_pr_t3f + 0.35 * l_mono + 0.20 * l_halt
+            l_t3_total = 1.10 * l_ai_t3f + 0.35 * l_ai_t3r + 0.65 * l_pr_t3f + 0.40 * l_mono + 0.22 * l_halt
 
-        # R1 deferral head (autocast-safe BCEWithLogits!)
         with torch.no_grad():
-            t_p_ai_r1 = torch.where(bk["has_ai"] > 0.5, bk["y_ai"], torch.sigmoid(bk["t_ai_lg"]))
-            err_r1 = (torch.sigmoid(od["logit_ai_r1"].float()) - t_p_ai_r1).abs()
+            err_r1 = (torch.sigmoid(od["logit_ai_r1"].float()) - t_p_ai).abs()
             y_def_r1 = (err_r1 >= 0.20).float()
         l_def_r1 = F.binary_cross_entropy_with_logits(od["defer_r1_logit"].float(), y_def_r1)
 
@@ -552,10 +647,10 @@ def main() -> None:
         l_era = era_grl(od["emb_ai"], bk["era5"], era_v, lam=0.50) if int(era_v.sum().item()) >= 8 else l_ai_t2f * 0.0
 
         return (
-            (0.75 if use_t3 else 1.00) * l_ai_t2f + 0.25 * l_ai_t2r + 0.20 * l_ai_t1 + 0.18 * l_ai_r1 + 0.25 * l_ai_r0
-            + (0.45 if use_t3 else 0.70) * l_pr_t2f + 0.20 * l_pr_t2r + 0.12 * l_pr_r1 + 0.20 * l_pr_r0
+            1.00 * l_ai_t2f + 0.30 * l_ai_t2r + 0.22 * l_ai_t1 + 0.18 * l_ai_r1 + 0.25 * l_ai_r0
+            + 0.65 * l_pr_t2f + 0.20 * l_pr_t2r + 0.12 * l_pr_r1 + 0.20 * l_pr_r0
             + l_t3_total
-            + 0.20 * l_ebt_ai + 0.12 * l_ebt_pr + 0.10 * l_def_r1 + 0.10 * l_s4 + 0.12 * l_era
+            + 0.22 * l_ebt_ai + 0.12 * l_ebt_pr + 0.10 * l_def_r1 + 0.10 * l_s4 + 0.12 * l_era
         )
 
     model.train()
@@ -565,24 +660,23 @@ def main() -> None:
         for pg in opt2.param_groups:
             pg["lr"] = pg["base_lr"] * mult
         bk = _collate_student_batch(_sample_batch(bs), tokenizer, device, args.max_len, args.head_len, rng=rng, punct_jitter_prob=0.35, need_bpe=True)
-        # Stochastic Depth: 50% `outer_steps=3` (true T3 active error correction) & 50% `outer_steps=2`!
         use_t3 = (step % 2 == 0)
         opt2.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", enabled=torch.cuda.is_available(), dtype=amp_dtype):
             od = model(
                 bk["ids"], bk["msk"], bk["st"], bk["eg"], bk["tg"],
-                bk["c1"], bk["c2"], bk["c3"], bk["cm"], bk["cf"], outer_steps=3 if use_t3 else 2,
+                bk["c1"], bk["c2"], bk["c3"], bk["cm"], bk["cf"],
+                outer_steps=3 if use_t3 else 2, r0_drop_p=float(args.r0_drop_p),
             )
             loss = _nested_step_loss(od, bk, use_t3=use_t3)
 
-            # Counterfactual Mirror Margin Loss (every 3rd step, with outer_steps=3!)
             if cf_pairs and (step % 3 == 0):
                 n_cf = 4 if args.smoke_test else 16
                 ch = rng.sample(cf_pairs, min(n_cf, len(cf_pairs)))
                 bk_a = _collate_student_batch([{"text": x["ai_text"]} for x in ch], tokenizer, device, args.max_len, args.head_len, rng=None, punct_jitter_prob=0.0, need_bpe=True)
                 bk_h = _collate_student_batch([{"text": x["human_text"]} for x in ch], tokenizer, device, args.max_len, args.head_len, rng=None, punct_jitter_prob=0.0, need_bpe=True)
-                oa = model(bk_a["ids"], bk_a["msk"], bk_a["st"], bk_a["eg"], bk_a["tg"], bk_a["c1"], bk_a["c2"], bk_a["c3"], bk_a["cm"], bk_a["cf"], outer_steps=3)
-                oh = model(bk_h["ids"], bk_h["msk"], bk_h["st"], bk_h["eg"], bk_h["tg"], bk_h["c1"], bk_h["c2"], bk_h["c3"], bk_h["cm"], bk_h["cf"], outer_steps=3)
+                oa = model(bk_a["ids"], bk_a["msk"], bk_a["st"], bk_a["eg"], bk_a["tg"], bk_a["c1"], bk_a["c2"], bk_a["c3"], bk_a["cm"], bk_a["cf"], outer_steps=3, r0_drop_p=float(args.r0_drop_p))
+                oh = model(bk_h["ids"], bk_h["msk"], bk_h["st"], bk_h["eg"], bk_h["tg"], bk_h["c1"], bk_h["c2"], bk_h["c3"], bk_h["cm"], bk_h["cf"], outer_steps=3, r0_drop_p=float(args.r0_drop_p))
                 l_cf = (
                     F.softplus(1.6 - (oa["logit_ai"].float() - oh["logit_ai"].float())).mean()
                     + 0.5 * F.softplus(1.5 - (oa["logit_ai_t2_final"].float() - oh["logit_ai_t2_final"].float())).mean()
@@ -590,7 +684,6 @@ def main() -> None:
                 )
                 loss = loss + 0.20 * l_cf
 
-            # Native Long-Document DynaSeam Supervision (every 6th step)
             if longform_train and (step % 6 == 0):
                 n_ld = 2 if args.smoke_test else 6
                 docs = rng.sample(longform_train, min(n_ld, len(longform_train)))
@@ -600,7 +693,7 @@ def main() -> None:
                     if not chunks:
                         continue
                     bk_c = _collate_student_batch([{"text": c["text"]} for c in chunks], tokenizer, device, args.max_len, args.head_len, rng=None, punct_jitter_prob=0.0, need_bpe=True)
-                    oc = model(bk_c["ids"], bk_c["msk"], bk_c["st"], bk_c["eg"], bk_c["tg"], bk_c["c1"], bk_c["c2"], bk_c["c3"], bk_c["cm"], bk_c["cf"], outer_steps=2)
+                    oc = model(bk_c["ids"], bk_c["msk"], bk_c["st"], bk_c["eg"], bk_c["tg"], bk_c["c1"], bk_c["c2"], bk_c["c3"], bk_c["cm"], bk_c["cf"], outer_steps=2, r0_drop_p=0.0)
                     cm_t = torch.from_numpy(np.stack([c["chunk_meta"] for c in chunks], 0).astype(np.float32)).unsqueeze(0).to(device)
                     vm_t = torch.ones((1, len(chunks)), dtype=torch.float32, device=device)
                     da, dp = model.aggregate_long_chunks(oc["emb_ai"].unsqueeze(0), oc["emb_pr"].unsqueeze(0), oc["logit_ai"].unsqueeze(0), oc["logit_promo"].unsqueeze(0), cm_t, vm_t)
@@ -652,7 +745,8 @@ def main() -> None:
         with torch.amp.autocast("cuda", enabled=torch.cuda.is_available(), dtype=amp_dtype):
             od = model(
                 bk["ids"], bk["msk"], bk["st"], bk["eg"], bk["tg"],
-                bk["c1"], bk["c2"], bk["c3"], bk["cm"], bk["cf"], outer_steps=3 if use_t3 else 2,
+                bk["c1"], bk["c2"], bk["c3"], bk["cm"], bk["cf"],
+                outer_steps=3 if use_t3 else 2, r0_drop_p=min(0.35, float(args.r0_drop_p)),
             )
             loss = _nested_step_loss(od, bk, use_t3=use_t3)
         loss.backward()
@@ -713,14 +807,14 @@ def main() -> None:
     p_r0_ai_cal = apply_spline_temp_lut(p_r0_ai_raw, lut_ai_r0)
     pos_m = y_cal_ai >= 0.5
     neg_m = y_cal_ai < 0.5
-    r0_pol = {"enabled": False, "tau_ai": 0.05, "tau_promo": 0.05, "defer_max": 0.25, "max_chars": 160, "cal_exit_rate": 0.0}
+    r0_pol = {"enabled": False, "tau_ai": 0.04, "tau_promo": 0.05, "defer_max": 0.35, "max_chars": 160, "cal_exit_rate": 0.0}
     if pos_m.sum() >= 100:
-        for tau_a in (0.08, 0.06, 0.04, 0.025):
-            exit_m = (p_r0_ai_cal <= tau_a) & (p_pr_wild <= 0.05) & (p_cal["p_defer_r0"] <= 0.30)
+        for tau_a in (0.06, 0.04, 0.025, 0.015):
+            exit_m = (p_r0_ai_cal <= tau_a) & (p_pr_wild <= 0.05) & (p_cal["p_defer_r0"] <= 0.35)
             miss_rate = float(exit_m[pos_m].mean())
-            if miss_rate <= 0.01:
+            if miss_rate <= 0.025:
                 r0_pol = {
-                    "enabled": True, "tau_ai": tau_a, "tau_promo": 0.05, "defer_max": 0.30,
+                    "enabled": True, "tau_ai": tau_a, "tau_promo": 0.05, "defer_max": 0.35,
                     "max_chars": 160, "cal_pos_miss_rate": round(miss_rate, 4),
                     "cal_exit_rate": round(float(exit_m[neg_m].mean()), 4),
                 }
@@ -738,6 +832,7 @@ def main() -> None:
         "cal_t3_rate": round(float(((p_esc_cal >= tau_esc) | ((expit(np.clip(p_cal["logit_ai_t2_final"] / t_ai, -30, 30)) >= 0.12) & (expit(np.clip(p_cal["logit_ai_t2_final"] / t_ai, -30, 30)) <= 0.88))).mean()), 4),
     }
 
+    w_mix_learned = torch.softmax(model.ai_rung_mix_logits.detach().float(), dim=0).cpu().tolist()
     manifest = {
         "version": args.version,
         "max_len": int(args.max_len),
@@ -751,6 +846,7 @@ def main() -> None:
         "lut_promo_full": lut_pr_full,
         "rung0_ltt_policy": r0_pol,
         "t3_escalation_policy": t3_pol,
+        "ai_rung_mix_r0_t1_t2_ebt": [round(float(x), 4) for x in w_mix_learned],
         "promo_char_rho": round(float(torch.sigmoid(model.promo_char_rho_raw).item()), 4),
         "optional_host_meta_adapter": None,
     }

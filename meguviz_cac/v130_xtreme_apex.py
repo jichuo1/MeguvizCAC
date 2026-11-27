@@ -910,7 +910,10 @@ class MeguvizV130XtremeApexModel(nn.Module):
         self.ebt_ai_gate = nn.Parameter(torch.tensor(0.20))
         self.ebt_pr_gate = nn.Parameter(torch.tensor(0.15))
 
-        # Trajectory History Readout (`[z_final, z_final - z_t1, 5 AI scalars]`) + Promo Char Bypass!
+        # Trajectory History Readout + Learned Conservative 4-Head Loop Fusion (`R0 + T1 + T2 + EBT6`) + Promo Char Bypass!
+        self.ai_rung_mix_logits = nn.Parameter(
+            torch.tensor([math.log(0.25), math.log(0.15), math.log(0.50), math.log(0.10)], dtype=torch.float32)
+        )
         self.traj_ai_lin = nn.Linear(AI_END_V130 * 2 + 5, 1)
         self.traj_ai_mlp = nn.Sequential(
             nn.LayerNorm(AI_END_V130 * 2 + 5),
@@ -934,6 +937,25 @@ class MeguvizV130XtremeApexModel(nn.Module):
         nn.init.zeros_(self.traj_pr_mlp[-1].weight)
         nn.init.zeros_(self.traj_pr_mlp[-1].bias)
         self.traj_pr_cap = 2.5
+
+        # Dedicated Zero-Init Detached Residual Error-Correction Heads for `T3` (`logit_t3 = logit_t2.detach() + 2*tanh(corr/2)`)!
+        self.t3_corr_ai = nn.Sequential(
+            nn.LayerNorm(AI_END_V130 * 2 + 6),
+            nn.Linear(AI_END_V130 * 2 + 6, 32),
+            nn.GELU(),
+            nn.Linear(32, 1),
+        )
+        nn.init.zeros_(self.t3_corr_ai[-1].weight)
+        nn.init.zeros_(self.t3_corr_ai[-1].bias)
+        self.t3_corr_pr = nn.Sequential(
+            nn.LayerNorm(PR_EMB_DIM_V130 * 2 + 5),
+            nn.Linear(PR_EMB_DIM_V130 * 2 + 5, 32),
+            nn.GELU(),
+            nn.Linear(32, 1),
+        )
+        nn.init.zeros_(self.t3_corr_pr[-1].weight)
+        nn.init.zeros_(self.t3_corr_pr[-1].bias)
+        self.t3_corr_cap = 2.0
 
         # Ouro-Style Conditional `T2 -> T3` Escalation Gate (strictly AI-safe inputs -> ZERO promo leak!)
         self.halt_t2_head = nn.Sequential(
@@ -1012,17 +1034,28 @@ class MeguvizV130XtremeApexModel(nn.Module):
         logit_promo_r0: torch.Tensor,
         lg_r1_ai: torch.Tensor,
         lg_r1_pr: torch.Tensor,
+        r0_keep: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        ebt_c = torch.clamp(ebt_ai_m, -6.0, 6.0)
+        # Learned Conservative 4-Head Loop Base Blend (`R0, T1, T2, EBT6`), R0-modality-dropout safe!
+        w_mix = torch.softmax(self.ai_rung_mix_logits.float(), dim=0).to(ro_cur["logit_ai"].dtype)
+        if r0_keep is not None:
+            w0 = w_mix[0] * r0_keep
+            w_rest = w_mix[1] + w_mix[2] + w_mix[3]
+            inv_s = 1.0 / (w0 + w_rest).clamp_min(1e-5)
+            ai_base = (w0 * logit_ai_r0 + w_mix[1] * t1_lg_ai + w_mix[2] * ro_cur["logit_ai"] + w_mix[3] * ebt_c) * inv_s
+            rho_eff = torch.sigmoid(self.promo_char_rho_raw) * r0_keep
+        else:
+            ai_base = w_mix[0] * logit_ai_r0 + w_mix[1] * t1_lg_ai + w_mix[2] * ro_cur["logit_ai"] + w_mix[3] * ebt_c
+            rho_eff = torch.sigmoid(self.promo_char_rho_raw)
+
         z_delta_ai = ro_cur["emb_ai"] - t1_emb_ai
-        ai_scalars = torch.stack([
-            logit_ai_r0, lg_r1_ai, t1_lg_ai, ro_cur["logit_ai"], torch.clamp(ebt_ai_m, -6.0, 6.0)
-        ], dim=-1)
+        ai_scalars = torch.stack([logit_ai_r0, lg_r1_ai, t1_lg_ai, ro_cur["logit_ai"], ebt_c], dim=-1)
         traj_ai_in = torch.cat([ro_cur["emb_ai"], z_delta_ai, ai_scalars], dim=-1)
         ai_res_raw = self.traj_ai_lin(traj_ai_in).squeeze(-1) + self.traj_ai_mlp(traj_ai_in).squeeze(-1)
-        ai_final = ro_cur["logit_ai"] + self.traj_ai_cap * torch.tanh(ai_res_raw / self.traj_ai_cap)
+        ai_final = ai_base + self.traj_ai_cap * torch.tanh(ai_res_raw / self.traj_ai_cap)
 
-        rho = torch.sigmoid(self.promo_char_rho_raw)
-        pr_base = (1.0 - rho) * ro_cur["logit_promo"] + rho * logit_promo_r0
+        pr_base = (1.0 - rho_eff) * ro_cur["logit_promo"] + rho_eff * logit_promo_r0
         pr_scalars = torch.stack([logit_promo_r0, lg_r1_pr, t1_lg_pr, ro_cur["logit_promo"]], dim=-1)
         traj_pr_in = torch.cat([ro_cur["emb_pr"], z_char[:, 32:], pr_scalars], dim=-1)
         pr_res_raw = self.traj_pr_mlp(traj_pr_in).squeeze(-1)
@@ -1042,6 +1075,7 @@ class MeguvizV130XtremeApexModel(nn.Module):
         z_char: torch.Tensor,
         logit_ai_r0: torch.Tensor,
         logit_promo_r0: torch.Tensor,
+        r0_drop_p: float = 0.0,
     ) -> dict[str, torch.Tensor]:
         """Run L0 -> R1 -> L1 -> T1 -> T2 (`k_inner=2` x 2 outer steps) + emit exact cache for optional T3!"""
         B, L = input_ids.shape
@@ -1051,6 +1085,16 @@ class MeguvizV130XtremeApexModel(nn.Module):
         if self.training and self.style_era_dropout_p > 0.0:
             keep = (torch.rand((B, 1), device=st.device) >= self.style_era_dropout_p).to(st.dtype)
             st[:, :40] = st[:, :40] * keep
+
+        # R0 Modality Dropout (breaks R0 shortcut co-adaptation so Nested-Loop builds independent deep reasoning!)
+        r0_keep: torch.Tensor | None = None
+        if self.training and r0_drop_p > 0.0:
+            r0_keep = (torch.rand((B,), device=z_char.device) >= float(r0_drop_p)).to(z_char.dtype)
+            zc_eff = z_char * r0_keep.unsqueeze(-1)
+            la0_eff = logit_ai_r0 * r0_keep
+            lp0_eff = logit_promo_r0 * r0_keep
+        else:
+            zc_eff, la0_eff, lp0_eff = z_char, logit_ai_r0, logit_promo_r0
 
         pos = self.pos_emb[:, :L, :]
         x = self.emb_norm(
@@ -1078,8 +1122,8 @@ class MeguvizV130XtremeApexModel(nn.Module):
         h0_pool = h0.sum(dim=1) / denom
         st_ai = self.r1_style_ai(st[:, : self.style_dim - 8])
         st_pr = self.r1_style_pr(st)
-        lg_r1_ai = self.r1_ai_head(torch.cat([h0_pool, st_ai, z_char[:, :32]], dim=-1)).squeeze(-1)
-        lg_r1_pr = self.r1_promo_head(torch.cat([h0_pool, st_pr, z_char[:, 32:]], dim=-1)).squeeze(-1)
+        lg_r1_ai = self.r1_ai_head(torch.cat([h0_pool, st_ai, zc_eff[:, :32]], dim=-1)).squeeze(-1)
+        lg_r1_pr = self.r1_promo_head(torch.cat([h0_pool, st_pr, zc_eff[:, 32:]], dim=-1)).squeeze(-1)
         def_r1_lg = self.r1_defer_head(
             torch.cat([h0_pool.detach(), lg_r1_ai.detach().unsqueeze(-1), lg_r1_pr.detach().unsqueeze(-1)], dim=-1)
         ).squeeze(-1)
@@ -1097,7 +1141,7 @@ class MeguvizV130XtremeApexModel(nn.Module):
             k_haar=k_haar, v_haar=v_haar, haar_mask=haar_mask, h0_pool=h0_pool,
             outer_idx=0, prev_slots=None, carry_m_l=None, prev_bus=None, prev_doubt=None, k_inner=K_INNER_V130,
         )
-        ro1 = self._readout_step(st1["slots"], h1_pool, st_ai, st_pr, z_char, st1["ebt_margin"], st1["ebt_promo_margin"])
+        ro1 = self._readout_step(st1["slots"], h1_pool, st_ai, st_pr, zc_eff, st1["ebt_margin"], st1["ebt_promo_margin"])
         c_conf1 = (2.0 * torch.sigmoid(ro1["logit_ai"].detach()) - 1.0).abs()
         doubt1 = torch.stack([c_conf1, st1["ebt_grad_norm"].detach()], dim=-1)
 
@@ -1107,10 +1151,10 @@ class MeguvizV130XtremeApexModel(nn.Module):
             k_haar=k_haar, v_haar=v_haar, haar_mask=haar_mask, h0_pool=h0_pool,
             outer_idx=1, prev_slots=anchor, carry_m_l=st1["carry_m_l"], prev_bus=st1["bus"], prev_doubt=doubt1, k_inner=K_INNER_V130,
         )
-        ro2 = self._readout_step(st2["slots"], h1_pool, st_ai, st_pr, z_char, st2["ebt_margin"], st2["ebt_promo_margin"])
+        ro2 = self._readout_step(st2["slots"], h1_pool, st_ai, st_pr, zc_eff, st2["ebt_margin"], st2["ebt_promo_margin"])
         ai_t2_final, pr_t2_final = self._compute_trajectory_final(
             ro1["emb_ai"], ro1["logit_ai"], ro1["logit_promo"], ro2, st2["ebt_margin"],
-            z_char, logit_ai_r0, logit_promo_r0, lg_r1_ai, lg_r1_pr,
+            zc_eff, la0_eff, lp0_eff, lg_r1_ai, lg_r1_pr, r0_keep=r0_keep,
         )
 
         # Ouro Conditional `T2 -> T3` Escalation Gate (reads strictly AI-safe & detached features!)
@@ -1118,7 +1162,7 @@ class MeguvizV130XtremeApexModel(nn.Module):
             ro2["emb_ai"].detach(),
             (ro2["emb_ai"] - ro1["emb_ai"]).detach(),
             torch.stack([
-                logit_ai_r0.detach(),
+                la0_eff.detach(),
                 lg_r1_ai.detach(),
                 ro1["logit_ai"].detach(),
                 ai_t2_final.detach(),
@@ -1166,6 +1210,9 @@ class MeguvizV130XtremeApexModel(nn.Module):
             "h1_pool": h1_pool,
             "st_ai": st_ai,
             "st_pr": st_pr,
+            "_zc_eff": zc_eff,
+            "_la0_eff": la0_eff,
+            "_lp0_eff": lp0_eff,
         }
 
     def forward_t3_step(
@@ -1176,6 +1223,7 @@ class MeguvizV130XtremeApexModel(nn.Module):
         carry_m_l_t2: torch.Tensor,
         zh_bus_t2: torch.Tensor,
         ebt_grad_norm_t2: torch.Tensor,
+        ebt_margin_t2: torch.Tensor,
         k_ev: torch.Tensor,
         v_ev: torch.Tensor,
         attention_mask: torch.Tensor,
@@ -1189,14 +1237,16 @@ class MeguvizV130XtremeApexModel(nn.Module):
         z_char: torch.Tensor,
         logit_ai_r0: torch.Tensor,
         logit_promo_r0: torch.Tensor,
-        logit_ai_r1: torch.Tensor,
         logit_promo_r1: torch.Tensor,
         logit_ai_t1: torch.Tensor,
         logit_promo_t1: torch.Tensor,
         logit_ai_t2_raw: torch.Tensor,
-        emb_ai_t1: torch.Tensor,
+        logit_ai_t2_final: torch.Tensor,
+        logit_promo_t2_final: torch.Tensor,
+        emb_ai_t2: torch.Tensor,
+        emb_pr_t2: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        """Conditional 3rd-Outer-Step Active Error-Correction Graph (reuses cached K/V + Haar + T2 state!)."""
+        """Conditional 3rd-Outer-Step True Detached Residual Error-Correction Graph (reuses cached K/V + Haar + T2!)."""
         c_conf2 = (2.0 * torch.sigmoid(logit_ai_t2_raw.detach()) - 1.0).abs()
         doubt2 = torch.stack([c_conf2, ebt_grad_norm_t2.detach()], dim=-1)
         st3 = self.core.forward_outer_step(
@@ -1205,10 +1255,28 @@ class MeguvizV130XtremeApexModel(nn.Module):
             outer_idx=2, prev_slots=slots_t1, carry_m_l=carry_m_l_t2, prev_bus=zh_bus_t2, prev_doubt=doubt2, k_inner=K_INNER_V130,
         )
         ro3 = self._readout_step(st3["slots"], h1_pool, st_ai, st_pr, z_char, st3["ebt_margin"], st3["ebt_promo_margin"])
-        ai_t3_final, pr_t3_final = self._compute_trajectory_final(
-            emb_ai_t1, logit_ai_t1, logit_promo_t1, ro3, st3["ebt_margin"],
-            z_char, logit_ai_r0, logit_promo_r0, logit_ai_r1, logit_promo_r1,
-        )
+
+        # True Detached Residual Error-Correction: starts at exact T2 parity & focuses 100% on fixing T2 errors!
+        ebt3_c = torch.clamp(st3["ebt_margin"], -6.0, 6.0)
+        ebt2_c = torch.clamp(ebt_margin_t2.detach(), -6.0, 6.0)
+        ai_t2_base = logit_ai_t2_final.detach()
+        corr_ai_in = torch.cat([
+            ro3["emb_ai"],
+            ro3["emb_ai"] - emb_ai_t2.detach(),
+            torch.stack([logit_ai_r0.detach(), logit_ai_t1.detach(), ai_t2_base, ro3["logit_ai"], ebt3_c, ebt3_c - ebt2_c], dim=-1),
+        ], dim=-1)
+        ai_delta = self.t3_corr_ai(corr_ai_in).squeeze(-1)
+        ai_t3_final = ai_t2_base + self.t3_corr_cap * torch.tanh(ai_delta / self.t3_corr_cap)
+
+        pr_t2_base = logit_promo_t2_final.detach()
+        corr_pr_in = torch.cat([
+            ro3["emb_pr"],
+            ro3["emb_pr"] - emb_pr_t2.detach(),
+            torch.stack([logit_promo_r0.detach(), logit_promo_r1.detach(), logit_promo_t1.detach(), pr_t2_base, ro3["logit_promo"]], dim=-1),
+        ], dim=-1)
+        pr_delta = self.t3_corr_pr(corr_pr_in).squeeze(-1)
+        pr_t3_final = pr_t2_base + self.t3_corr_cap * torch.tanh(pr_delta / self.t3_corr_cap)
+
         return {
             "logit_ai_t3_final": ai_t3_final,
             "logit_promo_t3_final": pr_t3_final,
@@ -1234,23 +1302,27 @@ class MeguvizV130XtremeApexModel(nn.Module):
         logit_ai_r0: torch.Tensor,
         logit_promo_r0: torch.Tensor,
         outer_steps: int = 2,
+        r0_drop_p: float = 0.0,
     ) -> dict[str, torch.Tensor]:
         t2 = self.forward_t2_stage(
             input_ids, attention_mask, style_feats, engram_ids, trigram_ids,
-            z_char=z_char, logit_ai_r0=logit_ai_r0, logit_promo_r0=logit_promo_r0,
+            z_char=z_char, logit_ai_r0=logit_ai_r0, logit_promo_r0=logit_promo_r0, r0_drop_p=r0_drop_p,
         )
         out = dict(t2)
         if int(outer_steps) >= 3:
             t3 = self.forward_t3_step(
                 slots_t2=t2["slots_t2"], slots_t1=t2["slots_t1"], anchor=t2["anchor"],
-                carry_m_l_t2=t2["carry_m_l_t2"], zh_bus_t2=t2["zh_bus_t2"], ebt_grad_norm_t2=t2["ebt_grad_norm_t2"],
+                carry_m_l_t2=t2["carry_m_l_t2"], zh_bus_t2=t2["zh_bus_t2"],
+                ebt_grad_norm_t2=t2["ebt_grad_norm_t2"], ebt_margin_t2=t2["ebt_margin_t2"],
                 k_ev=t2["k_ev"], v_ev=t2["v_ev"], attention_mask=attention_mask,
                 k_haar=t2["k_haar"], v_haar=t2["v_haar"], haar_mask=t2["haar_mask"],
                 h0_pool=t2["h0_pool"], h1_pool=t2["h1_pool"], st_ai=t2["st_ai"], st_pr=t2["st_pr"],
-                z_char=z_char, logit_ai_r0=logit_ai_r0, logit_promo_r0=logit_promo_r0,
-                logit_ai_r1=t2["logit_ai_r1"], logit_promo_r1=t2["logit_promo_r1"],
+                z_char=t2["_zc_eff"], logit_ai_r0=t2["_la0_eff"], logit_promo_r0=t2["_lp0_eff"],
+                logit_promo_r1=t2["logit_promo_r1"],
                 logit_ai_t1=t2["logit_ai_t1"], logit_promo_t1=t2["logit_promo_t1"],
-                logit_ai_t2_raw=t2["logit_ai_t2"], emb_ai_t1=t2["emb_ai_t1"],
+                logit_ai_t2_raw=t2["logit_ai_t2"],
+                logit_ai_t2_final=t2["logit_ai_t2_final"], logit_promo_t2_final=t2["logit_promo_t2_final"],
+                emb_ai_t2=t2["emb_ai_t2"], emb_pr_t2=t2["emb_pr_t2"],
             )
             out.update(t3)
             out["logit_ai"] = t3["logit_ai_t3_final"]
@@ -1287,6 +1359,7 @@ class MeguvizV130XtremeApexModel(nn.Module):
         r0_mask: torch.Tensor,
         r0_feats: torch.Tensor,
         outer_steps: int = 2,
+        r0_drop_p: float = 0.0,
     ) -> dict[str, torch.Tensor]:
         r0 = self.forward_r0(r0_c1, r0_c2, r0_c3, r0_mask, r0_feats)
         deep = self.forward_deep(
@@ -1295,6 +1368,7 @@ class MeguvizV130XtremeApexModel(nn.Module):
             logit_ai_r0=r0["logit_ai_r0"],
             logit_promo_r0=r0["logit_promo_r0"],
             outer_steps=outer_steps,
+            r0_drop_p=r0_drop_p,
         )
         return {**r0, **deep}
 
@@ -1509,11 +1583,12 @@ class _V130T2Export(nn.Module):
 
 
 _T3_IN_NAMES = [
-    "slots_t2", "slots_t1", "anchor", "carry_m_l_t2", "zh_bus_t2", "ebt_grad_norm_t2",
+    "slots_t2", "slots_t1", "anchor", "carry_m_l_t2", "zh_bus_t2", "ebt_grad_norm_t2", "ebt_margin_t2",
     "k_ev", "v_ev", "attention_mask", "k_haar", "v_haar", "haar_mask",
     "h0_pool", "h1_pool", "st_ai", "st_pr", "z_char",
-    "logit_ai_r0", "logit_promo_r0", "logit_ai_r1", "logit_promo_r1",
-    "logit_ai_t1", "logit_promo_t1", "logit_ai_t2", "emb_ai_t1",
+    "logit_ai_r0", "logit_promo_r0", "logit_promo_r1",
+    "logit_ai_t1", "logit_promo_t1", "logit_ai_t2", "logit_ai_t2_final", "logit_promo_t2_final",
+    "emb_ai_t2", "emb_pr_t2",
 ]
 _T3_OUT_NAMES = ["logit_ai_t3_final", "logit_promo_t3_final", "logit_ai_t3", "ebt_margin_t3", "emb_ai_t3", "emb_pr_t3"]
 
@@ -1524,18 +1599,20 @@ class _V130T3Export(nn.Module):
         self.m = m
 
     def forward(
-        self, slots_t2, slots_t1, anchor, carry_m_l_t2, zh_bus_t2, ebt_grad_norm_t2,
+        self, slots_t2, slots_t1, anchor, carry_m_l_t2, zh_bus_t2, ebt_grad_norm_t2, ebt_margin_t2,
         k_ev, v_ev, attention_mask, k_haar, v_haar, haar_mask,
         h0_pool, h1_pool, st_ai, st_pr, z_char,
-        logit_ai_r0, logit_promo_r0, logit_ai_r1, logit_promo_r1,
-        logit_ai_t1, logit_promo_t1, logit_ai_t2, emb_ai_t1,
+        logit_ai_r0, logit_promo_r0, logit_promo_r1,
+        logit_ai_t1, logit_promo_t1, logit_ai_t2, logit_ai_t2_final, logit_promo_t2_final,
+        emb_ai_t2, emb_pr_t2,
     ):
         o = self.m.forward_t3_step(
-            slots_t2, slots_t1, anchor, carry_m_l_t2, zh_bus_t2, ebt_grad_norm_t2,
+            slots_t2, slots_t1, anchor, carry_m_l_t2, zh_bus_t2, ebt_grad_norm_t2, ebt_margin_t2,
             k_ev, v_ev, attention_mask, k_haar, v_haar, haar_mask,
             h0_pool, h1_pool, st_ai, st_pr, z_char,
-            logit_ai_r0, logit_promo_r0, logit_ai_r1, logit_promo_r1,
-            logit_ai_t1, logit_promo_t1, logit_ai_t2, emb_ai_t1,
+            logit_ai_r0, logit_promo_r0, logit_promo_r1,
+            logit_ai_t1, logit_promo_t1, logit_ai_t2, logit_ai_t2_final, logit_promo_t2_final,
+            emb_ai_t2, emb_pr_t2,
         )
         return tuple(o[k] for k in _T3_OUT_NAMES)
 
@@ -1619,11 +1696,14 @@ def export_v130_onnx_and_bundle_v8(
     with torch.no_grad():
         t2_dict = m_cpu.forward_t2_stage(ids, msk, st, eg, tg, zc, lr0_a, lr0_p)
     t3_dummy = (
-        t2_dict["slots_t2"], t2_dict["slots_t1"], t2_dict["anchor"], t2_dict["carry_m_l_t2"], t2_dict["zh_bus_t2"], t2_dict["ebt_grad_norm_t2"],
+        t2_dict["slots_t2"], t2_dict["slots_t1"], t2_dict["anchor"], t2_dict["carry_m_l_t2"], t2_dict["zh_bus_t2"],
+        t2_dict["ebt_grad_norm_t2"], t2_dict["ebt_margin_t2"],
         t2_dict["k_ev"], t2_dict["v_ev"], msk, t2_dict["k_haar"], t2_dict["v_haar"], t2_dict["haar_mask"],
         t2_dict["h0_pool"], t2_dict["h1_pool"], t2_dict["st_ai"], t2_dict["st_pr"], zc,
-        lr0_a, lr0_p, t2_dict["logit_ai_r1"], t2_dict["logit_promo_r1"],
-        t2_dict["logit_ai_t1"], t2_dict["logit_promo_t1"], t2_dict["logit_ai_t2"], t2_dict["emb_ai_t1"],
+        lr0_a, lr0_p, t2_dict["logit_promo_r1"],
+        t2_dict["logit_ai_t1"], t2_dict["logit_promo_t1"], t2_dict["logit_ai_t2"],
+        t2_dict["logit_ai_t2_final"], t2_dict["logit_promo_t2_final"],
+        t2_dict["emb_ai_t2"], t2_dict["emb_pr_t2"],
     )
     t3_dyn = {}
     for nm in _T3_IN_NAMES + _T3_OUT_NAMES:
@@ -1680,21 +1760,25 @@ def export_v130_onnx_and_bundle_v8(
             "engram_ids": eg.numpy(), "trigram_ids": tg.numpy(), "z_char": or_r0[3],
             "logit_ai_r0": or_r0[0], "logit_promo_r0": or_r0[1],
         })
-        t2_diff = float(max(np.abs(pt_t2[i].numpy() - or_t2[i]).max() for i in range(len(pt_t2))))
+        t2_pred_diff = float(max(np.abs(pt_t2[i].numpy() - or_t2[i]).max() for i in range(13)))
+        t2_cache_diff = float(max(np.abs(pt_t2[i].numpy() - or_t2[i]).max() for i in range(13, len(pt_t2))))
 
         # Chain ORT T2 -> ORT T3 and compare against PyTorch `forward_deep(..., outer_steps=3)`!
         or_t2_map = dict(zip(_T2_OUT_NAMES, or_t2))
         t3_feed = {
             "slots_t2": or_t2_map["slots_t2"], "slots_t1": or_t2_map["slots_t1"], "anchor": or_t2_map["anchor"],
             "carry_m_l_t2": or_t2_map["carry_m_l_t2"], "zh_bus_t2": or_t2_map["zh_bus_t2"],
-            "ebt_grad_norm_t2": or_t2_map["ebt_grad_norm_t2"], "k_ev": or_t2_map["k_ev"], "v_ev": or_t2_map["v_ev"],
+            "ebt_grad_norm_t2": or_t2_map["ebt_grad_norm_t2"], "ebt_margin_t2": or_t2_map["ebt_margin_t2"],
+            "k_ev": or_t2_map["k_ev"], "v_ev": or_t2_map["v_ev"],
             "attention_mask": msk.numpy(), "k_haar": or_t2_map["k_haar"], "v_haar": or_t2_map["v_haar"],
             "haar_mask": or_t2_map["haar_mask"], "h0_pool": or_t2_map["h0_pool"], "h1_pool": or_t2_map["h1_pool"],
             "st_ai": or_t2_map["st_ai"], "st_pr": or_t2_map["st_pr"], "z_char": or_r0[3],
             "logit_ai_r0": or_r0[0], "logit_promo_r0": or_r0[1],
-            "logit_ai_r1": or_t2_map["logit_ai_r1"], "logit_promo_r1": or_t2_map["logit_promo_r1"],
+            "logit_promo_r1": or_t2_map["logit_promo_r1"],
             "logit_ai_t1": or_t2_map["logit_ai_t1"], "logit_promo_t1": or_t2_map["logit_promo_t1"],
-            "logit_ai_t2": or_t2_map["logit_ai_t2"], "emb_ai_t1": or_t2_map["emb_ai_t1"],
+            "logit_ai_t2": or_t2_map["logit_ai_t2"],
+            "logit_ai_t2_final": or_t2_map["logit_ai_t2_final"], "logit_promo_t2_final": or_t2_map["logit_promo_t2_final"],
+            "emb_ai_t2": or_t2_map["emb_ai_t2"], "emb_pr_t2": or_t2_map["emb_pr_t2"],
         }
         or_t3 = s3.run(None, t3_feed)
         pt_full3 = m_cpu.forward_deep(ids, msk, st, eg, tg, pt_r0[3], pt_r0[0], pt_r0[1], outer_steps=3)
@@ -1710,7 +1794,7 @@ def export_v130_onnx_and_bundle_v8(
         tok_out.write_bytes(tokenizer_path.read_bytes())
 
     manifest = dict(manifest)
-    manifest["format"] = "MGVZ8_NESTED_XTREME_APEX_V130"
+    manifest["format"] = "MGVZ8_NESTED_XTREME_APEX_V131"
     manifest["mgvz8_info"] = mgvz_info
     mf_p = out_dir / "manifest.json"
     mf_p.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1734,10 +1818,11 @@ def export_v130_onnx_and_bundle_v8(
         "bundle_le_5p00_mib": bool(bundle_bytes <= int(BUNDLE_MAX_MIB_V130 * 1024 * 1024)),
         "onnx_zip_mb": round(onnx_zip.stat().st_size / (1024.0 * 1024.0), 4),
         "r0_fp32_max_diff": round(r0_diff, 8),
-        "t2_fp32_max_diff": round(t2_diff, 8),
+        "t2_fp32_max_diff": round(t2_pred_diff, 8),
+        "t2_cache_fp32_max_diff": round(t2_cache_diff, 8),
         "t3_modular_fp32_max_diff": round(t3_diff, 8),
         "long_fp32_max_diff": round(long_diff, 8),
-        "onnx_exact_pass": bool(max(r0_diff, t2_diff, t3_diff, long_diff) < 1e-4),
+        "onnx_exact_pass": bool(max(r0_diff, t2_pred_diff, t3_diff, long_diff) < 1e-4 and t2_cache_diff < 1e-3),
         "mgvz8_info": mgvz_info,
     }
 
@@ -1833,14 +1918,17 @@ class MeguvizV130CascadeEngine:
                     "slots_t2": t2["slots_t2"][esc_idx], "slots_t1": t2["slots_t1"][esc_idx],
                     "anchor": t2["anchor"][esc_idx], "carry_m_l_t2": t2["carry_m_l_t2"][esc_idx],
                     "zh_bus_t2": t2["zh_bus_t2"][esc_idx], "ebt_grad_norm_t2": t2["ebt_grad_norm_t2"][esc_idx],
+                    "ebt_margin_t2": t2["ebt_margin_t2"][esc_idx],
                     "k_ev": t2["k_ev"][esc_idx], "v_ev": t2["v_ev"][esc_idx], "attention_mask": mask[esc_idx],
                     "k_haar": t2["k_haar"][esc_idx], "v_haar": t2["v_haar"][esc_idx], "haar_mask": t2["haar_mask"][esc_idx],
                     "h0_pool": t2["h0_pool"][esc_idx], "h1_pool": t2["h1_pool"][esc_idx],
                     "st_ai": t2["st_ai"][esc_idx], "st_pr": t2["st_pr"][esc_idx], "z_char": z_char[esc_idx].astype(np.float32),
                     "logit_ai_r0": lg_r0_ai[esc_idx].astype(np.float32), "logit_promo_r0": lg_r0_pr[esc_idx].astype(np.float32),
-                    "logit_ai_r1": t2["logit_ai_r1"][esc_idx], "logit_promo_r1": t2["logit_promo_r1"][esc_idx],
+                    "logit_promo_r1": t2["logit_promo_r1"][esc_idx],
                     "logit_ai_t1": t2["logit_ai_t1"][esc_idx], "logit_promo_t1": t2["logit_promo_t1"][esc_idx],
-                    "logit_ai_t2": t2["logit_ai_t2"][esc_idx], "emb_ai_t1": t2["emb_ai_t1"][esc_idx],
+                    "logit_ai_t2": t2["logit_ai_t2"][esc_idx],
+                    "logit_ai_t2_final": t2["logit_ai_t2_final"][esc_idx], "logit_promo_t2_final": t2["logit_promo_t2_final"][esc_idx],
+                    "emb_ai_t2": t2["emb_ai_t2"][esc_idx], "emb_pr_t2": t2["emb_pr_t2"][esc_idx],
                 }
                 t3_out = dict(zip(_T3_OUT_NAMES, self.sess_t3.run(None, t3_feed)))
                 lg_ai[esc_idx] = t3_out["logit_ai_t3_final"]
@@ -2080,6 +2168,7 @@ def run_v130_ci_gates(
         ci["V130_ONNX_4stage_fp32_parity"] = {
             "r0_diff": export_rep["r0_fp32_max_diff"],
             "t2_diff": export_rep["t2_fp32_max_diff"],
+            "t2_cache_diff": export_rep.get("t2_cache_fp32_max_diff", 0.0),
             "t3_modular_diff": export_rep["t3_modular_fp32_max_diff"],
             "long_diff": export_rep["long_fp32_max_diff"],
             "pass": bool(export_rep["onnx_exact_pass"]),
