@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import random
 import time
@@ -53,6 +55,27 @@ from .v140_superteacher import (
     sample_antidilution_epoch_v140,
     sample_cf_mirror_batch_v140,
 )
+
+
+def _compute_pool_order_sha256(distill_rows: list[dict[str, Any]]) -> str:
+    """Exact order-sensitive SHA256 fingerprint over all distill pool rows (prevents silent row-shift bugs!)."""
+    h = hashlib.sha256()
+    h.update(f"{len(distill_rows)}\n".encode("utf-8"))
+    for r in distill_rows:
+        h.update(str(r.get("sha16", "")).encode("utf-8"))
+        h.update(b"\n")
+    return h.hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            blk = f.read(4 * 1024 * 1024)
+            if not blk:
+                break
+            h.update(blk)
+    return h.hexdigest()
 
 
 def _recall_at_prec(y: np.ndarray, p: np.ndarray, target: float) -> float:
@@ -385,6 +408,26 @@ def train_single_superteacher_v140(
     best_sd = {k: v.clone() for k, v in ema_sd.items()}
     best_sel = -1e9
     opt_step = 0
+    start_ep = 0
+    skip_b_idx = -1
+    mid_ckpt_path = ckpt_dir / f"v140_st_{key}_mid_resume.pt"
+    if args.resume and mid_ckpt_path.is_file() and not args.smoke_test:
+        try:
+            msd = torch.load(mid_ckpt_path, map_location="cpu", weights_only=False)
+            model.load_trainable_state_dict(msd["cur_sd"])
+            ema_sd = {k: v.to(ema_sd[k].dtype).clone() for k, v in msd["ema_sd"].items() if k in ema_sd}
+            best_sd = {k: v.to(best_sd[k].dtype).clone() for k, v in msd["best_sd"].items() if k in best_sd}
+            best_sel = float(msd.get("best_sel", -1e9))
+            opt_step = int(msd.get("opt_step", 0))
+            start_ep = int(msd.get("next_ep", 0))
+            skip_b_idx = int(msd.get("done_b_idx", -1))
+            print(
+                f"[SuperTeacherV140:{key}] Resumed mid-training checkpoint {mid_ckpt_path} "
+                f"(start_ep={start_ep} skip_b_idx={skip_b_idx} opt_step={opt_step} best_sel={best_sel:.4f})",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[SuperTeacherV140:{key}] WARN failed to load mid-resume {mid_ckpt_path} ({exc}); starting fresh.", flush=True)
 
     def _lr_mult(step: int) -> float:
         if step < warmup_steps:
@@ -416,12 +459,16 @@ def train_single_superteacher_v140(
             corpus, rng, neg_per_pos=args.neg_per_pos, natural_frac=args.natural_frac, smoke_test=args.smoke_test
         )
         batches = iter_length_bucketed_batches_v140(ep_rows, batch_size=bs, rng=rng, mega_mult=16)
+        if ep < start_ep:
+            continue
         model.train()
         opt.zero_grad(set_to_none=True)
         run_loss, run_cf, run_cnt = 0.0, 0.0, 0
         eval_every = max(1, steps_per_ep // 2) if not args.smoke_test else steps_per_ep
 
         for b_idx, batch in enumerate(batches):
+            if ep == start_ep and b_idx <= skip_b_idx:
+                continue
             txts = [
                 jitter_ai_text_v140(r["text"], rng, is_ml_en=bool(r.get("is_ml_en")), prob=args.punct_jitter_prob)
                 if (r["has_ai"] > 0.5 and r["y_ai"] >= 0.7) else r["text"]
@@ -518,6 +565,21 @@ def train_single_superteacher_v140(
                         flush=True,
                     )
                     model.load_trainable_state_dict(cur_sd)
+                    if not args.smoke_test:
+                        ckpt_dir.mkdir(parents=True, exist_ok=True)
+                        ep_done = (b_idx + 1 == len(batches))
+                        mid_tmp = mid_ckpt_path.with_suffix(".pt.tmp")
+                        torch.save({
+                            "key": key,
+                            "next_ep": ep + 1 if ep_done else ep,
+                            "done_b_idx": -1 if ep_done else b_idx,
+                            "opt_step": opt_step,
+                            "best_sel": best_sel,
+                            "cur_sd": {k: v.half() if v.is_floating_point() else v for k, v in cur_sd.items()},
+                            "ema_sd": {k: v.half() if v.is_floating_point() else v for k, v in ema_sd.items()},
+                            "best_sd": {k: v.half() if v.is_floating_point() else v for k, v in best_sd.items()},
+                        }, mid_tmp)
+                        os.replace(mid_tmp, mid_ckpt_path)
                     model.train()
 
     # Load best EMA trainable weights + calibrate scalar temperatures strictly on validation splits!
@@ -571,6 +633,7 @@ def train_single_superteacher_v140(
         "trainable_state_dict": {k: v.half() if v.is_floating_point() else v for k, v in best_sd.items()},
     }
     torch.save(save_obj, ckpt_path)
+    mid_ckpt_path.unlink(missing_ok=True)
     ckpt_mb = ckpt_path.stat().st_size / (1024.0 * 1024.0)
 
     # Verify exact LoRA merge parity, then keep merged for maximum 250K inference throughput!
@@ -763,6 +826,8 @@ def main() -> None:
     distill_rows = corpus["distill_pool"]
     distill_txts = [r["text"] for r in distill_rows]
     n_dist = len(distill_txts)
+    pool_order_sha256 = _compute_pool_order_sha256(distill_rows)
+    print(f"[Stage0-DistillPool] rows={n_dist:,} order_sha256={pool_order_sha256[:16]}...", flush=True)
     per_model_distill_ai: dict[str, np.ndarray] = {}
     per_model_distill_pr: dict[str, np.ndarray] = {}
 
@@ -776,15 +841,35 @@ def main() -> None:
         if tr["resumed"] and tr["ft_mode"] == "lora":
             tr["model"].merge_lora_inplace()
 
-        # Check cache for resumed per-model distill predictions (saves 5 min per resumed 8B model!)
+        # Strictly verify ordered pool SHA256 + checkpoint SHA256 + model key before trusting any cached logits!
         pred_cache_path = ckpt_dir / f"v140_st_{mk}_distill_cache.npz"
+        cur_ckpt_sha256 = _file_sha256(Path(tr["ckpt_path"])) if Path(tr["ckpt_path"]).is_file() else ""
         if args.resume and pred_cache_path.is_file() and not args.smoke_test:
-            cached = np.load(pred_cache_path)
-            if len(cached["ai"]) == n_dist:
-                print(f"[SuperTeacherV140:{mk}] Loaded cached distill logits ({n_dist:,} rows) from {pred_cache_path}", flush=True)
+            cached = np.load(pred_cache_path, allow_pickle=False)
+            c_pool_sha = str(cached["pool_sha256"].item()) if "pool_sha256" in cached.files else ""
+            c_ckpt_sha = str(cached["ckpt_sha256"].item()) if "ckpt_sha256" in cached.files else ""
+            c_mkey = str(cached["model_key"].item()) if "model_key" in cached.files else ""
+            if (
+                len(cached["ai"]) == n_dist
+                and len(cached["pr"]) == n_dist
+                and c_pool_sha == pool_order_sha256
+                and c_ckpt_sha == cur_ckpt_sha256
+                and c_mkey == mk
+            ):
+                print(
+                    f"[SuperTeacherV140:{mk}] Loaded VERIFIED cached distill logits "
+                    f"({n_dist:,} rows, pool_sha={pool_order_sha256[:12]}, ckpt_sha={cur_ckpt_sha256[:12]}) from {pred_cache_path}",
+                    flush=True,
+                )
                 per_model_distill_ai[mk] = cached["ai"].astype(np.float32)
                 per_model_distill_pr[mk] = cached["pr"].astype(np.float32)
             else:
+                print(
+                    f"[SuperTeacherV140:{mk}] REJECTED stale/unverified distill cache {pred_cache_path} "
+                    f"(n={len(cached['ai'])}/{n_dist}, pool_match={c_pool_sha == pool_order_sha256}, "
+                    f"ckpt_match={c_ckpt_sha == cur_ckpt_sha256}, key_match={c_mkey == mk}); re-scoring fresh!",
+                    flush=True,
+                )
                 pred_cache_path.unlink(missing_ok=True)
 
         if mk not in per_model_distill_ai:
@@ -798,7 +883,14 @@ def main() -> None:
             per_model_distill_ai[mk] = (d_ai / max(1e-3, tr["temp_ai"])).astype(np.float32)
             per_model_distill_pr[mk] = (d_pr / max(1e-3, tr["temp_pr"])).astype(np.float32)
             if not args.smoke_test:
-                np.savez_compressed(pred_cache_path, ai=per_model_distill_ai[mk], pr=per_model_distill_pr[mk])
+                np.savez_compressed(
+                    pred_cache_path,
+                    ai=per_model_distill_ai[mk],
+                    pr=per_model_distill_pr[mk],
+                    pool_sha256=np.array(pool_order_sha256),
+                    ckpt_sha256=np.array(cur_ckpt_sha256),
+                    model_key=np.array(mk),
+                )
             print(f"[SuperTeacherV140:{mk}] Scored {n_dist:,} rows in {time.time()-t_inf:.1f}s.", flush=True)
 
         del tr["model"]
