@@ -36,8 +36,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoConfig, AutoModel, AutoTokenizer, BertConfig, BertModel
 
-from .v11_features import canonicalize_zero_pii_v11
+from .v07_features import canonicalize_zero_pii_v07
+from .v11_features import _CONTACT_ID_PII_RE
 from .v123_data_refinery import load_sibling_and_delta_v123, sanitize_era5_v123
+
+
+def _canonicalize_zero_pii_v130(text: str, max_chars: int = 8192) -> str:
+    """Strictly origin/main-compatible Zero-PII canonicalizer (`@user` & `<CONTACT_ID>` -> diff === 0.0)."""
+    cl, _ = canonicalize_zero_pii_v07(str(text or ""), max_chars=max_chars)
+    return _CONTACT_ID_PII_RE.sub(r"\1<CONTACT_ID>", cl)
 
 SUPERTEACHER_BACKBONES_V130: dict[str, str] = {
     "electra_large": "hfl/chinese-electra-180g-large-discriminator",
@@ -134,8 +141,7 @@ def encode_head_tail_hf_v130(
         if already_canonical:
             clean_texts.append(str(t))
         else:
-            cl, _ = canonicalize_zero_pii_v11(str(t))
-            clean_texts.append(cl)
+            clean_texts.append(_canonicalize_zero_pii_v130(str(t)))
 
     enc = tokenizer(
         clean_texts,
