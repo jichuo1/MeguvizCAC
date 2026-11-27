@@ -24,10 +24,14 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-# 0. Ensure modern transformers + accelerate + safetensors for SenseNova-Loop-9B custom modeling
+# 0. Ensure modern transformers + accelerate + safetensors + Triton flash-linear-attention (5-10x faster GatedDeltaNet!)
 if ! python3 -c "import transformers as t, accelerate, safetensors; from packaging import version; assert version.parse(t.__version__) >= version.parse('4.51.0')" 2>/dev/null; then
   echo "[$(date +%H:%M:%S)] Installing/upgrading transformers + accelerate + safetensors for SenseNova-Loop-9B..." | tee -a "$LOG_DRIVER"
   pip install -q -U "transformers>=4.51.0" accelerate safetensors
+fi
+if ! python3 -c "import fla" 2>/dev/null; then
+  echo "[$(date +%H:%M:%S)] Installing pure-Triton flash-linear-attention (accelerates SenseNova-Loop-9B GatedDeltaNet 5-10x)..." | tee -a "$LOG_DRIVER"
+  pip install -q flash-linear-attention || true
 fi
 
 # 1. Ensure v11_omniguard_all_data_bundle.zip is unpacked
