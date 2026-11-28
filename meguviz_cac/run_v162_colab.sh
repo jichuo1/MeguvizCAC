@@ -47,6 +47,12 @@ export TOKENIZERS_PARALLELISM=true
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
+# 0. Ensure required Python inference/export packages exist on a fresh Colab VM
+if ! python3 -c "import onnx, onnxruntime, onnxscript, tokenizers, scipy, sklearn" >/dev/null 2>&1; then
+  echo "[$(date +%H:%M:%S)] Installing missing Python deps (onnx, onnxruntime, onnxscript, tokenizers)..." | tee -a "$LOG_DRIVER"
+  pip install -q onnx onnxruntime onnxscript tokenizers
+fi
+
 # 1. Content-hash-keyed Rust `_meguviz_rs` wheel cache (Cargo.toml + src/lib.rs -> sha8)
 RUST_SHA8="$(cat "$REPO_DIR/meguviz_native/Cargo.toml" "$REPO_DIR/meguviz_native/src/lib.rs" | sha256sum | cut -c1-8)"
 PY_TAG="$(python3 -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
@@ -77,26 +83,75 @@ if [ "$CUR_RS_SHA" != "$RUST_SHA8" ] || ! python3 -c "import _meguviz_rs; assert
 fi
 python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'extract_post_bpe_all_rs') and hasattr(_meguviz_rs.RustOOFCharLMSet, 'kadane_focal_window'); print('[Rust-OK sha8=$RUST_SHA8]', _meguviz_rs.__file__)"
 
-# 2. Ensure local fast SSD copies of corpus & rescored pack
-FRESH_V123_ZIP="$V161_DATA_DIR/v123_all_gold_sibling_and_delta_bundle.zip"
-if [ -f "$FRESH_V123_ZIP" ]; then
+# 2. Ensure local fast SSD copies of ALL required corpora & bundles on a fresh Colab VM
+V11_BUNDLE_ZIP="${V11_BUNDLE_ZIP:-$V11_DRIVE_DIR/v11_omniguard_all_data_bundle.zip}"
+if [ ! -f "$V11_DATA_DIR/v11_wave2_longform_gold_1200.jsonl.gz" ]; then
+  if [ -f "$V11_BUNDLE_ZIP" ]; then
+    echo "[$(date +%H:%M:%S)] Extracting v11_data bundle ($V11_BUNDLE_ZIP) -> $V11_DATA_DIR" | tee -a "$LOG_DRIVER"
+    mkdir -p "$V11_DATA_DIR"
+    python3 -c "import zipfile; zipfile.ZipFile('$V11_BUNDLE_ZIP').extractall('$V11_DATA_DIR')"
+  elif [ -d "$V11_DRIVE_DIR/v11_data" ]; then
+    mkdir -p "$V11_DATA_DIR"
+    cp -rn "$V11_DRIVE_DIR/v11_data/." "$V11_DATA_DIR/" || true
+  fi
+fi
+
+FRESH_V123_ZIP=""
+for zcand in \
+  "$V161_DATA_DIR/v123_all_gold_sibling_and_delta_bundle.zip" \
+  "$DRIVE_ROOT/v123_all_gold_sibling_and_delta_bundle.zip" \
+  "/content/v123_all_gold_sibling_and_delta_bundle.zip"; do
+  [ -f "$zcand" ] && FRESH_V123_ZIP="$zcand" && break
+done
+if [ -n "$FRESH_V123_ZIP" ]; then
   ZIP_SHA="$(sha256sum "$FRESH_V123_ZIP" | awk '{print $1}')"
   CUR_SHA="$(cat "$V123_BUNDLE_DIR/.bundle_sha256" 2>/dev/null || true)"
-  if [ "$ZIP_SHA" != "$CUR_SHA" ]; then
+  if [ "$ZIP_SHA" != "$CUR_SHA" ] || [ ! -d "$V123_BUNDLE_DIR/sibling" ]; then
+    echo "[$(date +%H:%M:%S)] Extracting v123 bundle ($FRESH_V123_ZIP) -> $V123_BUNDLE_DIR" | tee -a "$LOG_DRIVER"
     rm -rf "$V123_BUNDLE_DIR" && mkdir -p "$V123_BUNDLE_DIR"
-    unzip -q -o "$FRESH_V123_ZIP" -d "$V123_BUNDLE_DIR"
+    python3 -c "import zipfile; zipfile.ZipFile('$FRESH_V123_ZIP').extractall('$V123_BUNDLE_DIR')"
     echo "$ZIP_SHA" > "$V123_BUNDLE_DIR/.bundle_sha256"
   fi
 fi
 
 DISTILL_POOL="/content/v140_superteacher_soft_distill_pool.jsonl.gz"
+[ ! -f "$DISTILL_POOL" ] && [ -f "/content/out_v140_superteacher/v140_superteacher_soft_distill_pool.jsonl.gz" ] && DISTILL_POOL="/content/out_v140_superteacher/v140_superteacher_soft_distill_pool.jsonl.gz"
 [ ! -f "$DISTILL_POOL" ] && [ -f "$ST_DRIVE_DIR/v140_superteacher_soft_distill_pool.jsonl.gz" ] && cp -f "$ST_DRIVE_DIR/v140_superteacher_soft_distill_pool.jsonl.gz" "$DISTILL_POOL"
 RESCORED_LOCAL="/content/v161_duckdb2_rescored.jsonl.gz"
 [ ! -f "$RESCORED_LOCAL" ] && [ -f "$V161_DATA_DIR/v161_duckdb2_rescored.jsonl.gz" ] && cp -f "$V161_DATA_DIR/v161_duckdb2_rescored.jsonl.gz" "$RESCORED_LOCAL"
 V07_TOKENIZER="$V07_DRIVE_DIR/v0.7.0-r2-omniveritas-b4_bili_picky_bpe_12k.json"
 [ ! -f "$V07_TOKENIZER" ] && V07_TOKENIZER="$V11_DRIVE_DIR/bili_picky_bpe_12k.json"
-[ ! -f "$V04_DATA" ] && [ -f "$DRIVE_ROOT/shared_v04_data/v04-merged-1m4-r3.jsonl.gz" ] && V04_DATA="$DRIVE_ROOT/shared_v04_data/v04-merged-1m4-r3.jsonl.gz"
+[ ! -f "$V07_TOKENIZER" ] && V07_TOKENIZER="$V161_DRIVE_OUT/v1.6.1-A/bili_picky_bpe_12k.json"
+if [ ! -f "$V04_DATA" ]; then
+  for vcand in \
+    "$DRIVE_ROOT/shared_v04_data/v04-merged-1m4-r3.jsonl.gz" \
+    "$DRIVE_ROOT/data/v04-merged-1m4-r3.jsonl.gz" \
+    "$DRIVE_ROOT/v04-merged-1m4-r3.jsonl.gz" \
+    "$DRIVE_ROOT/v080_zenith/data/v04-merged-1m4-r3.jsonl.gz" \
+    "$DRIVE_ROOT/v070_omniveritas/data/v04-merged-1m4-r3.jsonl.gz"; do
+    if [ -f "$vcand" ]; then
+      mkdir -p "$(dirname "$V04_DATA")"
+      echo "[$(date +%H:%M:%S)] Copying v04 corpus to local NVMe: $vcand -> $V04_DATA" | tee -a "$LOG_DRIVER"
+      cp -f "$vcand" "$V04_DATA"
+      break
+    fi
+  done
+fi
 CAL_CERT_PACK="$V161_DATA_DIR/v161_duckdb2_cal_cert.jsonl.gz"
+
+echo "[$(date +%H:%M:%S)] === Pre-flight Input Check ===" | tee -a "$LOG_DRIVER"
+for req in "$DISTILL_POOL" "$V07_TOKENIZER" "$V11_DATA_DIR/v11_wave2_longform_gold_1200.jsonl.gz" "$V123_BUNDLE_DIR/sibling" "$V123_BUNDLE_DIR/gold_v2_w3"; do
+  if [ ! -e "$req" ]; then
+    echo "[ERROR] Missing required input: $req" | tee -a "$LOG_DRIVER"
+    exit 2
+  fi
+  echo "  [OK] $req" | tee -a "$LOG_DRIVER"
+done
+echo "  [OPT] V04_DATA=$V04_DATA (exists=$([ -f "$V04_DATA" ] && echo yes || echo no))" | tee -a "$LOG_DRIVER"
+echo "  [OPT] RESCORED_LOCAL=$RESCORED_LOCAL (exists=$([ -f "$RESCORED_LOCAL" ] && echo yes || echo no))" | tee -a "$LOG_DRIVER"
+echo "  [OPT] CAL_CERT_PACK=$CAL_CERT_PACK (exists=$([ -f "$CAL_CERT_PACK" ] && echo yes || echo no))" | tee -a "$LOG_DRIVER"
+echo "  [OPT] SHARED_CHARLM=$SHARED_CHARLM (exists=$([ -f "$SHARED_CHARLM" ] && echo yes || echo no))" | tee -a "$LOG_DRIVER"
+echo "  [OPT] WARM_MASTER_V161A=$WARM_MASTER_V161A (exists=$([ -f "$WARM_MASTER_V161A" ] && echo yes || echo no))" | tee -a "$LOG_DRIVER"
 
 BASE_V162_ARGS=(
   --distill-pool "$DISTILL_POOL"
