@@ -2308,15 +2308,17 @@ class MeguvizV170CascadeEngine:
 
     def _prob_ai(self, logit: np.ndarray, is_r0: bool = False) -> np.ndarray:
         lut = self.lut_ai_r0 if is_r0 else self.lut_ai_full
+        p = expit(np.clip(np.asarray(logit, dtype=np.float64) / max(0.05, 1.0 if is_r0 else self.temp_ai), -30.0, 30.0))
         if lut is not None:
-            return apply_spline_temp_lut(logit, lut)
-        return expit(logit / max(0.05, 1.0 if is_r0 else self.temp_ai)).astype(np.float32)
+            return apply_spline_temp_lut(p, lut)
+        return p.astype(np.float32)
 
     def _prob_pr(self, logit: np.ndarray, is_r0: bool = False) -> np.ndarray:
         lut = self.lut_pr_r0 if is_r0 else self.lut_pr_full
+        p = expit(np.clip(np.asarray(logit, dtype=np.float64) / max(0.05, 1.0 if is_r0 else self.temp_pr), -30.0, 30.0))
         if lut is not None:
-            return apply_spline_temp_lut(logit, lut)
-        return expit(logit / max(0.05, 1.0 if is_r0 else self.temp_pr)).astype(np.float32)
+            return apply_spline_temp_lut(p, lut)
+        return p.astype(np.float32)
 
     def _check_r0_iut_exit(self, p_ai_r0: float, p_def_r0: float, p_apd: float, n_chars: int) -> bool:
         pol = self.r0_ai_policy
@@ -2730,8 +2732,8 @@ def run_v170_ci_gates(
     ci["V170_COLD_START_BOOT_PARITY"] = {"exact_match": (z_mgvz == disk_mgvz), "pass": (z_mgvz == disk_mgvz)}
 
     # 13-14. LUT Floors
-    lut_r0_001 = float(apply_spline_temp_lut(np.array([-7.0], np.float32), eng.lut_ai_r0)[0]) if eng.lut_ai_r0 is not None else 0.001
-    ci["V170_AI_LUT_FLOOR"] = {"lut_ai_r0_at_neg7": round(lut_r0_001, 6), "pass": lut_r0_001 < 0.08}
+    lut_r0_001 = float(apply_spline_temp_lut(np.array([0.01], np.float32), eng.lut_ai_r0)[0]) if eng.lut_ai_r0 is not None else 0.01
+    ci["V170_AI_LUT_FLOOR"] = {"lut_ai_r0_at_001": round(lut_r0_001, 6), "pass": lut_r0_001 < 0.08}
     p_wild = eng.predict_batch(["哈哈哈笑死", "今天天气真不错", "这个视频讲得挺清楚的"], force_full=True)
     med_pr = float(np.median([x["prob_promo"] for x in p_wild]))
     ci["V170_PR_LUT_FLOOR"] = {"median_promo_wild": round(med_pr, 5), "pass": med_pr < 0.25}

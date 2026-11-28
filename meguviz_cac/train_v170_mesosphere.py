@@ -1285,13 +1285,17 @@ def main() -> None:
     cal_fused_t4 = apply_crossview_late_fusion(p_cal["logit_ai_r0"], p_cal["logit_ai_t4"], cv_fusion)
     t_ai = fit_scalar_temperature_v140(cal_fused_t4 - float(cv_fusion.get("prior_shift", 0.0)), y_cal_ai)
     t_pr = fit_scalar_temperature_v140(p_cal["logit_promo_t4"], y_cal_pr) if y_cal_pr.sum() >= 8 else 1.5
-    lut_ai_r0 = fit_smooth_ai_lut_v122(p_cal["logit_ai_r0"], y_cal_ai)
-    lut_ai_full = fit_output_shifted_promo_lut_v122(cal_fused_t4, y_cal_ai, pi_nat=float(args.eba_pi_nat), shift_damp=0.55) if args.use_eba_h else fit_smooth_ai_lut_v122(cal_fused_t4, y_cal_ai)
-    lut_pr_r0 = fit_output_shifted_promo_lut_v122(p_cal["logit_promo_r0"], y_cal_pr) if y_cal_pr.sum() >= 8 else None
-    lut_pr_full = fit_output_shifted_promo_lut_v122(p_cal["logit_promo_t4"], y_cal_pr) if y_cal_pr.sum() >= 8 else None
+    lut_ai_r0 = fit_smooth_ai_lut_v122(np.clip(p_cal["logit_ai_r0"], -30.0, 30.0), y_cal_ai)
+    lut_ai_full = (
+        fit_output_shifted_promo_lut_v122(np.clip(cal_fused_t4 / max(1e-3, t_ai), -30.0, 30.0), y_cal_ai, pi_nat=float(args.eba_pi_nat), shift_damp=0.55)
+        if args.use_eba_h
+        else fit_smooth_ai_lut_v122(np.clip(cal_fused_t4 / max(1e-3, t_ai), -30.0, 30.0), y_cal_ai)
+    )
+    lut_pr_r0 = fit_output_shifted_promo_lut_v122(np.clip(p_cal["logit_promo_r0"], -30.0, 30.0), y_cal_pr) if y_cal_pr.sum() >= 8 else None
+    lut_pr_full = fit_output_shifted_promo_lut_v122(np.clip(p_cal["logit_promo_t4"] / max(1e-3, t_pr), -30.0, 30.0), y_cal_pr) if y_cal_pr.sum() >= 8 else None
 
     # M8 Zero-Bonferroni IUT Stratified R0 Exit Policy (strictly certified on `cert_rows`!)
-    cert_p_r0 = apply_spline_temp_lut(p_cert["logit_ai_r0"], lut_ai_r0)
+    cert_p_r0 = apply_spline_temp_lut(expit(np.clip(p_cert["logit_ai_r0"], -30.0, 30.0)), lut_ai_r0)
     cert_clens = np.array([len(canonicalize_zero_pii_v150(r["text"])[0]) for r in cert_rows], dtype=np.int64)
     r0_ai_pol = fit_iut_stratified_r0_policy_v170(
         cert_p_r0, p_cert["p_defer_ai_r0"], p_cert["p_apd_safe"], cert_clens, y_cert_ai,
