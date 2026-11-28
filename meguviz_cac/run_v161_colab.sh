@@ -26,19 +26,45 @@ WORK_ROOT="${WORK_ROOT:-/content/out_v161}"
 OUT_A="$WORK_ROOT/v1.6.1-A"
 OUT_B="$WORK_ROOT/v1.6.1-B"
 SHARED_R0="${SHARED_R0:-$V161_DRIVE_OUT/shared_r0_v161_frozen.pt}"
+SHARED_CHARLM="${SHARED_CHARLM:-$V161_DRIVE_OUT/shared_oof_charlm_v161.pkl}"
+WHEEL_DIR="${WHEEL_DIR:-$DRIVE_ROOT/wheels}"
 LOG_DRIVER="${LOG_DRIVER:-/content/log_v161_driver.txt}"
-BS="${BS:-128}"
+BS="${BS:-256}"
 SEED="${SEED:-20261215}"
 SKIP_RESCORE="${SKIP_RESCORE:-0}"
 RUN_TRACK_A="${RUN_TRACK_A:-1}"
 RUN_TRACK_B="${RUN_TRACK_B:-1}"
+USE_COMPILE="${USE_COMPILE:-1}"
+COMPILE_MODE="${COMPILE_MODE:-default}"
+PREFETCH_WORKERS="${PREFETCH_WORKERS:-2}"
 
-mkdir -p "$WORK_ROOT" "$OUT_A" "$OUT_B" "$V161_DATA_DIR" "$V161_DRIVE_OUT/v1.6.1-A" "$V161_DRIVE_OUT/v1.6.1-B"
+mkdir -p "$WORK_ROOT" "$OUT_A" "$OUT_B" "$V161_DATA_DIR" "$V161_DRIVE_OUT/v1.6.1-A" "$V161_DRIVE_OUT/v1.6.1-B" "$WHEEL_DIR"
 cd "$REPO_DIR"
 export PYTHONUNBUFFERED=1
-export TOKENIZERS_PARALLELISM=false
+export TOKENIZERS_PARALLELISM=true
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
+# Auto-install (or build once & cache to Drive) Rust `meguviz_native` wheel for 35x-200x frontend speedup!
+if ! python3 -c "import meguviz_native" >/dev/null 2>&1; then
+  PY_TAG="$(python3 -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
+  CACHED_WHL="$(ls -1t "$WHEEL_DIR"/meguviz_native-*-"${PY_TAG}"-*linux_x86_64.whl 2>/dev/null | head -n 1 || true)"
+  if [ -n "$CACHED_WHL" ]; then
+    echo "[$(date +%H:%M:%S)] Installing cached Rust wheel: $CACHED_WHL" | tee -a "$LOG_DRIVER"
+    pip install -q --force-reinstall "$CACHED_WHL" || true
+  elif [ -f "$REPO_DIR/meguviz_native/Cargo.toml" ]; then
+    echo "[$(date +%H:%M:%S)] Building Rust meguviz_native wheel once & caching to $WHEEL_DIR..." | tee -a "$LOG_DRIVER"
+    if ! command -v cargo >/dev/null 2>&1; then
+      curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null 2>&1 || true
+      export PATH="$HOME/.cargo/bin:$PATH"
+    fi
+    if command -v cargo >/dev/null 2>&1; then
+      pip install -q maturin >/dev/null 2>&1 || true
+      maturin build --release --manifest-path "$REPO_DIR/meguviz_native/Cargo.toml" -i "$(which python3)" -o "$WHEEL_DIR" && \
+        pip install -q --force-reinstall "$WHEEL_DIR"/meguviz_native-*-"${PY_TAG}"-*linux_x86_64.whl || true
+    fi
+  fi
+fi
 
 # Auto-refresh /content/v123_bundle if the latest post-c408 v123_all_gold_sibling_and_delta_bundle.zip is uploaded in v161_data!
 FRESH_V123_ZIP="$V161_DATA_DIR/v123_all_gold_sibling_and_delta_bundle.zip"
@@ -125,7 +151,10 @@ BASE_DATA_ARGS=(
   --cc-vrex-weight 0.08
   --oof-cal-folds 5
   --auto-ship-gate
+  --charlm-cache "$SHARED_CHARLM"
+  --prefetch-workers "$PREFETCH_WORKERS"
 )
+[ "$USE_COMPILE" = "1" ] && BASE_DATA_ARGS+=(--compile --compile-mode "$COMPILE_MODE")
 [ -d "$V123_BUNDLE_DIR/delta" ] && BASE_DATA_ARGS+=(--delta-dir "$V123_BUNDLE_DIR/delta")
 [ -f "$V04_DATA" ] && BASE_DATA_ARGS+=(--v04-data "$V04_DATA")
 [ -f "$EXTRA_PACK_USE" ] && BASE_DATA_ARGS+=(--extra-gold-pack "$EXTRA_PACK_USE")

@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "meguviz_native"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "High-speed Rust/PyO3/Rayon Zero-PII & CharLM frontend for MeguvizCAC"
+dependencies = ["numpy"]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
