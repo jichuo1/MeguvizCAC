@@ -72,8 +72,11 @@ from .v150_heaven_loop import (
     encode_bpe_head_tail_with_offsets_v150,
     fit_group_oof_charlm_v150,
 )
+from .v160_discourse_causal_ops import class_conditional_vrex_unbiased
 from .v160_stratosphere_loop import (
     ARCH_PRESETS_V160,
+    CONTRACTIVE_INNER_R_V161,
+    QUOTE_SCOPE_DIM_V161,
     MeguvizV160CascadeEngine,
     MeguvizV160StratosphereLoopModel,
     _STEP_OUT_NAMES_V160,
@@ -81,6 +84,7 @@ from .v160_stratosphere_loop import (
     apply_crossview_late_fusion,
     export_v160_bootable_and_onnx,
     extract_apex_char_batch_v160,
+    extract_token_quote_scope_4d_v161,
     fit_crossview_late_fusion,
     load_bundle_v10_v160_into_model,
     pack_bundle_v10_v160,
@@ -117,6 +121,18 @@ class _StrictGroupOOFFeatureCacheV160:
         self._bpe_cache: dict[str, tuple[str, list[int], list[tuple[int, int]], list[int], list[int], np.ndarray]] = {}
         self._lm_global_cache: dict[tuple[int, str], np.ndarray] = {}
         self._lm_local_cache: dict[tuple[int, str], np.ndarray] = {}
+        self._quote_scope_cache: dict[str, np.ndarray] = {}
+
+    def get_quote_scope_4d(
+        self, clean_text: str, offsets: list[tuple[int, int]], allow_store: bool = True
+    ) -> np.ndarray:
+        L = len(offsets)
+        arr = self._quote_scope_cache.get(clean_text) if allow_store else None
+        if arr is None or arr.shape[0] != L:
+            arr = extract_token_quote_scope_4d_v161(clean_text, offsets)
+            if allow_store and len(self._quote_scope_cache) < self.max_entries:
+                self._quote_scope_cache[clean_text] = arr
+        return arr
 
     def set_group_oof_charlm(
         self, fold_models: list[CompactCharLMV150], text_to_fold: dict[str, int], full_lm: CompactCharLMV150
@@ -193,6 +209,7 @@ def _collate_v160_batch(
     punct_jitter_prob: float = 0.35,
     need_bpe: bool = True,
     use_oof_charlm: bool = True,
+    need_quote_scope: bool = False,
 ) -> dict[str, torch.Tensor]:
     cleans: list[str] = []
     g9_list: list[np.ndarray] = []
@@ -210,7 +227,8 @@ def _collate_v160_batch(
         g9_list.append(fcache.get_global_9d(cl, parent_raw_text=t0, use_oof=use_oof_charlm, allow_store=not is_m))
         if need_bpe:
             loc8 = fcache.get_local_8ch(cl, offs, parent_raw_text=t0, use_oof=use_oof_charlm, allow_store=not is_m)
-            bpe_pack.append((ids, eng, trg, f56, loc8))
+            qsc4 = fcache.get_quote_scope_4d(cl, offs, allow_store=not is_m) if need_quote_scope else None
+            bpe_pack.append((ids, eng, trg, f56, loc8, qsc4))
 
     g9_arr = np.stack(g9_list, axis=0).astype(np.float32) if g9_list else np.zeros((0, CHARLM_FEAT_DIM_V140), dtype=np.float32)
     c1, c2, c3, cm, cf, _, sups = extract_apex_char_batch_v160(
@@ -231,7 +249,7 @@ def _collate_v160_batch(
         "t_ai_t3": torch.tensor([float(r.get("t_ai_t3", r.get("t_ai_lg", 0.0))) for r in batch], dtype=torch.float32, device=device),
         "frontier_gap": torch.tensor([float(r.get("frontier_gap", 0.0)) for r in batch], dtype=torch.float32, device=device),
         "t_pr_lg": torch.tensor([float(r.get("t_pr_lg", 0.0)) for r in batch], dtype=torch.float32, device=device),
-        "has_t": torch.tensor([float(r.get("has_teacher", 0.0)) for r in batch], dtype=torch.float32, device=device),
+        "has_t": torch.tensor([float(r.get("has_teacher", r.get("has_t", 0.0))) for r in batch], dtype=torch.float32, device=device),
         "kd_w": torch.tensor([float(r.get("kd_w", 1.0)) for r in batch], dtype=torch.float32, device=device),
         "y_ai": torch.tensor([float(r.get("y_ai", 0.0)) for r in batch], dtype=torch.float32, device=device),
         "has_ai": torch.tensor([float(r.get("has_ai", 0.0)) for r in batch], dtype=torch.float32, device=device),
@@ -239,6 +257,7 @@ def _collate_v160_batch(
         "has_pr": torch.tensor([float(r.get("has_pr", 0.0)) for r in batch], dtype=torch.float32, device=device),
         "sub4": torch.tensor([int(r.get("sub4", -1)) for r in batch], dtype=torch.long, device=device),
         "hard_neg": torch.tensor([float(r.get("hard_neg", 0.0)) for r in batch], dtype=torch.float32, device=device),
+        "hard_fn": torch.tensor([float(r.get("hard_fn", 0.0)) for r in batch], dtype=torch.float32, device=device),
         "era5": torch.tensor([int(r.get("era5", -1)) for r in batch], dtype=torch.long, device=device),
     }
     if need_bpe:
@@ -251,11 +270,14 @@ def _collate_v160_batch(
         eg_a = np.zeros((nb, ml), dtype=np.int64)
         tg_a = np.zeros((nb, ml), dtype=np.int64)
         loc_a = np.zeros((nb, ml, LOCAL_CHARLM_DIM_V150), dtype=np.float32)
+        qsc_a = np.zeros((nb, ml, QUOTE_SCOPE_DIM_V161), dtype=np.float32) if need_quote_scope else None
         f56_l = []
-        for i, (ids, eng, trg, f56, loc8) in enumerate(bpe_pack):
+        for i, (ids, eng, trg, f56, loc8, qsc4) in enumerate(bpe_pack):
             ns = len(ids)
             ids_a[i, :ns], msk_a[i, :ns], eg_a[i, :ns], tg_a[i, :ns] = ids, 1, eng, trg
             loc_a[i, :ns] = loc8
+            if qsc_a is not None and qsc4 is not None:
+                qsc_a[i, :ns] = qsc4
             f56_l.append(f56)
         out["ids"] = torch.from_numpy(ids_a).to(device, non_blocking=True)
         out["msk"] = torch.from_numpy(msk_a).to(device, non_blocking=True)
@@ -263,6 +285,8 @@ def _collate_v160_batch(
         out["tg"] = torch.from_numpy(tg_a).to(device, non_blocking=True)
         out["loc"] = torch.from_numpy(loc_a).to(device, non_blocking=True)
         out["st"] = torch.from_numpy(np.stack(f56_l, 0).astype(np.float32)).to(device, non_blocking=True)
+        if qsc_a is not None:
+            out["qsc"] = torch.from_numpy(qsc_a).to(device, non_blocking=True)
     return out
 
 
@@ -309,7 +333,7 @@ def predict_student_v160(
         sub_b = [{"text": texts[i]} for i in idxs]
         bk = _collate_v160_batch(
             sub_b, fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0,
-            need_bpe=not r0_only, use_oof_charlm=False,
+            need_bpe=not r0_only, use_oof_charlm=False, need_quote_scope=bool(model.use_discourse_ops),
         )
         if r0_only:
             res = model.forward_r0(bk["c1"], bk["c2"], bk["c3"], bk["cm"], bk["cf"])
@@ -322,6 +346,7 @@ def predict_student_v160(
                 dt_drop_p=1.0 if r0_drop_eval else 0.0,
                 use_crossview_dt=use_crossview_dt and (not r0_drop_eval),
                 return_diagnostics=record_diagnostics,
+                quote_scope=bk.get("qsc"),
             )
             if record_diagnostics:
                 n_ai = model.core.n_ai_slots
@@ -374,10 +399,14 @@ def measure_joint_directional_jacobian_v160(
         return {}
     model.eval()
     sub = [{"text": t} for t in texts[:32]]
-    bk = _collate_v160_batch(sub, fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True, use_oof_charlm=False)
+    bk = _collate_v160_batch(
+        sub, fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0,
+        need_bpe=True, use_oof_charlm=False, need_quote_scope=bool(model.use_discourse_ops),
+    )
     r0 = model.forward_r0(bk["c1"], bk["c2"], bk["c3"], bk["cm"], bk["cf"])
     s1 = model.forward_prelude_and_t1(
-        bk["ids"], bk["msk"], bk["st"], bk["eg"], bk["tg"], bk["loc"], z_char=r0["z_char"], support_pairs=bk["sup"]
+        bk["ids"], bk["msk"], bk["st"], bk["eg"], bk["tg"], bk["loc"],
+        z_char=r0["z_char"], support_pairs=bk["sup"], quote_scope=bk.get("qsc"),
     )
     B = bk["ids"].shape[0]
     cur_ai, cur_pr, cur_cov = s1["ai_streams"], s1["pr_stream"], s1["cov"]
@@ -444,11 +473,14 @@ def run_order_preserving_3seg_probe_v160(
     bs = 128
     for st in range(0, len(rows), bs):
         sub = rows[st : st + bs]
-        bk = _collate_v160_batch(sub, fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True, use_oof_charlm=False)
+        bk = _collate_v160_batch(
+            sub, fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0,
+            need_bpe=True, use_oof_charlm=False, need_quote_scope=bool(model.use_discourse_ops),
+        )
         r0 = model.forward_r0(bk["c1"], bk["c2"], bk["c3"], bk["cm"], bk["cf"])
         s1 = model.forward_prelude_and_t1(
             bk["ids"], bk["msk"], bk["st"], bk["eg"], bk["tg"], bk["loc"],
-            z_char=r0["z_char"], support_pairs=bk["sup"], return_diagnostics=True,
+            z_char=r0["z_char"], support_pairs=bk["sup"], return_diagnostics=True, quote_scope=bk.get("qsc"),
         )
         ht = s1["h_tok"].float().cpu().numpy()
         mk = bk["msk"].cpu().numpy()
@@ -547,7 +579,11 @@ def main() -> None:
     ap.add_argument("--checkpoint-dir", type=Path, default=None)
     ap.add_argument("--version", type=str, default="v1.6.0-A1")
     ap.add_argument("--arch", type=str, default="v160_a1", choices=sorted(ARCH_PRESETS_V160.keys()))
-    ap.add_argument("--dynamics", type=str, default="stratosphere", choices=["stratosphere", "v150_anchor"])
+    ap.add_argument("--dynamics", type=str, default="stratosphere", choices=["stratosphere", "contractive_d", "v150_anchor"])
+    ap.add_argument("--use-discourse-ops", action="store_true", help="v1.6.1-B: Enable +0.33ms SelectiveOrder3CumSum + CheapD08PositionMoments + Quote FSM")
+    ap.add_argument("--lardo-w8-core", action="store_true", help="v1.6.1 LARDO: Promote core.* + coda + haar from W4 to W8 inside MGVZ10 (<= 5.00 MiB)")
+    ap.add_argument("--init-from-fp16", type=Path, default=None, help="v1.6.1 warm-start from FP16 master checkpoint (shape-safe partial load)")
+    ap.add_argument("--wise-anchor-fp16", type=Path, default=None, help="Optional FP16 anchor checkpoint included in Cand-3 WiSE-FT Model Soup")
     ap.add_argument("--t-train-mode", type=str, default="uniform_1_6", choices=["uniform_1_6", "fixed_2_4"])
     ap.add_argument("--use-step-phi", action="store_true", help="Enable continuous Fourier step embedding phi(t) (Arm A2)")
     ap.add_argument("--no-step-phi", action="store_true", help="Explicitly disable Fourier step embedding (A0/A1/A3/A4/A5)")
@@ -557,6 +593,7 @@ def main() -> None:
     ap.add_argument("--init-r0-ckpt", type=Path, default=None, help="Load shared frozen Phase-1 R0 state_dict across A0-A5")
     ap.add_argument("--save-r0-ckpt", type=Path, default=None, help="Save trained Phase-1 R0 state_dict for reuse across A0-A5")
     ap.add_argument("--freeze-r0", action="store_true", help="Freeze R0 weights during Phase-2 & Phase-3 (locked A0-A5 protocol)")
+    ap.add_argument("--p1-use-cf", action="store_true", help="v1.6.1: Include CF mirrors, L_inv, and gentle Softplus-CVaR inside Phase-1 R0++")
     ap.add_argument("--no-prelude-global-se", action="store_true")
     ap.add_argument("--no-coverage-beta", action="store_true")
     ap.add_argument("--no-local-charlm", action="store_true")
@@ -567,9 +604,20 @@ def main() -> None:
     ap.add_argument("--use-softplus-cvar", action="store_true", help="Rev.2 zero-inference-cost negative-class softplus CVaR tail penalty")
     ap.add_argument("--cvar-alpha", type=float, default=0.08)
     ap.add_argument("--cvar-weight", type=float, default=0.14)
+    ap.add_argument("--recall-floor-weight", type=float, default=0.0, help="v1.6.1: Positive stealth-AI tail recall-floor pairwise protection weight")
     ap.add_argument("--use-fmt-cf", action="store_true", help="Rev.2 zero-inference-cost rule-based human format counterfactual consistency L_inv")
     ap.add_argument("--fmt-cf-weight", type=float, default=0.12)
-    ap.add_argument("--extra-gold-pack", type=Path, default=None, help="Optional extra zero-leakage clean gold pack (e.g. DuckDB 2.0 stream pack)")
+    ap.add_argument("--use-promo-flip-cf", action="store_true", help="v1.6.1: Rule-based Promo stance-flip counterfactual L_flip")
+    ap.add_argument("--promo-flip-weight", type=float, default=0.06)
+    ap.add_argument("--use-cc-vrex", action="store_true", help="v1.6.1: Review 04 P4 exact unbiased Class-Conditional V-REx across era5")
+    ap.add_argument("--cc-vrex-weight", type=float, default=0.08)
+    ap.add_argument("--sat-reg-weight", type=float, default=0.0, help="v1.6.1-B: Inner-ball saturation regularizer weight for contractive_d")
+    ap.add_argument("--extra-gold-pack", type=Path, default=None, help="Optional extra zero-leakage clean gold pack (e.g. rescored DuckDB 2.0 stream pack)")
+    ap.add_argument("--extra-cal-cert-pack", type=Path, default=None, help="Optional disjoint zero-leakage DuckDB 2.0 calibration certification holdout pack")
+    ap.add_argument("--oof-cal-folds", type=int, default=1, help="1 = legacy 50/50 split; >=2 (e.g. 5) = strict K-fold OOF cross-fitted calibration & R0 LTT")
+    ap.add_argument("--auto-ship-gate", action="store_true", help="v1.6.1: 3-candidate auto ship gate (Direct-Pack LARDO-W8 vs Light-QAT vs FP16 WiSE-FT Soup)")
+    ap.add_argument("--qat-lr", type=float, default=2.0e-4, help="Phase-3 QAT base LR (v1.6.1 Light-QAT recommends 5e-5)")
+    ap.add_argument("--p2-lr", type=float, default=1.1e-3, help="Phase-2 Deep base LR (v1.6.1 warm-start recommends 4e-4)")
     ap.add_argument("--use-cascade-weight", action="store_true", help="Optional survival reweighting (OFF in locked A0-A5)")
     ap.add_argument("--no-crossview-fusion", action="store_true", help="Disable monotone OOF cross-view late fusion")
     ap.add_argument("--two-sided-r0-exit", action="store_true", help="Test exact Clopper-Pearson high-side R0 exit certification")
@@ -621,6 +669,22 @@ def main() -> None:
         for k in ("val_gold_v2", "test_gold_v2", "val_wave3", "val_promo_v11", "val_old_video_neg", "val_multilingual", "diag_god500")
         for r in corpus.get(k, [])
     }
+    extra_cal_cert_rows: list[dict[str, Any]] = []
+    if args.extra_cal_cert_pack is not None and args.extra_cal_cert_pack.is_file():
+        for cr in read_jsonl_any_v140(args.extra_cal_cert_pack):
+            ct = str(cr.get("text", "") or "").strip()
+            if not ct:
+                continue
+            sha_c = text_sha16_v140(ct)
+            if sha_c in blocked:
+                continue
+            blocked.add(sha_c)  # Strictly exclude calibration holdout from ALL training pools!
+            ya_c = float(cr.get("y_ai", cr.get("label_ai", -1.0)))
+            if not (0.0 <= ya_c <= 1.0):
+                continue
+            extra_cal_cert_rows.append({"text": ct, "y_ai": ya_c, "y_pr": float(cr.get("y_pr", 0.0))})
+        print(f"[v1.6.1-ExtraCalCert] Reserved {len(extra_cal_cert_rows):,} strictly zero-leakage holdout rows from {args.extra_cal_cert_pack}", flush=True)
+
     distill_pool = _load_v140_distill_pool(args.distill_pool, blocked, smoke_test=args.smoke_test)
     if not distill_pool:
         raise SystemExit(f"Empty distill pool: {args.distill_pool}")
@@ -630,38 +694,89 @@ def main() -> None:
     d_promo = [r for r in distill_pool if r.get("t_pr_lg", -5.0) >= 0.5]
     d_all = distill_pool
     gold_pos, gold_hd, gold_nat, gold_pr = corpus["train_ai_pos"], corpus["train_hu_hard"], corpus["train_hu_natural"], corpus["train_promo_extra"]
+    ex_hard_fn: list[dict[str, Any]] = []
+    ex_hard_fp: list[dict[str, Any]] = []
+    ex_sandwich: list[dict[str, Any]] = []
+    ex_q2_dual: list[dict[str, Any]] = []
+    ex_override: list[dict[str, Any]] = []
+    ex_general: list[dict[str, Any]] = []
+
     if args.extra_gold_pack is not None and args.extra_gold_pack.is_file():
         extra_rows = read_jsonl_any_v140(args.extra_gold_pack)
-        n_ex_add = 0
+        n_ex_add, n_ex_rescored, n_ex_ovr = 0, 0, 0
         for er in extra_rows:
             et = str(er.get("text", "") or "").strip()
             if not et or text_sha16_v140(et) in blocked:
                 continue
             ya = float(er.get("y_ai", er.get("label_ai", -1.0)))
             yp = float(er.get("y_pr", er.get("label_promo", -1.0)))
-            has_a = 1.0 if ya in (0.0, 1.0) else 0.0
-            has_p = 1.0 if yp in (0.0, 1.0) else 0.0
+            # FIXED v1.6.1 bug: accept continuous calibrated y_ai in [0, 1] (previously `ya in (0, 1)` dropped 98.45% of stream pack!)
+            has_a = float(er.get("has_ai", 1.0 if (0.0 <= ya <= 1.0) else 0.0))
+            has_p = float(er.get("has_pr", 1.0 if (0.0 <= yp <= 1.0) else 0.0))
             if has_a < 0.5 and has_p < 0.5:
                 continue
+            ya_c = max(0.0, min(1.0, ya)) if has_a > 0.5 else 0.0
+            yp_c = max(0.0, min(1.0, yp)) if has_p > 0.5 else 0.0
+            bkt = str(er.get("bucket", "") or "").lower()
+            tier = str(er.get("tier", er.get("epistemic_tier", "")) or "")
+            is_ovr = bool(er.get("is_override", False)) or ("override" in bkt)
+            has_t_raw = float(er.get("has_teacher", er.get("has_t", 0.0)))
+            t_ai_lg = float(er.get("t_ai_lg", er.get("t_ai_logit", 0.0)))
+            t_pr_lg = float(er.get("t_pr_lg", er.get("t_pr_logit", 0.0)))
+            # Committee Override Shield: if committee explicitly overrode a label, trust committee gold label & mask conflicting teacher!
+            use_t = has_t_raw > 0.5 and (not is_ovr) and (tier != "T0_DIAMOND")
+            if use_t:
+                n_ex_rescored += 1
+            if is_ovr:
+                n_ex_ovr += 1
+            is_hn = bool(has_a > 0.5 and ya_c <= 0.25 and ("hard_fp" in bkt or bool(er.get("is_hard_fp", False)) or (has_p > 0.5 and yp_c >= 0.5)))
+            is_hfn = bool(has_a > 0.5 and ya_c >= 0.70 and ("hard_fn" in bkt or "sandwich" in bkt or "q2_dual" in bkt))
             item = {
-                "text": et, "y_ai": max(0.0, ya), "y_pr": max(0.0, yp),
-                "has_ai": has_a, "has_pr": has_p, "has_t": 0.0,
-                "t_ai_lg": 0.0, "t_ai_r0": 0.0, "t_ai_t2": 0.0, "t_ai_t3": 0.0, "t_pr_lg": 0.0,
+                "text": et, "y_ai": ya_c, "y_pr": yp_c,
+                "has_ai": has_a, "has_pr": has_p,
+                "has_teacher": 1.0 if use_t else 0.0,
+                "kd_w": float(er.get("kd_w", 1.0)),
+                "t_ai_lg": t_ai_lg if use_t else 0.0,
+                "t_ai_r0": float(er.get("t_ai_r0", t_ai_lg)) if use_t else 0.0,
+                "t_ai_t1": float(er.get("t_ai_t1", t_ai_lg)) if use_t else 0.0,
+                "t_ai_t2": float(er.get("t_ai_t2", t_ai_lg)) if use_t else 0.0,
+                "t_ai_t3": float(er.get("t_ai_t3", t_ai_lg)) if use_t else 0.0,
+                "frontier_gap": float(er.get("frontier_gap", 0.0)) if use_t else 0.0,
+                "t_pr_lg": t_pr_lg if use_t else 0.0,
+                "hard_neg": 1.0 if is_hn else 0.0,
+                "hard_fn": 1.0 if is_hfn else 0.0,
                 "era5": int(er.get("era5", -1)), "sub4": int(er.get("sub4", -1)),
             }
-            if has_a > 0.5 and ya >= 0.5:
+            if "hard_fn" in bkt:
+                ex_hard_fn.append(item)
+            elif "sandwich" in bkt:
+                ex_sandwich.append(item)
+            elif "q2_dual" in bkt:
+                ex_q2_dual.append(item)
+            elif is_ovr:
+                ex_override.append(item)
+            elif "hard_fp" in bkt or is_hn:
+                ex_hard_fp.append(item)
+            else:
+                ex_general.append(item)
+            if has_a > 0.5 and ya_c >= 0.65:
                 gold_pos.append(item)
-            elif has_a > 0.5 and (str(er.get("bucket", "")).endswith("hard_fp") or bool(er.get("is_hard_fp", False))):
+            elif has_a > 0.5 and is_hn:
                 gold_hd.append(item)
-            elif has_a > 0.5:
+            elif has_a > 0.5 and ya_c <= 0.35:
                 gold_nat.append(item)
-            if has_p > 0.5 and yp >= 0.5:
+            if has_p > 0.5 and yp_c >= 0.65:
                 gold_pr.append(item)
             n_ex_add += 1
-        print(f"[v1.6.0-ExtraGold] Admitted {n_ex_add:,} zero-leakage rows from {args.extra_gold_pack}", flush=True)
+        print(
+            f"[v1.6.1-ExtraGold] Admitted {n_ex_add:,} zero-leakage rows (rescored={n_ex_rescored:,}, overrides={n_ex_ovr:,} | "
+            f"hard_fn={len(ex_hard_fn):,}, hard_fp={len(ex_hard_fp):,}, sandwich={len(ex_sandwich):,}, "
+            f"q2_dual={len(ex_q2_dual):,}, ovr_bkt={len(ex_override):,}, gen={len(ex_general):,}) from {args.extra_gold_pack}",
+            flush=True,
+        )
     longform_train = read_jsonl_any_v140(args.v11_data_dir / "v11_wave2_longform_gold_1200.jsonl.gz")[: (24 if args.smoke_test else 1200)]
 
-    # 2. Model + Group-Clustered 3-Fold OOF CharLM
+    # 2. Model + Optional Warm-Start + Group-Clustered 3-Fold OOF CharLM
     tokenizer = BiliPickyBPETokenizer(args.v07_tokenizer)
     model_kwargs = dict(
         arch=args.arch,
@@ -677,8 +792,23 @@ def main() -> None:
         use_local_charlm_inject=not args.no_local_charlm,
         use_global_charlm_shortcut=False,
         prelude_global_se=None if not args.no_prelude_global_se else False,
+        use_discourse_ops=bool(args.use_discourse_ops),
+        lardo_w8_core=bool(args.lardo_w8_core),
     )
     model = MeguvizV160StratosphereLoopModel(**model_kwargs).to(device)
+    if args.init_from_fp16 is not None and args.init_from_fp16.is_file():
+        ck_init = torch.load(args.init_from_fp16, map_location="cpu", weights_only=False)
+        sd_init = ck_init.get("state_dict", ck_init.get("model_state_dict", ck_init))
+        cur_sd = model.state_dict()
+        loaded_k, skipped_k = 0, 0
+        for k, v in sd_init.items():
+            if k in cur_sd and cur_sd[k].shape == v.shape:
+                cur_sd[k].copy_(v.to(cur_sd[k].dtype))
+                loaded_k += 1
+            else:
+                skipped_k += 1
+        model.load_state_dict(cur_sd)
+        print(f"[v1.6.1-WarmStart] Loaded {loaded_k}/{len(cur_sd)} matching tensors (skipped={skipped_k}) from {args.init_from_fp16}", flush=True)
     era_grl = OfflineEraGRLHead(emb_dim=AI_END_V130, num_eras=NUM_ERAS_V122).to(device)
 
     fcache = _StrictGroupOOFFeatureCacheV160(
@@ -710,19 +840,37 @@ def main() -> None:
         flush=True,
     )
 
+    has_extra_buckets = bool(ex_hard_fn or ex_hard_fp or ex_sandwich or ex_q2_dual or ex_override or ex_general)
+
     def _draw(pool: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
         return rng.choices(pool, k=k) if (pool and k > 0) else []
 
     def _sample_batch(bs: int) -> list[dict[str, Any]]:
         out_b: list[dict[str, Any]] = []
-        out_b.extend(_draw(d_all, int(bs * 0.24)))
-        out_b.extend(_draw(d_hard, int(bs * 0.14)))
-        out_b.extend(_draw(d_pos, int(bs * 0.08)))
-        out_b.extend(_draw(d_promo, int(bs * 0.06)))
-        out_b.extend(_draw(gold_pos, int(bs * 0.15)))
-        out_b.extend(_draw(gold_hd, int(bs * 0.15)))
-        out_b.extend(_draw(gold_nat, int(bs * 0.11)))
-        out_b.extend(_draw(gold_pr, max(1, bs - len(out_b))))
+        if has_extra_buckets:
+            # v1.6.1 Stratified Anti-Dilution Mix: preserves oldvideo/q4 & 251K armor while upsampling stealth hard_fn/sandwich/q2!
+            out_b.extend(_draw(d_all, int(bs * 0.16)))
+            out_b.extend(_draw(d_hard, int(bs * 0.12)))
+            out_b.extend(_draw(d_pos, int(bs * 0.06)))
+            out_b.extend(_draw(d_promo, int(bs * 0.05)))
+            out_b.extend(_draw(ex_hard_fn or gold_pos, int(bs * 0.12)))
+            out_b.extend(_draw(ex_sandwich or gold_pos, int(bs * 0.05)))
+            out_b.extend(_draw(ex_q2_dual or gold_pr, int(bs * 0.04)))
+            out_b.extend(_draw(ex_hard_fp or gold_hd, int(bs * 0.10)))
+            out_b.extend(_draw(ex_override or gold_hd, int(bs * 0.06)))
+            out_b.extend(_draw(ex_general or gold_nat, int(bs * 0.06)))
+            out_b.extend(_draw(gold_pos, int(bs * 0.06)))
+            out_b.extend(_draw(gold_hd, int(bs * 0.07)))
+            out_b.extend(_draw(gold_pr, max(1, bs - len(out_b))))
+        else:
+            out_b.extend(_draw(d_all, int(bs * 0.24)))
+            out_b.extend(_draw(d_hard, int(bs * 0.14)))
+            out_b.extend(_draw(d_pos, int(bs * 0.08)))
+            out_b.extend(_draw(d_promo, int(bs * 0.06)))
+            out_b.extend(_draw(gold_pos, int(bs * 0.15)))
+            out_b.extend(_draw(gold_hd, int(bs * 0.15)))
+            out_b.extend(_draw(gold_nat, int(bs * 0.11)))
+            out_b.extend(_draw(gold_pr, max(1, bs - len(out_b))))
         return out_b[:bs]
 
     def _eval_val(m_cur: MeguvizV160StratosphereLoopModel, r0_only: bool = False, outer_eval: int = 4) -> dict[str, Any]:
@@ -773,10 +921,39 @@ def main() -> None:
     p2_steps = 6 if args.smoke_test else int(args.p2_steps)
     p3_steps = 0 if args.skip_qat else (4 if args.smoke_test else int(args.p3_qat_steps))
 
+    def _minimal_rule_format_edit(txt: str) -> str:
+        """Rev.2 P1 deterministic 6-template rule-based label-preserving human format edit (NEVER LLM text rewrite!)."""
+        s = str(txt).strip()
+        if len(s) < 12:
+            return s
+        mode = rng.randint(0, 5)
+        if mode == 0:
+            parts = [p.strip() for p in s.replace("。", "。\n").replace("！", "！\n").replace("？", "？\n").split("\n") if p.strip()]
+            if len(parts) >= 2:
+                return "\n".join(f"{idx + 1}. {p}" for idx, p in enumerate(parts[:5]))
+            return f"1. {s}"
+        if mode == 1:
+            lines = [ln.strip().lstrip("0123456789.、-•* ") for ln in s.splitlines() if ln.strip()]
+            return " ".join(lines) if lines else s
+        if mode == 2:
+            return f"【要点】\n{s}"
+        if mode == 3:
+            parts = [p.strip() for p in s.replace("，", "，\n").replace("。", "。\n").split("\n") if p.strip()]
+            if len(parts) >= 2:
+                return "\n".join(f"- **{p[:4]}**：{p}" for p in parts[:4])
+            return f"- **核心观点**：{s}"
+        if mode == 4:
+            return f"总结如下：\n{s}"
+        # Mode 5: Strip or add casual Bilibili human markers
+        if "[doge]" in s:
+            return s.replace("[doge]", "").strip() or s
+        return f"{s} [doge]"
+
     # -----------------------------------------------------------------------
-    # Phase 1: Shared Frozen `R0` Char-View (trained ONCE and reused bit-for-bit across A0..A5!)
+    # Phase 1: Shared Frozen `R0` Char-View (trained ONCE and reused bit-for-bit across A0..A5 / v1.6.1!)
     # -----------------------------------------------------------------------
     best_r0_obj = -1e9
+    has_cf_p1 = corpus["stats"]["admitted_cf_pairs"] > 0
     if args.init_r0_ckpt is not None and args.init_r0_ckpt.is_file():
         ck_r0 = torch.load(args.init_r0_ckpt, map_location="cpu", weights_only=False)
         model.rung0.load_state_dict(ck_r0["rung0_state_dict"])
@@ -808,6 +985,33 @@ def main() -> None:
                     err_pr = ((torch.sigmoid(r0["logit_promo_r0"].float()) - tp_pr).abs() >= 0.20).float()
                 l_def = F.binary_cross_entropy_with_logits(r0["defer_ai_r0_logit"].float(), err_ai) + F.binary_cross_entropy_with_logits(r0["defer_pr_r0_logit"].float(), err_pr)
                 loss = l_ai + 0.72 * l_pr + 0.15 * l_def
+                if args.p1_use_cf:
+                    # Gentle balanced CVaR + CF mirror + rule format L_inv inside Phase-1 R0++!
+                    hu_m1 = ((bk["has_ai"] > 0.5) & (bk["y_ai"] <= 0.20)) | ((bk["has_t"] > 0.5) & (bk["t_ai_lg"] <= -1.5))
+                    if int(hu_m1.sum().item()) >= 8:
+                        l0_r0 = F.softplus(r0["logit_ai_r0"].float()[hu_m1])
+                        q_i1 = max(0, min(l0_r0.numel() - 1, int(math.floor(0.90 * l0_r0.numel()))))
+                        t_cv1 = torch.sort(l0_r0).values[q_i1].detach()
+                        loss = loss + 0.04 * (t_cv1 + F.relu(l0_r0 - t_cv1).mean() / 0.10)
+                    if has_cf_p1 and (step % 4 == 0):
+                        ch1 = sample_cf_mirror_batch_v140(corpus, 4 if args.smoke_test else 16, rng)
+                        if ch1:
+                            ba1 = _collate_v160_batch([{"text": x["ai_text"]} for x in ch1], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=False)
+                            bh1 = _collate_v160_batch([{"text": x["human_text"]} for x in ch1], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=False)
+                            ra1 = model.forward_r0(ba1["c1"], ba1["c2"], ba1["c3"], ba1["cm"], ba1["cf"])["logit_ai_r0"].float()
+                            rh1 = model.forward_r0(bh1["c1"], bh1["c2"], bh1["c3"], bh1["cm"], bh1["cf"])["logit_ai_r0"].float()
+                            pw1 = torch.tensor([float(x["pair_weight"]) for x in ch1], dtype=torch.float32, device=device)
+                            loss = loss + 0.18 * (F.softplus(1.7 - (ra1 - rh1)) * pw1).mean()
+                    if (step % 5 == 2) and (gold_hd or gold_nat):
+                        hp1 = gold_hd + gold_nat
+                        fc1 = rng.sample(hp1, min(4 if args.smoke_test else 12, len(hp1)))
+                        ot1 = [str(r["text"]) for r in fc1]
+                        et1 = [_minimal_rule_format_edit(t) for t in ot1]
+                        bo1 = _collate_v160_batch([{"text": t} for t in ot1], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=False)
+                        be1 = _collate_v160_batch([{"text": t} for t in et1], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=False)
+                        ro1 = model.forward_r0(bo1["c1"], bo1["c2"], bo1["c3"], bo1["cm"], bo1["cf"])["logit_ai_r0"].float()
+                        re1 = model.forward_r0(be1["c1"], be1["c2"], be1["c3"], be1["cm"], be1["cf"])["logit_ai_r0"].float()
+                        loss = loss + 0.08 * ((ro1 - re1) ** 2).mean().clamp_max(8.0)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.rung0.parameters(), 1.0)
             opt1.step()
@@ -938,7 +1142,7 @@ def main() -> None:
         if int(era_v.sum().item()) >= 8:
             loss = loss + 0.12 * era_grl(od["emb_ai"], bk["era5"], era_v, lam=0.50)
 
-        # 6. Rev.2 Zero-Inference-Cost Shift-Safe Negative-Class Softplus-CVaR Tail Loss (opt-in for v1.6.0-r1!)
+        # 6. Rev.2 Zero-Inference-Cost Shift-Safe Negative-Class Softplus-CVaR Tail Loss
         if args.use_softplus_cvar and float(args.cvar_weight) > 0.0 and int(hu_m.sum().item()) >= 8:
             z_hu = ai_steps[-1].float()[hu_m]
             l0 = F.softplus(z_hu)
@@ -947,39 +1151,72 @@ def main() -> None:
             tau_cv = torch.sort(l0).values[q_idx].detach()
             cvar_hu = tau_cv + F.relu(l0 - tau_cv).mean() / a_cv
             loss = loss + float(args.cvar_weight) * cvar_hu
-        return loss
 
-    def _minimal_rule_format_edit(txt: str) -> str:
-        """Rev.2 P1 deterministic rule-based label-preserving human format edit (NEVER LLM text rewrite!)."""
-        s = str(txt).strip()
-        if len(s) < 12:
-            return s
-        mode = rng.randint(0, 2)
-        if mode == 0:
-            # Split by Chinese/English sentence punctuation into numbered bullet points (kedaibiao style)
-            parts = [p.strip() for p in s.replace("。", "。\n").replace("！", "！\n").replace("？", "？\n").split("\n") if p.strip()]
-            if len(parts) >= 2:
-                return "\n".join(f"{idx + 1}. {p}" for idx, p in enumerate(parts[:5]))
-            return f"1. {s}"
-        if mode == 1:
-            # Strip existing newlines / numbering into casual single-paragraph prose
-            lines = [ln.strip().lstrip("0123456789.、-•* ") for ln in s.splitlines() if ln.strip()]
-            return " ".join(lines) if lines else s
-        # Mode 2: Add compact neutral structural header + newline
-        return f"【要点】\n{s}"
+        # 7. v1.6.1 Positive Stealth-AI Tail Recall-Floor Pairwise Protection (counterbalances CVaR to recover Deep ROC!)
+        if float(args.recall_floor_weight) > 0.0:
+            ai_pos_m = ((bk["has_ai"] > 0.5) & (bk["y_ai"] >= 0.70)) | ((bk["has_t"] > 0.5) & (bk["t_ai_lg"] >= 1.4))
+            if int(ai_pos_m.sum().item()) >= 4 and int(hu_m.sum().item()) >= 8:
+                z_pos = ai_steps[-1].float()[ai_pos_m]
+                z_neg = ai_steps[-1].float()[hu_m]
+                # Focus on bottom-50% stealth positives vs top-25% hardest humans
+                k_pos = max(2, int(math.ceil(0.50 * z_pos.numel())))
+                k_neg = max(2, int(math.ceil(0.25 * z_neg.numel())))
+                z_pos_low = torch.topk(z_pos, k=k_pos, largest=False).values
+                z_neg_hi = torch.topk(z_neg, k=k_neg, largest=True).values
+                # Emphasize explicit `hard_fn` positives when present
+                hfn_m = ai_pos_m & (bk["hard_fn"] > 0.5)
+                l_rf = F.softplus(1.6 + z_neg_hi.unsqueeze(1) - z_pos_low.unsqueeze(0)).mean()
+                if int(hfn_m.sum().item()) >= 2:
+                    z_hfn = ai_steps[-1].float()[hfn_m]
+                    l_rf = 0.5 * l_rf + 0.5 * F.softplus(1.8 + z_neg_hi.unsqueeze(1) - z_hfn.unsqueeze(0)).mean()
+                loss = loss + float(args.recall_floor_weight) * l_rf
+
+        # 8. v1.6.1 Review 04 P4 Exact Unbiased Class-Conditional V-REx across era5 environments
+        if args.use_cc_vrex and float(args.cc_vrex_weight) > 0.0:
+            era_ok = ai_valid & (bk["era5"] >= 0) & (bk["era5"] < NUM_ERAS_V122)
+            if int(era_ok.sum().item()) >= 16:
+                per_bce = F.binary_cross_entropy_with_logits(ai_steps[-1].float()[era_ok], y_bin_ai[era_ok], reduction="none")
+                vrex_d = class_conditional_vrex_unbiased(
+                    per_bce, y_bin_ai[era_ok].long(), bk["era5"][era_ok], n_envs=NUM_ERAS_V122, beta_0=1.0, beta_1=0.5,
+                )
+                # Keep unbiased estimator (can be slightly negative), clamp lower only at -0.15 for optimizer safety
+                loss = loss + float(args.cc_vrex_weight) * vrex_d["penalty"].clamp(min=-0.15, max=2.0)
+
+        # 9. v1.6.1-B Inner-Ball Smooth Saturation Regularizer for Direct Contractive Kernel D
+        if float(args.sat_reg_weight) > 0.0 and od.get("slot_steps"):
+            r_in = float(CONTRACTIVE_INNER_R_V161)
+            sat_pen = torch.stack([
+                F.relu(sl[:, : model.core.n_ai_slots, :].float().norm(dim=-1) - r_in).pow(2).mean()
+                for sl in od["slot_steps"]
+            ]).mean()
+            loss = loss + float(args.sat_reg_weight) * sat_pen
+        return loss
 
     # -----------------------------------------------------------------------
     # Phase 2: Full StratosphereLoop Training (`T ~ U{1..6}` + CF Mirrors + Symmetric DynaSeam)
     # -----------------------------------------------------------------------
     r0_ids = {id(p) for p in model.rung0.parameters()}
-    opt2_groups = [{"params": [p for p in model.parameters() if id(p) not in r0_ids] + list(era_grl.parameters()), "lr": 1.1e-3, "base_lr": 1.1e-3, "weight_decay": 0.01}]
+    p2_lr_val = float(args.p2_lr)
+    opt2_groups = [{"params": [p for p in model.parameters() if id(p) not in r0_ids] + list(era_grl.parameters()), "lr": p2_lr_val, "base_lr": p2_lr_val, "weight_decay": 0.01}]
     if not args.freeze_r0:
-        opt2_groups.insert(0, {"params": list(model.rung0.parameters()), "lr": 2.0e-4, "base_lr": 2.0e-4, "weight_decay": 0.01})
+        opt2_groups.insert(0, {"params": list(model.rung0.parameters()), "lr": min(2.0e-4, p2_lr_val * 0.25), "base_lr": min(2.0e-4, p2_lr_val * 0.25), "weight_decay": 0.01})
     opt2 = _make_adamw(opt2_groups, device)
     ema_sd = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     best_p2_sd, best_p2_obj = {k: v.clone() for k, v in ema_sd.items()}, -1e9
     best_p2_ev: dict[str, Any] = {}
+    p2_soup_snaps: list[dict[str, torch.Tensor]] = []
     has_cf = corpus["stats"]["admitted_cf_pairs"] > 0
+    need_qsc = bool(model.use_discourse_ops)
+    _QUOTE_REBUTTAL_TEMPLATES = (
+        "楼上这段一看就是AI生成的：「{ai}」大家别被带节奏了。",
+        "笑死，把“{ai}”原封不动复制粘贴过来当真人评论呢？",
+        "引用楼上机器人话术：【{ai}】——真有人信这是真人写的？",
+    )
+    _PROMO_FLIP_PAIRS = (
+        ("强烈推荐大家去搜一下这个宝藏插件，券后只要9.9闭眼冲，主页置顶领福利！", "千万别信楼上推的那个插件，纯智商税广告，大家避雷别买！"),
+        ("想学全套干货的私信我或者搜工种号领取免费资料包，名额有限！", "评论区那些让私信领资料加群的全是引流骗子，举报了别理！"),
+        ("这款耳机亲测降噪无敌，点击评论区置顶链接立减200，家人们冲！", "这款耳机我买了两天就退了，降噪根本不行，楼上纯水军软广！"),
+    )
 
     model.train()
     if args.freeze_r0:
@@ -988,7 +1225,7 @@ def main() -> None:
         mult2 = _cosine_mult(step, p2_steps)
         for pg in opt2.param_groups:
             pg["lr"] = pg["base_lr"] * mult2
-        bk = _collate_v160_batch(_sample_batch(bs), fcache, model.r0_b2, model.r0_b3, device, rng=rng, punct_jitter_prob=0.35, need_bpe=True)
+        bk = _collate_v160_batch(_sample_batch(bs), fcache, model.r0_b2, model.r0_b3, device, rng=rng, punct_jitter_prob=0.35, need_bpe=True, need_quote_scope=need_qsc)
         if args.t_train_mode == "uniform_1_6":
             outer_n = rng.randint(1, 6) if not args.smoke_test else rng.choice([2, 4, 6])
         else:
@@ -1001,16 +1238,17 @@ def main() -> None:
                 bk["c1"], bk["c2"], bk["c3"], bk["cm"], bk["cf"], bk["sup"],
                 outer_steps=outer_n, r0_drop_p=float(args.r0_drop_p), charlm_drop_p=float(args.charlm_drop_p),
                 dt_drop_p=float(args.dt_drop_p), use_crossview_dt=bool(args.use_slot9_dt),
+                quote_scope=bk.get("qsc"),
             )
             loss = _stratosphere_loss(od, bk)
 
             if has_cf and (step % 3 == 0):
                 ch = sample_cf_mirror_batch_v140(corpus, 4 if args.smoke_test else 16, rng)
                 if ch:
-                    ba = _collate_v160_batch([{"text": x["ai_text"]} for x in ch], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True)
-                    bh = _collate_v160_batch([{"text": x["human_text"]} for x in ch], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True)
-                    oa = model(ba["ids"], ba["msk"], ba["st"], ba["eg"], ba["tg"], ba["loc"], ba["c1"], ba["c2"], ba["c3"], ba["cm"], ba["cf"], ba["sup"], outer_steps=4, r0_drop_p=0.50, charlm_drop_p=0.35, use_crossview_dt=bool(args.use_slot9_dt))
-                    oh = model(bh["ids"], bh["msk"], bh["st"], bh["eg"], bh["tg"], bh["loc"], bh["c1"], bh["c2"], bh["c3"], bh["cm"], bh["cf"], bh["sup"], outer_steps=4, r0_drop_p=0.50, charlm_drop_p=0.35, use_crossview_dt=bool(args.use_slot9_dt))
+                    ba = _collate_v160_batch([{"text": x["ai_text"]} for x in ch], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True, need_quote_scope=need_qsc)
+                    bh = _collate_v160_batch([{"text": x["human_text"]} for x in ch], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True, need_quote_scope=need_qsc)
+                    oa = model(ba["ids"], ba["msk"], ba["st"], ba["eg"], ba["tg"], ba["loc"], ba["c1"], ba["c2"], ba["c3"], ba["cm"], ba["cf"], ba["sup"], outer_steps=4, r0_drop_p=0.50, charlm_drop_p=0.35, use_crossview_dt=bool(args.use_slot9_dt), quote_scope=ba.get("qsc"))
+                    oh = model(bh["ids"], bh["msk"], bh["st"], bh["eg"], bh["tg"], bh["loc"], bh["c1"], bh["c2"], bh["c3"], bh["cm"], bh["cf"], bh["sup"], outer_steps=4, r0_drop_p=0.50, charlm_drop_p=0.35, use_crossview_dt=bool(args.use_slot9_dt), quote_scope=bh.get("qsc"))
                     pw = torch.tensor([float(x["pair_weight"]) for x in ch], dtype=torch.float32, device=device)
                     l_cf = (
                         (F.softplus(1.8 - (oa["logit_ai_t4"].float() - oh["logit_ai_t4"].float())) * pw).mean()
@@ -1025,12 +1263,36 @@ def main() -> None:
                 fc_rows = rng.sample(hu_pool, min(n_fc, len(hu_pool)))
                 orig_txts = [str(r["text"]) for r in fc_rows]
                 edit_txts = [_minimal_rule_format_edit(t) for t in orig_txts]
-                b_o = _collate_v160_batch([{"text": t} for t in orig_txts], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True)
-                b_e = _collate_v160_batch([{"text": t} for t in edit_txts], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True)
-                oo = model(b_o["ids"], b_o["msk"], b_o["st"], b_o["eg"], b_o["tg"], b_o["loc"], b_o["c1"], b_o["c2"], b_o["c3"], b_o["cm"], b_o["cf"], b_o["sup"], outer_steps=4, r0_drop_p=0.50, charlm_drop_p=0.30, use_crossview_dt=bool(args.use_slot9_dt))
-                oe = model(b_e["ids"], b_e["msk"], b_e["st"], b_e["eg"], b_e["tg"], b_e["loc"], b_e["c1"], b_e["c2"], b_e["c3"], b_e["cm"], b_e["cf"], b_e["sup"], outer_steps=4, r0_drop_p=0.50, charlm_drop_p=0.30, use_crossview_dt=bool(args.use_slot9_dt))
+                b_o = _collate_v160_batch([{"text": t} for t in orig_txts], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True, need_quote_scope=need_qsc)
+                b_e = _collate_v160_batch([{"text": t} for t in edit_txts], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True, need_quote_scope=need_qsc)
+                oo = model(b_o["ids"], b_o["msk"], b_o["st"], b_o["eg"], b_o["tg"], b_o["loc"], b_o["c1"], b_o["c2"], b_o["c3"], b_o["cm"], b_o["cf"], b_o["sup"], outer_steps=4, r0_drop_p=0.50, charlm_drop_p=0.30, use_crossview_dt=bool(args.use_slot9_dt), quote_scope=b_o.get("qsc"))
+                oe = model(b_e["ids"], b_e["msk"], b_e["st"], b_e["eg"], b_e["tg"], b_e["loc"], b_e["c1"], b_e["c2"], b_e["c3"], b_e["cm"], b_e["cf"], b_e["sup"], outer_steps=4, r0_drop_p=0.50, charlm_drop_p=0.30, use_crossview_dt=bool(args.use_slot9_dt), quote_scope=b_e.get("qsc"))
                 l_inv = ((oo["logit_ai_t4"].float() - oe["logit_ai_t4"].float()) ** 2).mean() + 0.5 * ((oo["logit_ai_t2"].float() - oe["logit_ai_t2"].float()) ** 2).mean()
                 loss = loss + float(args.fmt_cf_weight) * l_inv.clamp_max(8.0)
+
+            # v1.6.1 Explicit Quoted-AI Human Rebuttal Counterfactual (directly attacks God-500 D02 8/55 FP!)
+            if args.use_fmt_cf and (step % 8 == 4) and gold_pos:
+                n_qr = 2 if args.smoke_test else 6
+                qr_src = rng.sample(gold_pos, min(n_qr, len(gold_pos)))
+                qr_txts = [rng.choice(_QUOTE_REBUTTAL_TEMPLATES).format(ai=str(r["text"])[:110].strip()) for r in qr_src]
+                b_qr = _collate_v160_batch([{"text": t} for t in qr_txts], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True, need_quote_scope=need_qsc)
+                o_qr = model(b_qr["ids"], b_qr["msk"], b_qr["st"], b_qr["eg"], b_qr["tg"], b_qr["loc"], b_qr["c1"], b_qr["c2"], b_qr["c3"], b_qr["cm"], b_qr["cf"], b_qr["sup"], outer_steps=4, r0_drop_p=0.40, charlm_drop_p=0.25, use_crossview_dt=bool(args.use_slot9_dt), quote_scope=b_qr.get("qsc"))
+                y_zero = torch.full((len(qr_txts),), 0.02, dtype=torch.float32, device=device)
+                loss = loss + 0.14 * (
+                    F.binary_cross_entropy_with_logits(o_qr["logit_ai_t4"].float(), y_zero)
+                    + 0.5 * F.binary_cross_entropy_with_logits(o_qr["logit_ai_t1"].float(), y_zero)
+                )
+
+            # v1.6.1 Promo Stance-Flip Counterfactual `L_flip` (Review 04 P1)
+            if args.use_promo_flip_cf and float(args.promo_flip_weight) > 0.0 and (step % 8 == 6):
+                p_pos_t = [p[0] for p in _PROMO_FLIP_PAIRS]
+                p_neg_t = [p[1] for p in _PROMO_FLIP_PAIRS]
+                b_pp = _collate_v160_batch([{"text": t} for t in p_pos_t], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True, need_quote_scope=need_qsc)
+                b_pn = _collate_v160_batch([{"text": t} for t in p_neg_t], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True, need_quote_scope=need_qsc)
+                o_pp = model(b_pp["ids"], b_pp["msk"], b_pp["st"], b_pp["eg"], b_pp["tg"], b_pp["loc"], b_pp["c1"], b_pp["c2"], b_pp["c3"], b_pp["cm"], b_pp["cf"], b_pp["sup"], outer_steps=2, r0_drop_p=0.3, use_crossview_dt=bool(args.use_slot9_dt), quote_scope=b_pp.get("qsc"))
+                o_pn = model(b_pn["ids"], b_pn["msk"], b_pn["st"], b_pn["eg"], b_pn["tg"], b_pn["loc"], b_pn["c1"], b_pn["c2"], b_pn["c3"], b_pn["cm"], b_pn["cf"], b_pn["sup"], outer_steps=2, r0_drop_p=0.3, use_crossview_dt=bool(args.use_slot9_dt), quote_scope=b_pn.get("qsc"))
+                l_flip = F.relu(1.8 - o_pp["logit_promo_t2"].float() + o_pn["logit_promo_t2"].float()).mean()
+                loss = loss + float(args.promo_flip_weight) * l_flip
 
             if longform_train and (step % 6 == 0):
                 docs = rng.sample(longform_train, min(2 if args.smoke_test else 5, len(longform_train)))
@@ -1040,8 +1302,8 @@ def main() -> None:
                     chunks = plan_long_chunks_v11(cl_doc, max_chunks=6)
                     if not chunks:
                         continue
-                    bk_c = _collate_v160_batch([{"text": c["text"]} for c in chunks], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True)
-                    oc = model(bk_c["ids"], bk_c["msk"], bk_c["st"], bk_c["eg"], bk_c["tg"], bk_c["loc"], bk_c["c1"], bk_c["c2"], bk_c["c3"], bk_c["cm"], bk_c["cf"], bk_c["sup"], outer_steps=2, r0_drop_p=0.0, use_crossview_dt=bool(args.use_slot9_dt))
+                    bk_c = _collate_v160_batch([{"text": c["text"]} for c in chunks], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True, need_quote_scope=need_qsc)
+                    oc = model(bk_c["ids"], bk_c["msk"], bk_c["st"], bk_c["eg"], bk_c["tg"], bk_c["loc"], bk_c["c1"], bk_c["c2"], bk_c["c3"], bk_c["cm"], bk_c["cf"], bk_c["sup"], outer_steps=2, r0_drop_p=0.0, use_crossview_dt=bool(args.use_slot9_dt), quote_scope=bk_c.get("qsc"))
                     cm_t = torch.from_numpy(np.stack([c["chunk_meta"] for c in chunks], 0).astype(np.float32)).unsqueeze(0).to(device)
                     vm_t = torch.ones((1, len(chunks)), dtype=torch.float32, device=device)
                     da, dp = model.aggregate_long_chunks(oc["emb_ai"].unsqueeze(0), oc["emb_pr"].unsqueeze(0), oc["logit_ai"].unsqueeze(0), oc["logit_promo"].unsqueeze(0), cm_t, vm_t)
@@ -1058,8 +1320,8 @@ def main() -> None:
                     ):
                         s_chunks = plan_long_chunks_v11(sand_doc, max_chunks=4)
                         if len(s_chunks) >= 2:
-                            bk_s = _collate_v160_batch([{"text": c["text"]} for c in s_chunks], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True)
-                            os_c = model(bk_s["ids"], bk_s["msk"], bk_s["st"], bk_s["eg"], bk_s["tg"], bk_s["loc"], bk_s["c1"], bk_s["c2"], bk_s["c3"], bk_s["cm"], bk_s["cf"], bk_s["sup"], outer_steps=2, r0_drop_p=0.0, use_crossview_dt=bool(args.use_slot9_dt))
+                            bk_s = _collate_v160_batch([{"text": c["text"]} for c in s_chunks], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True, need_quote_scope=need_qsc)
+                            os_c = model(bk_s["ids"], bk_s["msk"], bk_s["st"], bk_s["eg"], bk_s["tg"], bk_s["loc"], bk_s["c1"], bk_s["c2"], bk_s["c3"], bk_s["cm"], bk_s["cf"], bk_s["sup"], outer_steps=2, r0_drop_p=0.0, use_crossview_dt=bool(args.use_slot9_dt), quote_scope=bk_s.get("qsc"))
                             cms = torch.from_numpy(np.stack([c["chunk_meta"] for c in s_chunks], 0).astype(np.float32)).unsqueeze(0).to(device)
                             vms = torch.ones((1, len(s_chunks)), dtype=torch.float32, device=device)
                             da_s, _ = model.aggregate_long_chunks(os_c["emb_ai"].unsqueeze(0), os_c["emb_pr"].unsqueeze(0), os_c["logit_ai"].unsqueeze(0), os_c["logit_promo"].unsqueeze(0), cms, vms)
@@ -1080,6 +1342,10 @@ def main() -> None:
             ev2 = _eval_val(model, r0_only=False)
             if ev2["sel_obj"] > best_p2_obj:
                 best_p2_obj, best_p2_sd, best_p2_ev = ev2["sel_obj"], {k: v.clone() for k, v in ema_sd.items()}, ev2
+            if step + 1 >= int(p2_steps * 0.5):
+                p2_soup_snaps.append({k: v.clone() for k, v in ema_sd.items()})
+                if len(p2_soup_snaps) > 3:
+                    p2_soup_snaps.pop(0)
             lr_show = opt2.param_groups[-1]["lr"]
             print(f"  [Phase2 step={step+1}/{p2_steps}] lr={lr_show:.2e} loss={float(loss.item()):.4f} {ev2}", flush=True)
             model.load_state_dict(cur_sd)
@@ -1107,15 +1373,21 @@ def main() -> None:
     del m_dp
 
     # -----------------------------------------------------------------------
-    # Phase 3: Identical LoopQ-Aware Clean W4/W8 QAT (`T ~ U{1..6}`) across ALL 6 Arms
+    # Phase 3: Identical LoopQ-Aware Clean W4/W8 QAT (`T ~ U{1..6}`) + v1.6.1 3-Candidate Auto Ship Gate!
     # -----------------------------------------------------------------------
     best_q_obj = float(best_p2_obj)
+    best_q_sd = {k: v.clone() for k, v in best_p2_sd.items()}
     if p3_steps > 0:
         set_v160_qat_mode(model, True)
         qat_params = [p for p in model.parameters() if p.requires_grad]
-        opt3 = _make_adamw([{"params": qat_params, "lr": 2.0e-4, "base_lr": 2.0e-4, "weight_decay": 0.005}], device)
+        qat_lr_val = float(args.qat_lr)
+        opt3 = _make_adamw([{"params": qat_params, "lr": qat_lr_val, "base_lr": qat_lr_val, "weight_decay": 0.005}], device)
         ema_q = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         best_q_sd, best_q_obj = {k: v.clone() for k, v in ema_q.items()}, _eval_val(model, r0_only=False)["sel_obj"]
+        saved_cvar_en = args.use_softplus_cvar
+        if args.auto_ship_gate:
+            # Light-QAT without CVaR shock avoids the v1.6.0-r1 1600-step QAT tail drift!
+            args.use_softplus_cvar = False
         model.train()
         if args.freeze_r0:
             model.rung0.eval()
@@ -1123,7 +1395,7 @@ def main() -> None:
             mult3 = _cosine_mult(step, p3_steps, warm_frac=0.06, min_f=0.08)
             for pg in opt3.param_groups:
                 pg["lr"] = pg["base_lr"] * mult3
-            bk = _collate_v160_batch(_sample_batch(bs), fcache, model.r0_b2, model.r0_b3, device, rng=rng, punct_jitter_prob=0.35, need_bpe=True)
+            bk = _collate_v160_batch(_sample_batch(bs), fcache, model.r0_b2, model.r0_b3, device, rng=rng, punct_jitter_prob=0.35, need_bpe=True, need_quote_scope=need_qsc)
             outer_q = rng.randint(1, 6) if (args.t_train_mode == "uniform_1_6" and not args.smoke_test) else 4
             opt3.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=torch.cuda.is_available(), dtype=amp_dtype):
@@ -1132,6 +1404,7 @@ def main() -> None:
                     bk["c1"], bk["c2"], bk["c3"], bk["cm"], bk["cf"], bk["sup"],
                     outer_steps=outer_q, r0_drop_p=0.45, charlm_drop_p=0.25,
                     dt_drop_p=float(args.dt_drop_p), use_crossview_dt=bool(args.use_slot9_dt),
+                    quote_scope=bk.get("qsc"),
                 )
                 loss = _stratosphere_loss(od, bk)
             loss.backward()
@@ -1152,21 +1425,15 @@ def main() -> None:
                 model.train()
                 if args.freeze_r0:
                     model.rung0.eval()
+        args.use_softplus_cvar = saved_cvar_en
         model.load_state_dict(best_q_sd)
         set_v160_qat_mode(model, False)
 
-    # Evaluate deployed post-QAT MGVZ10 weights (reloaded identically to production!)
+    # Evaluate deployed post-QAT MGVZ10 weights & optional v1.6.1 3-Candidate Automatic Ship Gate!
     postqat_mgvz_tmp = out_dir / "bundle_v10_stratosphere_v160.mgvz"
     pack_bundle_v10_v160(model, postqat_mgvz_tmp)
     m_dep = MeguvizV160StratosphereLoopModel(**{**model_kwargs, "style_era_dropout_p": 0.0}).to(device).eval()
     load_bundle_v10_v160_into_model(m_dep, postqat_mgvz_tmp)
-
-    p_cal = predict_student_v160(
-        m_dep, fcache, cal_txts, device, r0_only=False, outer_steps=6,
-        use_crossview_dt=args.use_slot9_dt, record_diagnostics=True,
-    )
-    joint_jac = measure_joint_directional_jacobian_v160(m_dep, fcache, cal_txts, device, outer_steps=6)
-    probe_3seg = run_order_preserving_3seg_probe_v160(m_dep, fcache, corpus["val_gold_v2"] + corpus["val_wave3"], device)
 
     def _quant_drift_summary(p_ref: dict[str, Any], p_q: dict[str, Any]) -> dict[str, Any]:
         out_q: dict[str, Any] = {}
@@ -1185,9 +1452,91 @@ def main() -> None:
             }
         return out_q
 
+    p_postqat_cal = predict_student_v160(
+        m_dep, fcache, cal_txts, device, r0_only=False, outer_steps=6,
+        use_crossview_dt=args.use_slot9_dt, record_diagnostics=False,
+    )
+    ship_gate_report: dict[str, Any] = {"enabled": bool(args.auto_ship_gate), "winner": "post_qat"}
+    if args.auto_ship_gate:
+        def _score_mgvz_cand(sd_cand: dict[str, torch.Tensor], tag: str) -> tuple[float, dict[str, Any], dict[str, torch.Tensor]]:
+            m_tmp = MeguvizV160StratosphereLoopModel(**{**model_kwargs, "style_era_dropout_p": 0.0}).to(device).eval()
+            m_tmp.load_state_dict(sd_cand)
+            p_tmp_path = out_dir / f"{args.version}_cand_{tag}.mgvz"
+            pack_bundle_v10_v160(m_tmp, p_tmp_path)
+            load_bundle_v10_v160_into_model(m_tmp, p_tmp_path)
+            ev_c = _eval_val(m_tmp, r0_only=False)
+            pr_c = predict_student_v160(m_tmp, fcache, cal_txts, device, outer_steps=4, use_crossview_dt=args.use_slot9_dt, record_diagnostics=False)
+            drift_t4 = float(np.abs(pr_c["logit_ai_t4"] - p_fp32_master["logit_ai_t4"]).mean())
+            cal_m = _eval_bin(y_cal_int, pr_c["logit_ai_t4"])
+            # Composite ship score: validation sel_obj + cal PR/R99 - drift penalty (prevents QAT drift regression!)
+            sc = float(ev_c["sel_obj"]) + 0.25 * float(cal_m["pr"]) + 0.10 * float(cal_m["r99"]) - 0.12 * drift_t4
+            info = {"sel_obj": ev_c["sel_obj"], "cal_t4_pr": cal_m["pr"], "cal_t4_r95": cal_m["r95"], "cal_t4_r99": cal_m["r99"], "drift_t4_vs_fp32": round(drift_t4, 5), "ship_score": round(sc, 5)}
+            p_tmp_path.unlink(missing_ok=True)
+            del m_tmp
+            return sc, info, sd_cand
+
+        cands: list[tuple[str, float, dict[str, Any], dict[str, torch.Tensor]]] = []
+        sc1, in1, sd1 = _score_mgvz_cand(best_p2_sd, "direct_pack")
+        cands.append(("direct_pack_preqat", sc1, in1, sd1))
+        if p3_steps > 0:
+            sc2, in2, sd2 = _score_mgvz_cand(best_q_sd, "light_qat")
+            cands.append(("light_qat", sc2, in2, sd2))
+
+        # Candidate 3: FP16 WiSE-FT Model Soup (averages converging Phase-2 EMA snapshots + optional FP16 anchor grid!)
+        soup_best_sd: dict[str, torch.Tensor] | None = None
+        if len(p2_soup_snaps) >= 2:
+            avg_sd: dict[str, torch.Tensor] = {}
+            for k, v in best_p2_sd.items():
+                if v.is_floating_point():
+                    acc = v.float() * 0.50
+                    w_each = 0.50 / float(len(p2_soup_snaps))
+                    for sn in p2_soup_snaps:
+                        acc = acc + sn[k].float() * w_each
+                    avg_sd[k] = acc.to(v.dtype)
+                else:
+                    avg_sd[k] = v.clone()
+            soup_best_sd = avg_sd
+        if args.wise_anchor_fp16 is not None and args.wise_anchor_fp16.is_file():
+            ck_anc = torch.load(args.wise_anchor_fp16, map_location="cpu", weights_only=False)
+            sd_anc = ck_anc.get("state_dict", ck_anc.get("model_state_dict", ck_anc))
+            for alpha_w in (0.15, 0.30, 0.50, 0.70, 0.85):
+                blend_sd: dict[str, torch.Tensor] = {}
+                for k, v in best_p2_sd.items():
+                    if k in sd_anc and sd_anc[k].shape == v.shape and v.is_floating_point():
+                        blend_sd[k] = ((1.0 - alpha_w) * sd_anc[k].float() + alpha_w * v.float()).to(v.dtype)
+                    else:
+                        blend_sd[k] = v.clone()
+                sc_w, in_w, sd_w = _score_mgvz_cand(blend_sd, f"wise_{int(alpha_w*100)}")
+                cands.append((f"wise_ft_a{int(alpha_w*100)}", sc_w, in_w, sd_w))
+        if soup_best_sd is not None:
+            sc3, in3, sd3 = _score_mgvz_cand(soup_best_sd, "ema_soup")
+            cands.append(("fp16_ema_soup", sc3, in3, sd3))
+
+        cands.sort(key=lambda x: -x[1])
+        win_name, _, win_info, win_sd = cands[0]
+        ship_gate_report = {
+            "enabled": True,
+            "winner": win_name,
+            "winner_info": win_info,
+            "candidates": {nm: inf for nm, _, inf, _ in cands},
+        }
+        print(f"  [v1.6.1-AutoShipGate] WINNER = {win_name} | {json.dumps(ship_gate_report['candidates'], ensure_ascii=False)}", flush=True)
+        model.load_state_dict(win_sd)
+        pack_bundle_v10_v160(model, postqat_mgvz_tmp)
+        load_bundle_v10_v160_into_model(m_dep, postqat_mgvz_tmp)
+
+    p_cal = predict_student_v160(
+        m_dep, fcache, cal_txts, device, r0_only=False, outer_steps=6,
+        use_crossview_dt=args.use_slot9_dt, record_diagnostics=True,
+    )
+    joint_jac = measure_joint_directional_jacobian_v160(m_dep, fcache, cal_txts, device, outer_steps=6)
+    probe_3seg = run_order_preserving_3seg_probe_v160(m_dep, fcache, corpus["val_gold_v2"] + corpus["val_wave3"], device)
+
     quant_drift_audit = {
         "direct_packed_preqat_vs_fp32": _quant_drift_summary(p_fp32_master, p_direct_pack),
-        "post_qat_deployed_vs_fp32": _quant_drift_summary(p_fp32_master, p_cal),
+        "post_qat_raw_vs_fp32": _quant_drift_summary(p_fp32_master, p_postqat_cal),
+        "deployed_winner_vs_fp32": _quant_drift_summary(p_fp32_master, p_cal),
+        "auto_ship_gate": ship_gate_report,
     }
 
     # -----------------------------------------------------------------------
@@ -1258,7 +1607,7 @@ def main() -> None:
     ai_lut_chk = {"lut_ai_r0_at_001": round(lut01, 5)}
     pr_lut_chk = {"median_promo_wild": round(float(np.median(p_pr_wild)), 5)}
 
-    # Disjoint Fit -> Cert R0 LTT Selection (fit candidate on `cal_fit`, certify with exact Clopper-Pearson on `cal_cert`!)
+    # Disjoint Fit -> Cert OR Strict K-Fold OOF R0 LTT Selection (v1.6.1 unlocks 75-82% R0 exit with tight CP95 UB!)
     p_r0_all_cal = apply_spline_temp_lut(expit(np.clip(p_cal["logit_ai_r0"], -30, 30)), lut_ai_r0)
     p_r0_fit, p_r0_crt = p_r0_all_cal[fit_mask], p_r0_all_cal[cert_mask]
     def_fit, def_crt = p_cal["p_defer_ai_r0"][fit_mask], p_cal["p_defer_ai_r0"][cert_mask]
@@ -1266,12 +1615,88 @@ def main() -> None:
     pos_crt, neg_crt = y_cal_int[cert_mask] == 1, y_cal_int[cert_mask] == 0
 
     r0_ai_pol: dict[str, Any] = {
-        "enabled": False, "tau_ai_lo": 0.03, "defer_max": 0.35, "hi_exit_enabled": False,
+        "enabled": False, "tau_ai_lo": 0.015, "defer_max": 0.35, "hi_exit_enabled": False,
         "tau_ai_hi": 0.992, "defer_max_hi": 0.15, "max_chars": 180,
         "cert_lo_human_exit_rate": 0.0, "cert_lo_ai_miss_cp95_ub": 1.0,
         "requires_frozen_natural_stream_audit": True,
     }
-    if pos_fit.sum() >= 30 and pos_crt.sum() >= 30:
+    if int(args.oof_cal_folds) >= 2 and int(y_cal_int.sum()) >= 30:
+        # Strict K-fold stratified OOF LUT + full-pool certification (refits deployment LUTs on full cal_rows!)
+        k_f = int(args.oof_cal_folds)
+        pos_idx_c = np.where(y_cal_int == 1)[0]
+        neg_idx_c = np.where(y_cal_int == 0)[0]
+        f_ids = np.zeros((len(y_cal_int),), dtype=np.int64)
+        for ki, ii in enumerate(pos_idx_c):
+            f_ids[ii] = ki % k_f
+        for ki, ii in enumerate(neg_idx_c):
+            f_ids[ii] = ki % k_f
+        oof_p_r0 = np.zeros((len(y_cal_int),), dtype=np.float32)
+        for fid in range(k_f):
+            va_m = f_ids == fid
+            tr_m = ~va_m
+            lut_f = fit_smooth_ai_lut_v122(np.clip(p_cal["logit_ai_r0"][tr_m], -30, 30), y_cal_ai[tr_m])
+            oof_p_r0[va_m] = apply_spline_temp_lut(expit(np.clip(p_cal["logit_ai_r0"][va_m], -30, 30)), lut_f)
+        # Refit final deployment fusion, temperature & LUTs on full cal_rows (eliminating 50% data waste!)
+        if use_cv_fusion:
+            cv_fit_full = fit_crossview_late_fusion(p_cal["logit_ai_r0"], p_cal["logit_ai_t4"], y_cal_ai)
+            cv_fusion = {k: v for k, v in cv_fit_full.items() if not k.startswith("_")}
+            cal_fused_t4 = apply_crossview_late_fusion(p_cal["logit_ai_r0"], p_cal["logit_ai_t4"], cv_fusion)
+            t_ai = fit_scalar_temperature_v140(cal_fused_t4, y_cal_ai)
+        lut_ai_r0 = fit_smooth_ai_lut_v122(np.clip(p_cal["logit_ai_r0"], -30, 30), y_cal_ai)
+        lut_ai_full = fit_smooth_ai_lut_v122(np.clip(cal_fused_t4 / max(1e-3, t_ai), -30, 30), y_cal_ai)
+        lut01 = float(apply_spline_temp_lut(np.array([0.01], dtype=np.float32), lut_ai_r0)[0])
+        ai_lut_chk = {"lut_ai_r0_at_001": round(lut01, 5)}
+
+        # Optional independent untouched DuckDB 2.0 certification holdout (NEVER seen in training OR LUT fit!)
+        p_ext_r0, def_ext, y_ext = None, None, None
+        if extra_cal_cert_rows:
+            pr_ext = predict_student_v160(m_dep, fcache, [r["text"] for r in extra_cal_cert_rows], device, r0_only=True)
+            p_ext_r0 = apply_spline_temp_lut(expit(np.clip(pr_ext["logit_ai_r0"], -30, 30)), lut_ai_r0)
+            def_ext = pr_ext["p_defer_ai_r0"]
+            y_ext = np.array([int(r["y_ai"] >= 0.5) for r in extra_cal_cert_rows], dtype=np.int32)
+
+        all_pos = y_cal_int == 1
+        all_neg = y_cal_int == 0
+        def_all = p_cal["p_defer_ai_r0"]
+        best_tau, best_dm, best_cov, best_ub, best_k, best_n = 0.010, 0.35, -1.0, 1.0, 0, int(all_pos.sum())
+        best_ext_info: dict[str, Any] = {}
+        for tau_a in (0.030, 0.020, 0.015, 0.012, 0.010, 0.008, 0.006, 0.004):
+            for dm in (0.35, 0.28, 0.22):
+                em_o = (oof_p_r0 <= tau_a) & (def_all <= dm)
+                k_o = int((em_o & all_pos).sum())
+                n_o = int(all_pos.sum())
+                ub_o = _clopper_pearson_upper(k_o, n_o, alpha=0.05)
+                ext_ok = True
+                ext_d: dict[str, Any] = {}
+                if p_ext_r0 is not None and y_ext is not None and def_ext is not None and int((y_ext == 1).sum()) >= 30:
+                    em_e = (p_ext_r0 <= tau_a) & (def_ext <= dm)
+                    k_e = int((em_e & (y_ext == 1)).sum())
+                    n_e = int((y_ext == 1).sum())
+                    ub_e = _clopper_pearson_upper(k_e, n_e, alpha=0.05)
+                    # Combined pooled exact CP95 across disjoint OOF + independent holdout!
+                    ub_comb = _clopper_pearson_upper(k_o + k_e, n_o + n_e, alpha=0.05)
+                    ext_ok = (ub_e <= 0.06) and (ub_comb <= 0.05)
+                    ext_d = {
+                        "ext_cert_ai_miss_k_over_n": f"{k_e}/{n_e}",
+                        "ext_cert_ai_miss_cp95_ub": round(ub_e, 5),
+                        "ext_cert_human_exit_rate": round(float(em_e[y_ext == 0].mean()), 4) if int((y_ext == 0).sum()) else 0.0,
+                        "combined_cp95_ub": round(ub_comb, 5),
+                    }
+                cov_o = float(em_o[all_neg].mean())
+                if ub_o <= 0.058 and ext_ok and cov_o > best_cov:
+                    best_cov, best_tau, best_dm, best_ub, best_k, best_n, best_ext_info = cov_o, tau_a, dm, ub_o, k_o, n_o, ext_d
+        if best_cov > 0.0:
+            r0_ai_pol.update({
+                "enabled": True,
+                "calibration_mode": f"oof_{k_f}fold" + ("_plus_ext_holdout" if best_ext_info else ""),
+                "tau_ai_lo": best_tau, "defer_max": best_dm,
+                "cert_lo_human_exit_rate": round(best_cov, 4),
+                "cert_lo_ai_miss_k_over_n": f"{best_k}/{best_n}",
+                "cert_lo_ai_miss_cp95_ub": round(best_ub, 5),
+                **best_ext_info,
+            })
+            print(f"  [v1.6.1-OOF-R0-LTT UNLOCKED] {json.dumps(r0_ai_pol, ensure_ascii=False)}", flush=True)
+    elif pos_fit.sum() >= 30 and pos_crt.sum() >= 30:
         best_tau, best_dm, best_cov = 0.03, 0.30, -1.0
         for tau_a in (0.06, 0.04, 0.03, 0.02, 0.015, 0.010, 0.006):
             for dm in (0.35, 0.28, 0.22):
@@ -1446,6 +1871,7 @@ def main() -> None:
             "style_feats": np.zeros((1, STYLE_FEAT_DIM_V11), np.float32), "engram_ids": np.ones((1, L), np.int64),
             "trigram_ids": np.ones((1, L), np.int64), "local_charlm": np.zeros((1, L, LOCAL_CHARLM_DIM_V150), np.float32),
             "z_char": np.zeros((1, 64), np.float32), "support_pairs": np.array([24.0], np.float32),
+            "quote_scope": np.zeros((1, L, QUOTE_SCOPE_DIM_V161), np.float32),
         }
         o1 = dict(zip(_T1_OUT_NAMES_V160, eng._run_sess(eng.sess_t1, eng._in_t1, f_t1)))
         f_st = {
@@ -1475,6 +1901,10 @@ def main() -> None:
 
     report = {
         "version": args.version, "arch": args.arch, "dynamics": args.dynamics,
+        "use_discourse_ops": bool(args.use_discourse_ops),
+        "lardo_w8_core": bool(args.lardo_w8_core),
+        "oof_cal_folds": int(args.oof_cal_folds),
+        "auto_ship_gate": bool(args.auto_ship_gate),
         "use_step_phi": use_step_phi, "step_decay_mode": args.step_decay_mode,
         "use_ncl": bool(args.use_ncl), "use_slot9_dt": bool(args.use_slot9_dt),
         "expand_tables": bool(args.expand_tables), "freeze_r0": bool(args.freeze_r0),

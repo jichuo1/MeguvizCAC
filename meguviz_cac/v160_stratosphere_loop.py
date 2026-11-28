@@ -112,15 +112,50 @@ from .v150_heaven_loop import (
     sinkhorn_nxn_v150,
     strip_onnx_weights_to_skeleton,
 )
+from .v160_discourse_causal_ops import (
+    CheapD08PositionMoments,
+    SelectiveOrder3CumSum,
+    explicit_quote_boundary_fsm,
+)
 
 # ---------------------------------------------------------------------------
-# 0. Constants & Architecture Presets (`A0..A5` Ablation Registry)
+# 0. Constants & Architecture Presets (`A0..A5` Ablation Registry + `v1.6.1` Upgrades)
 # ---------------------------------------------------------------------------
 MGVZ10_MAGIC = b"MGVZ10\x01\x00"
 SLOT_R_CAP_V160 = 12.0
+CONTRACTIVE_INNER_R_V161 = 9.0
+QUOTE_SCOPE_DIM_V161 = 4
 STEP_PHI_DIM_V160 = 32
 DEFAULT_T_TRAIN_MAX_V160 = 6
 DEFAULT_T_INFER_MAX_V160 = 4
+
+
+def extract_token_quote_scope_4d_v161(
+    clean_text: str, offsets: list[tuple[int, int]]
+) -> np.ndarray:
+    """Zero-PII O(L) token-aligned 4-channel Quote Scope descriptor `[author, quoted, unknown, delim]`.
+
+    Strictly runs on pre-canonicalized `clean_text` (`C1 === 0.0`) using Rev.2 bounded-stack FSM!
+    """
+    n_tok = len(offsets)
+    out = np.zeros((n_tok, QUOTE_SCOPE_DIM_V161), dtype=np.float32)
+    if n_tok == 0 or not clean_text:
+        return out
+    fsm = explicit_quote_boundary_fsm(clean_text, max_stack_depth=4)
+    states = fsm["states"]
+    n_ch = len(states)
+    for ti, (st_c, en_c) in enumerate(offsets):
+        a = max(0, min(n_ch, int(st_c)))
+        b = max(a, min(n_ch, int(en_c)))
+        if b <= a:
+            out[ti, 0] = 1.0
+            continue
+        inv_len = 1.0 / float(b - a)
+        for ci in range(a, b):
+            s_id = states[ci]
+            if 0 <= s_id < QUOTE_SCOPE_DIM_V161:
+                out[ti, s_id] += inv_len
+    return out
 
 set_v160_qat_mode = set_v130_qat_mode
 
@@ -535,6 +570,7 @@ class StratosphereSubBlockV160(nn.Module):
         n_sem: int = 6,
         n_span: int = 4,
         coverage_beta_enabled: bool = True,
+        core_bits: int = 4,
     ) -> None:
         super().__init__()
         self.dim = int(dim)
@@ -549,6 +585,7 @@ class StratosphereSubBlockV160(nn.Module):
         self.n_ai_slots = self.n_slow + self.n_sem
         self.n_slots = self.n_ai_slots + int(n_span)
         self.coverage_beta_enabled = bool(coverage_beta_enabled)
+        self.core_bits = 8 if int(core_bits) == 8 else 4
 
         # Continuous Step-Conditioned AdaLN-Zero modulation (6 gates/shifts from phi(t)!)
         self.adaln_mod = nn.Linear(STEP_PHI_DIM_V160, dim * 4)
@@ -557,8 +594,8 @@ class StratosphereSubBlockV160(nn.Module):
 
         # Compact Read-Only MQA/GQA Cross-Attention (`d_kv=128`) + Decaying Capped Coverage Inhibition
         self.norm_ca = nn.LayerNorm(dim)
-        self.ca_q = QuantLinearV130(dim, d_kv, bits=4)
-        self.ca_o = QuantLinearV130(d_kv, dim, bits=4)
+        self.ca_q = QuantLinearV130(dim, d_kv, bits=self.core_bits)
+        self.ca_o = QuantLinearV130(d_kv, dim, bits=self.core_bits)
         self.cov_beta_raw = nn.Parameter(torch.tensor(-0.4))
         self.cov_lam_raw = nn.Parameter(torch.tensor(0.6))
 
@@ -574,6 +611,7 @@ class StratosphereSubBlockV160(nn.Module):
         self.c1_bridge_scale = nn.Parameter(torch.tensor(0.20))
 
         # Block-Masked Slot Self-Attention (`[0:n_ai)` CANNOT see `[n_ai:n_slots)` -> F6 === 0.0!)
+        # Real LARDO sensitivity sweep proved SA/FFN have d_T4 <= 4e-5 -> stay W4 to fund high-RD emb/prelude/coda W8!
         self.norm_sa = nn.LayerNorm(dim)
         self.sa_qkv = QuantLinearV130(dim, dim * 3, bits=4)
         self.sa_o = QuantLinearV130(dim, dim, bits=4)
@@ -689,7 +727,7 @@ class StratosphereSubBlockV160(nn.Module):
 
 
 class StratosphereLoopCoreV160(nn.Module):
-    """Input-Injected Per-Slot Norm-Bounded Residual Core with Optional Fourier `phi(t)`, Causal `h_t`, & `diag(M_3x3, 1)` mHC."""
+    """Input-Injected Per-Slot Norm-Bounded / Direct Contractive Core (`stratosphere` | `contractive_d` | `v150_anchor`)."""
 
     def __init__(
         self,
@@ -708,6 +746,7 @@ class StratosphereLoopCoreV160(nn.Module):
         step_decay_mode: str = "inv_sqrt",
         use_slot9_dt: bool = False,
         r_cap: float = SLOT_R_CAP_V160,
+        lardo_w8_core: bool = False,
     ) -> None:
         super().__init__()
         self.dim = int(dim)
@@ -727,14 +766,16 @@ class StratosphereLoopCoreV160(nn.Module):
         self.step_decay_mode = str(step_decay_mode)
         self.use_slot9_dt = bool(use_slot9_dt)
         self.r_cap = float(r_cap)
+        self.inner_r = float(CONTRACTIVE_INNER_R_V161)
+        self.core_bits = 8 if bool(lardo_w8_core) else 4
 
         self.slot_queries = nn.Parameter(torch.randn(1, self.n_slots, dim) * 0.04)
 
         # Single-Pass Read-Only Compressed CA Projections (`d_kv=128`, `4x32` heads -> 3x smaller stage transfer, ZERO Tile ops!)
-        self.k_ev_proj = QuantLinearV130(dim, d_kv, bits=4)
-        self.v_ev_proj = QuantLinearV130(dim, d_kv, bits=4)
+        self.k_ev_proj = QuantLinearV130(dim, d_kv, bits=self.core_bits)
+        self.v_ev_proj = QuantLinearV130(dim, d_kv, bits=self.core_bits)
 
-        # Shared 64-d slow bus for AI-only Cayley peer coupling & AI slot-9 handoff
+        # Shared 64-d slow bus for AI-only Cayley peer coupling & AI slot-9 handoff (LARDO sweep: d_T4=0.0000 -> W4)
         self.bus_down = QuantLinearV130(dim, BUS_DIM_V130, bias=False, bits=4)
         self.bus_up = QuantLinearV130(BUS_DIM_V130, dim, bias=False, bits=4)
 
@@ -749,19 +790,20 @@ class StratosphereLoopCoreV160(nn.Module):
             StratosphereSubBlockV160(
                 dim=dim, ffn_dim=ffn_dim, num_heads=num_heads, d_kv=d_kv, kv_heads=kv_heads,
                 n_slow=n_slow, n_sem=n_sem, n_span=n_span, coverage_beta_enabled=coverage_beta_enabled,
+                core_bits=(self.core_bits if bi == 0 else 4),
             )
-            for _ in range(self.core_depth)
+            for bi in range(self.core_depth)
         ])
 
         # Input-injected L0 surface penetration into slow slots `[0:n_slow)` (re-injected every step!)
-        self.l0_pen_a = QuantLinearV130(dim, 32, bias=False, bits=4)
-        self.l0_pen_b = QuantLinearV130(32, dim, bias=False, bits=4)
+        self.l0_pen_a = QuantLinearV130(dim, 32, bias=False, bits=self.core_bits)
+        self.l0_pen_b = QuantLinearV130(32, dim, bias=False, bits=self.core_bits)
         self.l0_pen_gate = nn.Parameter(torch.full((dim,), -0.8))
 
         # AI-only slot-9 self-state handoff: receives ONLY `(prev_bus, 0, |b_t|)` by default (`use_slot9_dt=False` -> ZERO R0 coupling!)
         self.handoff_proj = QuantLinearV130(BUS_DIM_V130 + 2, dim, bits=4)
 
-        # Step-conditioned Block-Diagonal `diag(M_{AI, 3x3}, 1)` 10-Iter Sinkhorn mHC (AI-only!)
+        # Step-conditioned Block-Diagonal `diag(M_{AI, 3x3}, 1)` 12-Iter Sinkhorn mHC (AI-only!)
         self.mhc_base_log = nn.Parameter(torch.tensor([
             [1.4, -0.5, -0.5],
             [-0.5, 1.4, -0.5],
@@ -775,6 +817,11 @@ class StratosphereLoopCoreV160(nn.Module):
         nn.init.zeros_(self.mhc_read_delta.weight)
         nn.init.zeros_(self.mhc_read_delta.bias)
 
+        # Review 01 R2 Direct Discrete Contractive Kernel D (`dynamics_mode="contractive_d"`):
+        # Smooth convex damping `s_{t+1} = (1 - alpha_t) * s_t + alpha_t * SmoothBall_{R_in}(T_theta(s_t))`!
+        # Eliminates 100% hard-sphere slamming and period-2 boundary bounce (`sat -> 0%`, `period2 > 0.85`).
+        self.contract_alpha_raw = nn.Parameter(torch.full((1, 1, dim), -0.35))
+
         # Legacy `v150_anchor` parameters (Arm A0 ONLY: faithful `anchor_alpha`, per-step `rho[0..3]`, per-step `kappa[0..3]`;
         # steps 5/6 deterministically reuse index 3 per locked pre-registration!)
         self.anchor_alpha = nn.Parameter(torch.full((1, 1, dim), -1.1))
@@ -784,6 +831,11 @@ class StratosphereLoopCoreV160(nn.Module):
         sa_mask = torch.zeros((1, 1, self.n_slots, self.n_slots), dtype=torch.float32)
         sa_mask[:, :, : self.n_ai_slots, self.n_ai_slots :] = -1e4
         self.register_buffer("sa_iso_mask", sa_mask, persistent=False)
+
+    def _smooth_inner_ball(self, s: torch.Tensor) -> torch.Tensor:
+        """Strictly smooth per-slot ball map `R_in * tanh(||s|| / R_in) * s / ||s||` (`< R_in = 9.0 < R_cap = 12.0`)."""
+        nrm = s.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        return s * (self.inner_r * torch.tanh(nrm / self.inner_r) / nrm)
 
     def build_readonly_cache(self, h_tok: torch.Tensor, mask: torch.Tensor) -> dict[str, torch.Tensor]:
         m_u = mask.float().unsqueeze(-1)
@@ -801,7 +853,9 @@ class StratosphereLoopCoreV160(nn.Module):
         at = torch.softmax(sc.float(), dim=-1).to(h_tok.dtype)
         ctx = torch.matmul(at, vh).transpose(1, 2).reshape(B, self.n_slots, self.d_kv)
         init_slots = q + blk0.ca_o(ctx)
-        if self.dynamics_mode != "v150_anchor":
+        if self.dynamics_mode == "contractive_d":
+            init_slots = self._smooth_inner_ball(init_slots)
+        elif self.dynamics_mode != "v150_anchor":
             init_slots, _ = self._per_slot_project(init_slots)
         return {"k_ev": k_ev, "v_ev": v_ev, "init_slots": init_slots}
 
@@ -868,7 +922,8 @@ class StratosphereLoopCoreV160(nn.Module):
         ], dim=1)
 
         cov_cur = cov_prev
-        use_strat = self.dynamics_mode != "v150_anchor"
+        is_contractive = self.dynamics_mode == "contractive_d"
+        use_strat = self.dynamics_mode == "stratosphere"
         adaln_acc = torch.zeros((), device=s.device, dtype=torch.float32)
         for b_idx, blk in enumerate(self.blocks):
             cov_gate = torch.ones_like(active_gt0) if b_idx > 0 else active_gt0
@@ -886,7 +941,14 @@ class StratosphereLoopCoreV160(nn.Module):
             else:
                 s, cov_cur = blk_out
 
-        if use_strat:
+        if is_contractive:
+            # Review 01 R2 Mainline Direct Discrete Contractive Kernel D:
+            # Smoothly maps proposal inside R_in=9.0 (< R_cap=12.0), then convexly damps with causal `alpha_t <= 0.55/sqrt(t+1)`.
+            s_prop = self._smooth_inner_ball(s)
+            alpha_t = (0.55 * torch.sigmoid(self.contract_alpha_raw).to(s.dtype)) * step_scale.to(s.dtype).view(B, 1, 1)
+            s_damped = (1.0 - alpha_t) * s_in + alpha_t * s_prop
+            s_cand, sat_rate_ai = self._per_slot_project(s_damped)
+        elif use_strat:
             # Pillar 1: Strictly per-slot norm projection `Pi_R` (no anchor_alpha lock, no kappa > 1!)
             s_cand, sat_rate_ai = self._per_slot_project(s)
         else:
@@ -949,6 +1011,8 @@ class MeguvizV160StratosphereLoopModel(nn.Module):
         use_local_charlm_inject: bool = True,
         use_global_charlm_shortcut: bool = False,
         prelude_global_se: bool | None = None,
+        use_discourse_ops: bool = False,
+        lardo_w8_core: bool = False,
     ) -> None:
         super().__init__()
         if arch not in ARCH_PRESETS_V160:
@@ -977,12 +1041,15 @@ class MeguvizV160StratosphereLoopModel(nn.Module):
         self.coverage_beta_enabled = bool(coverage_beta_enabled)
         self.use_local_charlm_inject = bool(use_local_charlm_inject)
         self.use_global_charlm_shortcut = bool(use_global_charlm_shortcut)
+        self.use_discourse_ops = bool(use_discourse_ops)
+        self.lardo_w8_core = bool(lardo_w8_core)
         self.engram_buckets = int(cfg["engram_buckets"])
         self.trigram_buckets = int(cfg["trigram_buckets"])
         self.r0_b2 = int(cfg["r0_b2"])
         self.r0_b3 = int(cfg["r0_b3"])
 
         D = self.dim
+        core_bits = 8 if self.lardo_w8_core else 4
 
         # Stage 0: `R0++` Expanded Zero-FLOP ApexCharNano
         self.rung0 = ApexCharNanoRung0V160(
@@ -990,11 +1057,13 @@ class MeguvizV160StratosphereLoopModel(nn.Module):
         )
 
         # Stage 1: Factorized BPE + Expanded Zero-FLOP Bigram/Trigram Engrams + Local 8-ch CharLM + Prelude
-        self.word_emb_a = QuantEmbeddingV130(vocab_size, 48, bits=4, padding_idx=0)
+        # Real LARDO sensitivity sweep (Review 03 Rev.2): word_emb_a + engram + trigram + pos_emb + prelude.in_g/out_p + coda
+        # account for >95% of W4 logit drift -> promote to W8 when `lardo_w8_core=True` (fits <= 4.85 MiB bootable zip)!
+        self.word_emb_a = QuantEmbeddingV130(vocab_size, 48, bits=core_bits, padding_idx=0)
         self.word_emb_p = QuantLinearV130(48, D, bias=False, bits=8)
-        self.engram_emb = QuantEmbeddingV130(self.engram_buckets, 16, bits=4, padding_idx=0)
+        self.engram_emb = QuantEmbeddingV130(self.engram_buckets, 16, bits=core_bits, padding_idx=0)
         self.engram_p = QuantLinearV130(16, D, bias=False, bits=8)
-        self.trigram_emb = QuantEmbeddingV130(self.trigram_buckets, 16, bits=4, padding_idx=0)
+        self.trigram_emb = QuantEmbeddingV130(self.trigram_buckets, 16, bits=core_bits, padding_idx=0)
         self.trigram_p = QuantLinearV130(16, D, bias=False, bits=8)
         self.pos_emb = nn.Parameter(torch.randn(1, max_len, D) * 0.02)
         self.emb_norm = nn.LayerNorm(D)
@@ -1002,6 +1071,24 @@ class MeguvizV160StratosphereLoopModel(nn.Module):
         self.local_lm_u = nn.Linear(LOCAL_CHARLM_DIM_V150, D, bias=False)
         self.local_lm_gate = nn.Sequential(nn.Linear(4, 16), nn.SiLU(), nn.Linear(16, 1))
         nn.init.normal_(self.local_lm_u.weight, std=0.01)
+
+        # Review 04 Rev. 2 `+0.33 ms` Discourse Attribution Suite (opt-in for v1.6.1-B; strictly axis-private F6 === 0.0!)
+        if self.use_discourse_ops:
+            self.quote_scope_proj = nn.Linear(QUOTE_SCOPE_DIM_V161, D, bias=False)
+            nn.init.normal_(self.quote_scope_proj.weight, std=0.02)
+            # AI-private branch: 0.106ms SelectiveOrder3CumSum (20d) + 0.225ms CheapD08PositionMoments (24d) -> 32d
+            self.disc_ai_down = QuantLinearV130(D, 32, bits=8)
+            self.disc_ai_ord3 = SelectiveOrder3CumSum(d_in=32, n_triples=4)
+            self.disc_ai_pos = CheapD08PositionMoments(d_in=32, n_channels=4)
+            self.disc_ai_proj = nn.Sequential(nn.LayerNorm(44), nn.Linear(44, 32), nn.SiLU())
+            self.disc_ai_gate = nn.Parameter(torch.tensor(0.25))
+            self.disc_ai_to_slow = QuantLinearV130(32, D, bias=False, bits=8)
+            # Strictly disjoint Promo-private branch (NEVER touches AI slots or st_ai -> bit-exact F6 === 0.0!)
+            self.disc_pr_down = QuantLinearV130(D, 32, bits=8)
+            self.disc_pr_ord3 = SelectiveOrder3CumSum(d_in=32, n_triples=2)
+            self.disc_pr_pos = CheapD08PositionMoments(d_in=32, n_channels=2)
+            self.disc_pr_proj = nn.Sequential(nn.LayerNorm(22), nn.Linear(22, 32), nn.SiLU())
+            self.disc_pr_gate = nn.Parameter(torch.tensor(0.25))
 
         if cfg["prelude_kind"] == "v150_attn":
             self.prelude_blocks = nn.ModuleList([
@@ -1038,12 +1125,13 @@ class MeguvizV160StratosphereLoopModel(nn.Module):
             core_depth=int(cfg["core_depth"]), coverage_beta_enabled=coverage_beta_enabled,
             dynamics_mode=dynamics_mode, use_step_phi=self.use_step_phi,
             step_decay_mode=self.step_decay_mode, use_slot9_dt=self.use_slot9_dt,
+            lardo_w8_core=self.lardo_w8_core,
         )
 
         # Strictly Disjoint 256-d Coda (`128 shared + 64 AI-priv + 64 Promo-priv`)
-        self.coda_shared = QuantLinearV130(D * 2, SHARED_END_V130, bits=4)
-        self.coda_ai_priv = QuantLinearV130(D + 32 + 32, AI_END_V130 - SHARED_END_V130, bits=4)
-        self.coda_pr_priv = QuantLinearV130(D * 2 + 32 + 32, EMB_DIM_V130 - AI_END_V130, bits=4)
+        self.coda_shared = QuantLinearV130(D * 2, SHARED_END_V130, bits=core_bits)
+        self.coda_ai_priv = QuantLinearV130(D + 32 + 32, AI_END_V130 - SHARED_END_V130, bits=core_bits)
+        self.coda_pr_priv = QuantLinearV130(D * 2 + 32 + 32, EMB_DIM_V130 - AI_END_V130, bits=core_bits)
         self.emb_norm_sh = nn.LayerNorm(SHARED_END_V130)
         self.emb_norm_ai = nn.LayerNorm(AI_END_V130 - SHARED_END_V130)
         self.emb_norm_pr = nn.LayerNorm(EMB_DIM_V130 - AI_END_V130)
@@ -1196,6 +1284,7 @@ class MeguvizV160StratosphereLoopModel(nn.Module):
         r0_drop_p: float = 0.0,
         charlm_drop_p: float = 0.0,
         return_diagnostics: bool = False,
+        quote_scope: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Stage 1: Run `O(L)` Prelude + Single-Pass MQA/GQA `K_0/V_0` + R1 + Loop Step `T1` (`t=0`)!
 
@@ -1240,6 +1329,9 @@ class MeguvizV160StratosphereLoopModel(nn.Module):
         else:
             x = h_sem
 
+        if self.use_discourse_ops and quote_scope is not None:
+            x = (x + self.quote_scope_proj(quote_scope.to(x.dtype)) * m_u) * m_u
+
         h_tok = x
         for blk in self.prelude_blocks:
             h_tok = blk(h_tok, attention_mask)
@@ -1259,11 +1351,43 @@ class MeguvizV160StratosphereLoopModel(nn.Module):
         pr_attr_0 = self._pool_promo_attr(h_tok, attention_mask)
         st_ai = self.r1_style_ai(st[:, : self.style_dim - 8]) * g_sup.unsqueeze(-1)
         st_pr = self.r1_style_pr(st)
+
+        disc_ai_slow: torch.Tensor | None = None
+        if self.use_discourse_ops:
+            # Strictly axis-private `+0.33 ms` Discourse Attribution Suite (`F6 === 0.0`, `P1 < 1e-6`, ZERO ONNX Loop!)
+            h_dai = F.silu(self.disc_ai_down(h_tok)) * m_u
+            v_dai = torch.cat([
+                self.disc_ai_ord3(h_dai, attention_mask),
+                self.disc_ai_pos(h_dai, attention_mask),
+            ], dim=-1)
+            disc_ai = self.disc_ai_proj(v_dai)
+            st_ai = st_ai + torch.tanh(self.disc_ai_gate) * disc_ai
+            disc_ai_slow = (0.25 * torch.tanh(self.disc_ai_gate)) * self.disc_ai_to_slow(disc_ai)
+
+            h_dpr = F.silu(self.disc_pr_down(h_tok)) * m_u
+            v_dpr = torch.cat([
+                self.disc_pr_ord3(h_dpr, attention_mask),
+                self.disc_pr_pos(h_dpr, attention_mask),
+            ], dim=-1)
+            disc_pr = self.disc_pr_proj(v_dpr)
+            st_pr = st_pr + torch.tanh(self.disc_pr_gate) * disc_pr
+
         lg_r1_ai = self.r1_ai_head(torch.cat([h_pool_0, st_ai, zc_eff[:, :32]], dim=-1)).squeeze(-1)
         lg_r1_pr = self.r1_promo_head(torch.cat([h_pool_0, st_pr, zc_eff[:, 32:]], dim=-1)).squeeze(-1)
 
         ro_cache = self.core.build_readonly_cache(h_tok, attention_mask)
         init_slots = ro_cache["init_slots"]
+        if disc_ai_slow is not None:
+            # Inject AI discourse summary ONLY into AI slow slots `[0:n_slow)` (Promo slots untouched -> F6 === 0.0!)
+            ns = self.core.n_slow
+            init_slots = torch.cat([
+                init_slots[:, :ns, :] + disc_ai_slow.unsqueeze(1),
+                init_slots[:, ns:, :],
+            ], dim=1)
+            if self.core.dynamics_mode == "contractive_d":
+                init_slots = self.core._smooth_inner_ball(init_slots)
+            elif self.core.dynamics_mode != "v150_anchor":
+                init_slots, _ = self.core._per_slot_project(init_slots)
         k_ev_0, v_ev_0 = ro_cache["k_ev"], ro_cache["v_ev"]
 
         ai_init = init_slots[:, : self.core.n_ai_slots, :].unsqueeze(1).expand(-1, MHC_AI_STREAMS_V150, -1, -1).contiguous()
@@ -1386,6 +1510,7 @@ class MeguvizV160StratosphereLoopModel(nn.Module):
         dt_drop_p: float = 0.0,
         use_crossview_dt: bool = False,
         return_diagnostics: bool = False,
+        quote_scope: torch.Tensor | None = None,
     ) -> dict[str, Any]:
         """Full unrolled training/eval pass returning EVERY step trajectory `logit_ai_steps [T]` & `slots_steps [T]`.
 
@@ -1405,6 +1530,7 @@ class MeguvizV160StratosphereLoopModel(nn.Module):
             input_ids, attention_mask, style_feats, engram_ids, trigram_ids, loc_eff,
             z_char=r0["z_char"], support_pairs=support_pairs,
             r0_drop_p=r0_drop_p, charlm_drop_p=0.0, return_diagnostics=return_diagnostics,
+            quote_scope=quote_scope,
         )
 
         ai_steps = [s1["logit_ai_t1"]]
@@ -1533,12 +1659,16 @@ class MeguvizV160StratosphereLoopModel(nn.Module):
 
 def _quant_spec_map_v160(model: MeguvizV160StratosphereLoopModel) -> dict[str, tuple[str, int]]:
     spec: dict[str, tuple[str, int]] = {
-        "pos_emb": ("w4", 32),
+        "pos_emb": ("w8", 0) if model.lardo_w8_core else ("w4", 32),
         "core.slot_queries": ("w8", 0),
     }
     for name, mod in model.named_modules():
         if isinstance(mod, (QuantLinearV130, QuantEmbeddingV130)):
-            spec[f"{name}.weight"] = ("w8" if mod.target_bits == 8 else "w4", mod.group_size)
+            is_hi_rd_prelude = model.lardo_w8_core and (
+                name.startswith("prelude_blocks.") and (name.endswith(".in_g") or name.endswith(".out_p"))
+            )
+            use_w8 = (mod.target_bits == 8) or is_hi_rd_prelude
+            spec[f"{name}.weight"] = ("w8", 0) if use_w8 else ("w4", mod.group_size)
         elif isinstance(mod, nn.Linear) and mod.weight.numel() >= 1024:
             spec[f"{name}.weight"] = ("w8", 0)
     return spec
@@ -1632,9 +1762,10 @@ class _V160PreludeT1Export(nn.Module):
         super().__init__()
         self.m = m
 
-    def forward(self, input_ids, attention_mask, style_feats, engram_ids, trigram_ids, local_charlm, z_char, support_pairs):
+    def forward(self, input_ids, attention_mask, style_feats, engram_ids, trigram_ids, local_charlm, z_char, support_pairs, quote_scope=None):
         o = self.m.forward_prelude_and_t1(
-            input_ids, attention_mask, style_feats, engram_ids, trigram_ids, local_charlm, z_char, support_pairs
+            input_ids, attention_mask, style_feats, engram_ids, trigram_ids, local_charlm, z_char, support_pairs,
+            quote_scope=quote_scope,
         )
         return tuple(o[k] for k in _T1_OUT_NAMES_V160)
 
@@ -1704,6 +1835,8 @@ def export_v160_bootable_and_onnx(
         use_local_charlm_inject=model.use_local_charlm_inject,
         use_global_charlm_shortcut=model.use_global_charlm_shortcut,
         prelude_global_se=bool(model.cfg["prelude_global_se"]),
+        use_discourse_ops=model.use_discourse_ops,
+        lardo_w8_core=model.lardo_w8_core,
     ).cpu().eval()
     load_bundle_v10_v160_into_model(m_cpu, mgvz_p)
 
@@ -1732,14 +1865,22 @@ def export_v160_bootable_and_onnx(
     loc_lm = torch.zeros((2, 32, LOCAL_CHARLM_DIM_V150), dtype=torch.float32)
     zc = torch.zeros((2, R0_ZCHAR_DIM_V130), dtype=torch.float32)
     sup = torch.tensor([8.0, 28.0], dtype=torch.float32)
+    qsc = torch.zeros((2, 32, QUOTE_SCOPE_DIM_V161), dtype=torch.float32)
+    qsc[:, :, 0] = 1.0
 
     t1_p = out_dir / "v160_prelude_t1_fp32.onnx"
+    t1_in_names = ["input_ids", "attention_mask", "style_feats", "engram_ids", "trigram_ids", "local_charlm", "z_char", "support_pairs"]
+    t1_dummy: tuple[Any, ...] = (ids, msk, st, eg, tg, loc_lm, zc, sup)
     t1_dyn = {
         "input_ids": {0: "batch", 1: "seq"}, "attention_mask": {0: "batch", 1: "seq"},
         "engram_ids": {0: "batch", 1: "seq"}, "trigram_ids": {0: "batch", 1: "seq"},
         "local_charlm": {0: "batch", 1: "seq"},
         "style_feats": {0: "batch"}, "z_char": {0: "batch"}, "support_pairs": {0: "batch"},
     }
+    if m_cpu.use_discourse_ops:
+        t1_in_names.append("quote_scope")
+        t1_dummy = t1_dummy + (qsc,)
+        t1_dyn["quote_scope"] = {0: "batch", 1: "seq"}
     for nm in _T1_OUT_NAMES_V160:
         if nm in ("k_ev_0", "v_ev_0", "cov"):
             t1_dyn[nm] = {0: "batch", 1: "seq"}
@@ -1749,15 +1890,15 @@ def export_v160_bootable_and_onnx(
             t1_dyn[nm] = {0: "batch"}
 
     torch.onnx.export(
-        _V160PreludeT1Export(m_cpu).eval(), (ids, msk, st, eg, tg, loc_lm, zc, sup), str(t1_p),
-        input_names=["input_ids", "attention_mask", "style_feats", "engram_ids", "trigram_ids", "local_charlm", "z_char", "support_pairs"],
+        _V160PreludeT1Export(m_cpu).eval(), t1_dummy, str(t1_p),
+        input_names=t1_in_names,
         output_names=_T1_OUT_NAMES_V160,
         dynamic_axes=t1_dyn, opset_version=17, dynamo=False,
     )
 
     # 3. SINGLE Reusable `loop_step.onnx` (`t_val = 1.0, 2.0, 3.0, 4.0, 5.0...`)
     with torch.no_grad():
-        s1_d = m_cpu.forward_prelude_and_t1(ids, msk, st, eg, tg, loc_lm, zc, sup)
+        s1_d = m_cpu.forward_prelude_and_t1(ids, msk, st, eg, tg, loc_lm, zc, sup, quote_scope=qsc if m_cpu.use_discourse_ops else None)
     t_vec = torch.tensor([1.0, 2.0], dtype=torch.float32)
     dt_vec = torch.tensor([0.5, 1.8], dtype=torch.float32)
     step_dummy = (
@@ -1817,11 +1958,11 @@ def export_v160_bootable_and_onnx(
         or_r0 = _run(s0, {"c1": c1.numpy(), "c2": c2.numpy(), "c3": c3.numpy(), "mask": cm.numpy(), "feats": cf.numpy()})
         r0_diff = float(max(np.abs(pt_r0[i].numpy() - or_r0[i]).max() for i in range(5)))
 
-        pt_t1 = _V160PreludeT1Export(m_cpu)(ids, msk, st, eg, tg, loc_lm, pt_r0[4], sup)
+        pt_t1 = _V160PreludeT1Export(m_cpu)(ids, msk, st, eg, tg, loc_lm, pt_r0[4], sup, qsc if m_cpu.use_discourse_ops else None)
         or_t1 = _run(s1, {
             "input_ids": ids.numpy(), "attention_mask": msk.numpy(), "style_feats": st.numpy(),
             "engram_ids": eg.numpy(), "trigram_ids": tg.numpy(), "local_charlm": loc_lm.numpy(),
-            "z_char": or_r0[4], "support_pairs": sup.numpy(),
+            "z_char": or_r0[4], "support_pairs": sup.numpy(), "quote_scope": qsc.numpy(),
         })
         t1_diff = float(max(np.abs(pt_t1[i].numpy() - or_t1[i]).max() for i in range(8)))
 
@@ -1830,7 +1971,10 @@ def export_v160_bootable_and_onnx(
         cur_ai, cur_pr, cur_cov = m1["ai_streams"], m1["pr_stream"], m1["cov"]
         cur_emb_ai, cur_lg_ai = m1["emb_ai_t1"], m1["logit_ai_t1"]
         la0_np = np.clip(or_r0[0], -6.0, 6.0)
-        pt_full6 = m_cpu(ids, msk, st, eg, tg, loc_lm, c1, c2, c3, cm, cf, sup, outer_steps=6, use_crossview_dt=True)
+        pt_full6 = m_cpu(
+            ids, msk, st, eg, tg, loc_lm, c1, c2, c3, cm, cf, sup,
+            outer_steps=6, use_crossview_dt=True, quote_scope=qsc if m_cpu.use_discourse_ops else None,
+        )
 
         step_diffs: dict[str, float] = {}
         for ti in range(1, 6):
@@ -1888,6 +2032,8 @@ def export_v160_bootable_and_onnx(
     manifest["coverage_beta_enabled"] = model.coverage_beta_enabled
     manifest["use_local_charlm_inject"] = model.use_local_charlm_inject
     manifest["use_global_charlm_shortcut"] = model.use_global_charlm_shortcut
+    manifest["use_discourse_ops"] = model.use_discourse_ops
+    manifest["lardo_w8_core"] = model.lardo_w8_core
     manifest["mgvz10_info"] = mgvz_info
     manifest["charlm_info"] = charlm_info
     mf_p = out_dir / "manifest.json"
@@ -1958,6 +2104,7 @@ class MeguvizV160CascadeEngine:
         self.head_len = int(self.manifest.get("head_len", HEAD_LEN_V140))
         self.long_char_trigger = int(self.manifest.get("long_char_trigger", 300))
         self.use_local_charlm = bool(self.manifest.get("use_local_charlm_inject", True))
+        self.use_discourse_ops = bool(self.manifest.get("use_discourse_ops", False))
         self.r0_b2 = int(self.arch_cfg.get("r0_b2", R0_B2_V130))
         self.r0_b3 = int(self.arch_cfg.get("r0_b3", R0_B3_V130))
         self.engram_buckets = int(self.arch_cfg.get("engram_buckets", ENGRAM_BUCKETS_V130))
@@ -1997,7 +2144,7 @@ class MeguvizV160CascadeEngine:
     def _run_sess(self, sess: ort.InferenceSession, valid: set[str], feed: dict[str, np.ndarray]):
         return sess.run(None, {k: v for k, v in feed.items() if k in valid})
 
-    def _prep_deep_inputs(self, clean_texts: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def _prep_deep_inputs(self, clean_texts: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         f56_l, encs, offs_l = [], [], []
         for cl in clean_texts:
             _, f56, _ = extract_style_features_56d(cl)
@@ -2016,12 +2163,15 @@ class MeguvizV160CascadeEngine:
         eg_a = np.zeros((bs, ml), dtype=np.int64)
         tg_a = np.zeros((bs, ml), dtype=np.int64)
         loc_a = np.zeros((bs, ml, LOCAL_CHARLM_DIM_V150), dtype=np.float32)
+        qsc_a = np.zeros((bs, ml, QUOTE_SCOPE_DIM_V161), dtype=np.float32)
         for i, s in enumerate(encs):
             n_s = len(s)
             ids_a[i, :n_s], msk_a[i, :n_s], eg_a[i, :n_s], tg_a[i, :n_s] = s, 1, engs[i], trigs[i]
             if self.use_local_charlm and self.charlm is not None:
                 loc_a[i, :n_s] = self.charlm.extract_token_local_8ch(clean_texts[i], offs_l[i])
-        return ids_a, msk_a, np.stack(f56_l, 0).astype(np.float32), eg_a, tg_a, loc_a
+            if self.use_discourse_ops or ("quote_scope" in self._in_t1):
+                qsc_a[i, :n_s] = extract_token_quote_scope_4d_v161(clean_texts[i], offs_l[i])
+        return ids_a, msk_a, np.stack(f56_l, 0).astype(np.float32), eg_a, tg_a, loc_a, qsc_a
 
     def _run_anytime_deep(
         self,
@@ -2036,11 +2186,12 @@ class MeguvizV160CascadeEngine:
         AI and Promo exit rungs are tracked independently (`r_ai`, `r_pr`), and AI output is strictly
         latched at `r_ai` so Promo escalation NEVER modifies AI outputs (`F6 === 0.0`!).
         """
-        ids, mask, st, eg, tg, loc_lm = self._prep_deep_inputs(clean_texts)
+        ids, mask, st, eg, tg, loc_lm, qsc = self._prep_deep_inputs(clean_texts)
         t1_raw = self._run_sess(self.sess_t1, self._in_t1, {
             "input_ids": ids, "attention_mask": mask, "style_feats": st,
             "engram_ids": eg, "trigram_ids": tg, "local_charlm": loc_lm,
             "z_char": z_char.astype(np.float32), "support_pairs": supports.astype(np.float32),
+            "quote_scope": qsc,
         })
         t1 = dict(zip(_T1_OUT_NAMES_V160, t1_raw))
         bs = len(clean_texts)
@@ -2312,12 +2463,15 @@ def run_v160_ci_gates(
         eg_a = np.zeros((len(txts), ml), dtype=np.int64)
         tg_a = np.zeros((len(txts), ml), dtype=np.int64)
         loc_a = np.zeros((len(txts), ml, LOCAL_CHARLM_DIM_V150), dtype=np.float32)
+        qsc_a = np.zeros((len(txts), ml, QUOTE_SCOPE_DIM_V161), dtype=np.float32)
         for i, s in enumerate(encs):
             ids_a[i, : len(s)], msk_a[i, : len(s)] = s, 1
             eg_a[i, : len(s)] = make_engram_bigram_ids(s, model.engram_buckets)
             tg_a[i, : len(s)] = make_engram_trigram_ids(s, model.trigram_buckets)
             if charlm is not None:
                 loc_a[i, : len(s)] = charlm.extract_token_local_8ch(cleans[i], offs_l[i])
+            if model.use_discourse_ops:
+                qsc_a[i, : len(s)] = extract_token_quote_scope_4d_v161(cleans[i], offs_l[i])
         with torch.no_grad():
             return model(
                 torch.from_numpy(ids_a).to(device), torch.from_numpy(msk_a).to(device),
@@ -2328,6 +2482,7 @@ def run_v160_ci_gates(
                 torch.from_numpy(c3).to(device), torch.from_numpy(cm).to(device),
                 torch.from_numpy(cf).to(device), torch.from_numpy(sups).to(device),
                 outer_steps=outer_steps,
+                quote_scope=torch.from_numpy(qsc_a).to(device) if model.use_discourse_ops else None,
             )
 
     # 1. V160_C1: Zero-PII across ALL rungs R0..T6 === 0.0!
@@ -2337,27 +2492,41 @@ def run_v160_ci_gates(
     pii_d = float(max(abs(float(oa[k][0].item()) - float(ob[k][0].item())) for k in pii_keys))
     ci["V160_C1_zero_pii_all_rungs"] = {"max_abs_diff": pii_d, "pass": pii_d == 0.0}
 
-    # 2. V160_F6: Structural Promo->AI Firewall under +12 CBM & Promo perturbations across R0..T6 === 0.0!
+    # 2. V160_F6: Structural Promo->AI Firewall under +12 CBM & Promo perturbations across R0..T6 === 0.0 (uint32 bit-exact!)
     t_fw = ["笑死我了，这个插件装完直接起飞[doge]", "关注工种号交流2群 168688884 领全套资料"]
     o_base = _infer(t_fw, outer_steps=6)
     with torch.no_grad():
         saved = (model.cbm_pr_enc.bias.clone(), model.promo_head.bias.clone(), model.r1_promo_head.bias.clone(), model.rung0.promo_head.bias.clone(), model.pr_attr_attn[-1].bias.clone())
+        saved_dpr = model.disc_pr_proj[1].bias.clone() if model.use_discourse_ops else None
         model.cbm_pr_enc.bias.add_(12.0)
         model.promo_head.bias.add_(4.0)
         model.r1_promo_head.bias.add_(4.0)
         model.rung0.promo_head.bias.add_(4.0)
         model.pr_attr_attn[-1].bias.add_(5.0)
+        if saved_dpr is not None:
+            model.disc_pr_proj[1].bias.add_(12.0)
         o_pert = _infer(t_fw, outer_steps=6)
         model.cbm_pr_enc.bias.copy_(saved[0])
         model.promo_head.bias.copy_(saved[1])
         model.r1_promo_head.bias.copy_(saved[2])
         model.rung0.promo_head.bias.copy_(saved[3])
         model.pr_attr_attn[-1].bias.copy_(saved[4])
-    fw_diff = float(max(
-        (o_base[k] - o_pert[k]).abs().max().item()
-        for k in ("logit_ai_r0", "p_defer_ai_r0", "logit_ai_r1", "logit_ai_t1", "logit_ai_t2", "logit_ai_t4", "logit_ai_t6", "u_halt_t1", "u_halt_t4")
+        if saved_dpr is not None:
+            model.disc_pr_proj[1].bias.copy_(saved_dpr)
+    ai_fw_keys = ("logit_ai_r0", "p_defer_ai_r0", "logit_ai_r1", "logit_ai_t1", "logit_ai_t2", "logit_ai_t4", "logit_ai_t6", "u_halt_t1", "u_halt_t4")
+    fw_diff = float(max((o_base[k] - o_pert[k]).abs().max().item() for k in ai_fw_keys))
+    fw_u32_xor = int(max(
+        int(np.bitwise_xor(
+            o_base[k].detach().float().cpu().numpy().view(np.uint32),
+            o_pert[k].detach().float().cpu().numpy().view(np.uint32),
+        ).max())
+        for k in ai_fw_keys
     ))
-    ci["V160_F6_model_promo_to_ai_firewall"] = {"max_leak_diff_under_plus12_cbm": fw_diff, "pass": fw_diff == 0.0}
+    ci["V160_F6_model_promo_to_ai_firewall"] = {
+        "max_leak_diff_under_plus12_cbm": fw_diff,
+        "max_uint32_xor": fw_u32_xor,
+        "pass": bool(fw_diff == 0.0 and fw_u32_xor == 0),
+    }
 
     # 3. V160_P1: Exact Batch-Padding Invariance across R0..T6 (`< 1e-4` at pad=288!)
     t_sh = "笑死我了，这个插件装完直接起飞[doge]"
@@ -2434,6 +2603,7 @@ def run_v160_ci_gates(
                 torch.zeros((1, model.style_dim), device=device), torch.ones((1, 16), dtype=torch.long, device=device),
                 torch.ones((1, 16), dtype=torch.long, device=device), torch.zeros((1, 16, LOCAL_CHARLM_DIM_V150), device=device),
                 torch.zeros((1, R0_ZCHAR_DIM_V130), device=device), torch.tensor([24.0], device=device),
+                quote_scope=torch.zeros((1, 16, QUOTE_SCOPE_DIM_V161), device=device) if model.use_discourse_ops else None,
             )
             t1_v = torch.tensor([1.0], device=device)
             kw = dict(
@@ -2522,6 +2692,8 @@ def run_v160_ci_gates(
                     use_local_charlm_inject=model.use_local_charlm_inject,
                     use_global_charlm_shortcut=model.use_global_charlm_shortcut,
                     prelude_global_se=bool(model.cfg["prelude_global_se"]),
+                    use_discourse_ops=model.use_discourse_ops,
+                    lardo_w8_core=model.lardo_w8_core,
                 ).cpu().eval()
                 load_bundle_v10_v160_into_model(m_boot, Path(td) / "bundle_v10_stratosphere_v160.mgvz")
                 with torch.no_grad():
@@ -2538,6 +2710,8 @@ def run_v160_ci_gates(
                         use_local_charlm_inject=model.use_local_charlm_inject,
                         use_global_charlm_shortcut=model.use_global_charlm_shortcut,
                         prelude_global_se=bool(model.cfg["prelude_global_se"]),
+                        use_discourse_ops=model.use_discourse_ops,
+                        lardo_w8_core=model.lardo_w8_core,
                     ).cpu().eval()
                     load_bundle_v10_v160_into_model(m_ref, boot_z.parent / "bundle_v10_stratosphere_v160.mgvz")
                     r0_ref = m_ref.forward_r0(c1_b, c1_b, c1_b, m_b, cf_b)["logit_ai_r0"]
