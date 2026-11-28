@@ -165,17 +165,19 @@ fn confusable_latin(ch: char) -> Option<char> {
 fn canonicalize_v07_single(text: &str, max_chars: usize) -> (String, CanonMeta) {
     let bank = rx();
     let lim = max_chars.saturating_mul(2);
-    let truncated: String = text.chars().take(lim).collect();
-    let mut raw = truncated;
+    let mut raw: String = text.chars().take(lim).collect();
 
     let mut has_reply_hdr = 0.0f32;
-    if bank.reply_hdr_v07.is_match(&raw) {
-        has_reply_hdr = 1.0;
-        raw = bank.reply_hdr_v07.replace(&raw, "<REPLY_HDR> ").into_owned();
-    }
-    let mention_cnt = bank.inline_mention_v07.find_iter(&raw).count();
-    if mention_cnt > 0 {
-        raw = bank.inline_mention_v07.replace_all(&raw, "<MENTION>").into_owned();
+    let mut mention_cnt = 0usize;
+    if raw.contains('@') {
+        if bank.reply_hdr_v07.is_match(&raw) {
+            has_reply_hdr = 1.0;
+            raw = bank.reply_hdr_v07.replace(&raw, "<REPLY_HDR> ").into_owned();
+        }
+        mention_cnt = bank.inline_mention_v07.find_iter(&raw).count();
+        if mention_cnt > 0 {
+            raw = bank.inline_mention_v07.replace_all(&raw, "<MENTION>").into_owned();
+        }
     }
 
     let mut has_latin_or_cjk = false;
@@ -295,14 +297,18 @@ fn canonicalize_v07_single(text: &str, max_chars: usize) -> (String, CanonMeta) 
 
 fn canonicalize_v150_single(text: &str, max_chars: usize) -> (String, CanonMeta) {
     let bank = rx();
-    let mut s = text.to_string();
-    if bank.reply_hdr_v150.is_match(&s) {
-        s = bank.reply_hdr_v150.replace(&s, "<REPLY_HDR> ").into_owned();
-    }
-    if s.contains('@') {
-        s = bank.inline_mention_v150.replace_all(&s, "<MENTION>").into_owned();
-    }
-    let (cl, meta) = canonicalize_v07_single(&s, max_chars);
+    let (cl, meta) = if text.contains('@') {
+        let mut s = text.to_string();
+        if bank.reply_hdr_v150.is_match(&s) {
+            s = bank.reply_hdr_v150.replace(&s, "<REPLY_HDR> ").into_owned();
+        }
+        if s.contains('@') {
+            s = bank.inline_mention_v150.replace_all(&s, "<MENTION>").into_owned();
+        }
+        canonicalize_v07_single(&s, max_chars)
+    } else {
+        canonicalize_v07_single(text, max_chars)
+    };
     let cl2 = bank.contact_id_pii.replace_all(&cl, "${1}<CONTACT_ID>").into_owned();
     (cl2, meta)
 }
@@ -408,14 +414,77 @@ fn extract_style_56d_from_text(text: &str, max_chars: usize) -> [f32; STYLE_FEAT
     let bank = rx();
     let (cl0, meta) = canonicalize_v07_single(text, max_chars);
     let clean = bank.contact_id_pii.replace_all(&cl0, "${1}<CONTACT_ID>").into_owned();
+    extract_style_56d_inner(&clean, meta)
+}
+
+/// Fast-path when `clean` is already the output of `canonicalize_v150_single(..., max_chars_canon)`.
+/// Bit-exact with `extract_style_features_56d(clean)`: checks if any secondary canonicalization
+/// rule could fire; if not (99.9%+ of texts), skips redundant regexes & allocations!
+fn extract_style_56d_from_v150_clean(clean: &str, max_chars: usize) -> [f32; STYLE_FEAT_DIM_V11] {
+    let mut char_cnt = 0usize;
+    let mut astral_emoji_cnt = 0usize;
+    let mut needs_full = clean.contains('@');
+    if !needs_full {
+        let mut has_lat_or_cjk = false;
+        let mut has_cyr_or_grk = false;
+        for ch in clean.chars() {
+            char_cnt += 1;
+            let cp = ch as u32;
+            if is_bidi_override(cp)
+                || is_zero_width(cp)
+                || (0x1D400..=0x1D7FF).contains(&cp)
+                || (0xFF01..=0xFF5E).contains(&cp)
+                || (0x2F00..=0x2FD5).contains(&cp)
+                || (0xF900..=0xFAFF).contains(&cp)
+                || (0x2F800..=0x2FA1F).contains(&cp)
+            {
+                needs_full = true;
+                break;
+            }
+            if cp > 0xFFFF {
+                astral_emoji_cnt += 1;
+            } else if (0x0041..=0x005A).contains(&cp)
+                || (0x0061..=0x007A).contains(&cp)
+                || (0x4E00..=0x9FFF).contains(&cp)
+            {
+                has_lat_or_cjk = true;
+            } else if (0x0400..=0x052F).contains(&cp) || (0x0370..=0x03FF).contains(&cp) {
+                has_cyr_or_grk = true;
+            }
+            if char_cnt > max_chars {
+                needs_full = true;
+                break;
+            }
+        }
+        if has_lat_or_cjk && has_cyr_or_grk {
+            needs_full = true;
+        }
+    }
+    if needs_full {
+        return extract_style_56d_from_text(clean, max_chars);
+    }
+    let meta = CanonMeta {
+        astral_emoji_log: ((astral_emoji_cnt as f64).ln_1p() / 3.0).min(1.0) as f32,
+        ..CanonMeta::default()
+    };
+    extract_style_56d_inner(clean, meta)
+}
+
+fn extract_style_56d_inner(clean: &str, meta: CanonMeta) -> [f32; STYLE_FEAT_DIM_V11] {
+    let bank = rx();
     let clean_char_len = clean.chars().count();
 
-    let emote_cnt = bank.bili_emote_v11.find_iter(&clean).count();
-    let clean_no_emote = if emote_cnt > 0 {
-        bank.bili_emote_v11.replace_all(&clean, "").into_owned()
+    let emote_cnt = if clean.contains('[') {
+        bank.bili_emote_v11.find_iter(clean).count()
     } else {
-        clean.clone()
+        0
     };
+    let clean_no_emote_cow = if emote_cnt > 0 {
+        bank.bili_emote_v11.replace_all(clean, "")
+    } else {
+        std::borrow::Cow::Borrowed(clean)
+    };
+    let clean_no_emote: &str = clean_no_emote_cow.as_ref();
 
     // Paragraph structure
     let mut p_lens: Vec<usize> = Vec::new();
@@ -657,32 +726,24 @@ fn extract_style_56d_from_text(text: &str, max_chars: usize) -> [f32; STYLE_FEAT
 // ---------------------------------------------------------------------------
 #[derive(Clone)]
 struct CharLMTable {
-    keys: Vec<u64>,
-    counts: Vec<[u32; 2]>,
-    contexts: Vec<u64>,
-    den: Vec<[u32; 2]>,
+    joint_map: AHashMap<u64, [u32; 2]>,
+    den_map: AHashMap<u64, [u32; 2]>,
 }
 
 impl CharLMTable {
     #[inline]
     fn lookup_joint(&self, q: u64) -> [f64; 2] {
-        match self.keys.binary_search(&q) {
-            Ok(idx) => {
-                let c = self.counts[idx];
-                [c[0] as f64, c[1] as f64]
-            }
-            Err(_) => [0.0, 0.0],
+        match self.joint_map.get(&q) {
+            Some(&c) => [c[0] as f64, c[1] as f64],
+            None => [0.0, 0.0],
         }
     }
 
     #[inline]
     fn lookup_den(&self, ctx: u64) -> [f64; 2] {
-        match self.contexts.binary_search(&ctx) {
-            Ok(idx) => {
-                let d = self.den[idx];
-                [d[0] as f64, d[1] as f64]
-            }
-            Err(_) => [0.0, 0.0],
+        match self.den_map.get(&ctx) {
+            Some(&d) => [d[0] as f64, d[1] as f64],
+            None => [0.0, 0.0],
         }
     }
 }
@@ -711,8 +772,12 @@ impl CharLMCore {
         }
     }
 
-    fn extract_9d_one(&self, clean_text: &str) -> [f32; CHARLM_FEAT_DIM_V140] {
-        let mut ids: Vec<u64> = clean_text.chars().take(self.max_chars).map(|c| self.char_id(c)).collect();
+    fn extract_9d_from_chars(&self, chars: &[char]) -> [f32; CHARLM_FEAT_DIM_V140] {
+        let take_n = chars.len().min(self.max_chars);
+        let mut ids: Vec<u64> = Vec::with_capacity(take_n.max(1));
+        for &c in &chars[..take_n] {
+            ids.push(self.char_id(c));
+        }
         if ids.is_empty() {
             ids.push(self.char_id('\0'));
         }
@@ -779,7 +844,11 @@ impl CharLMCore {
             raw33[base + 7] = mx as f32;
         }
         raw33[32] = (n as f64).ln_1p() as f32;
+        self.raw33_to_9d(&raw33)
+    }
 
+    #[inline]
+    fn raw33_to_9d(&self, raw33: &[f32; 33]) -> [f32; CHARLM_FEAT_DIM_V140] {
         let mut z_raw = self.bias;
         for j in 0..33 {
             let xs = ((raw33[j] - self.feat_mean[j]) / self.feat_scale[j]).clamp(-8.0, 8.0);
@@ -797,6 +866,100 @@ impl CharLMCore {
             (raw33[31] / 3.0).clamp(-2.0, 2.0),
             z_soft,
         ]
+    }
+
+    fn extract_9d_one(&self, clean_text: &str) -> [f32; CHARLM_FEAT_DIM_V140] {
+        let chars: Vec<char> = clean_text.chars().take(self.max_chars).collect();
+        self.extract_9d_from_chars(&chars)
+    }
+
+    /// Fused single-pass scoring of head span `0..head_end` computing BOTH char-level LLR/hits
+    /// AND exact global `raw33 -> 9d` over `0..n_g9` (`n_g9 <= head_end`) with ZERO redundant hash lookups!
+    fn score_head_span_with_9d(
+        &self,
+        chars: &[char],
+        head_end: usize,
+        n_g9: usize,
+        char_llr: &mut [[f32; 4]],
+        char_hit: &mut [[f32; 4]],
+    ) -> [f32; CHARLM_FEAT_DIM_V140] {
+        let sub = &chars[..head_end];
+        let l = sub.len();
+        let ids: Vec<u64> = sub.iter().map(|&c| self.char_id(c)).collect();
+        let mut p: Vec<[f64; 2]> = ids.iter().map(|&id| self.unigrams[id as usize]).collect();
+        let mut keys_prev: Vec<u64> = ids.clone();
+        let mut raw33 = [0.0f32; 33];
+        let inv_n = 1.0 / (n_g9 as f64);
+
+        for order in 0..CHARLM_ORDER_V140 {
+            let mut s_llr = 0.0f64;
+            let mut s_pos = 0.0f64;
+            let mut s_neg = 0.0f64;
+            let mut s_llr2 = 0.0f64;
+            let mut s_lp0 = 0.0f64;
+            let mut s_lp1 = 0.0f64;
+            let mut mn = f64::INFINITY;
+            let mut mx = f64::NEG_INFINITY;
+
+            if order == 0 {
+                for i in 0..l {
+                    char_hit[i][0] = if ids[i] >= 2 { 1.0 } else { 0.0 };
+                    let lp0 = p[i][0].max(1e-12).ln();
+                    let lp1 = p[i][1].max(1e-12).ln();
+                    let llr = lp1 - lp0;
+                    char_llr[i][0] = llr.clamp(-3.0, 3.0) as f32;
+                    if i < n_g9 {
+                        s_llr += llr;
+                        if llr > 0.0 { s_pos += llr; } else { s_neg += llr; }
+                        s_llr2 += llr * llr;
+                        s_lp0 += lp0;
+                        s_lp1 += lp1;
+                        if llr < mn { mn = llr; }
+                        if llr > mx { mx = llr; }
+                    }
+                }
+            } else {
+                let tb = &self.tables[order - 1];
+                let sm = CHARLM_SMOOTH_V140[order];
+                let shift = CHARLM_BITS_V140 * (order as u64);
+                for i in 0..l {
+                    let lag_id = if i >= order { ids[i - order] } else { 0 };
+                    let k = keys_prev[i] | (lag_id << shift);
+                    keys_prev[i] = k;
+                    let joint = tb.lookup_joint(k);
+                    let den = tb.lookup_den(k >> CHARLM_BITS_V140);
+                    p[i][0] = (joint[0] + sm * p[i][0]) / (den[0] + sm);
+                    p[i][1] = (joint[1] + sm * p[i][1]) / (den[1] + sm);
+                    char_hit[i][order] = if (joint[0] + joint[1]) > 0.0 { 1.0 } else { 0.0 };
+                    let lp0 = p[i][0].max(1e-12).ln();
+                    let lp1 = p[i][1].max(1e-12).ln();
+                    let llr = lp1 - lp0;
+                    char_llr[i][order] = llr.clamp(-3.0, 3.0) as f32;
+                    if i < n_g9 {
+                        s_llr += llr;
+                        if llr > 0.0 { s_pos += llr; } else { s_neg += llr; }
+                        s_llr2 += llr * llr;
+                        s_lp0 += lp0;
+                        s_lp1 += lp1;
+                        if llr < mn { mn = llr; }
+                        if llr > mx { mx = llr; }
+                    }
+                }
+            }
+            let avg = s_llr * inv_n;
+            let std = ((s_llr2 * inv_n) - avg * avg).max(0.0).sqrt();
+            let base = order * 8;
+            raw33[base] = avg as f32;
+            raw33[base + 1] = (s_pos * inv_n) as f32;
+            raw33[base + 2] = (s_neg * inv_n) as f32;
+            raw33[base + 3] = std as f32;
+            raw33[base + 4] = (s_lp0 * inv_n) as f32;
+            raw33[base + 5] = (s_lp1 * inv_n) as f32;
+            raw33[base + 6] = mn as f32;
+            raw33[base + 7] = mx as f32;
+        }
+        raw33[32] = (n_g9 as f64).ln_1p() as f32;
+        self.raw33_to_9d(&raw33)
     }
 
     fn score_char_span(
@@ -849,6 +1012,117 @@ impl CharLMCore {
                 }
             }
         }
+    }
+
+    fn extract_9d_and_local_from_chars(
+        &self,
+        clean_text: &str,
+        chars: &[char],
+        offs: &[(i32, i32)],
+        out_row: &mut [f32],
+        need_local: bool,
+    ) -> [f32; CHARLM_FEAT_DIM_V140] {
+        let n = chars.len();
+        if !need_local || n == 0 || offs.is_empty() {
+            return self.extract_9d_from_chars(chars);
+        }
+        let max_eval = 1024usize;
+        let head_end = if n <= max_eval { n } else { max_eval / 2 };
+        let n_g9 = n.min(self.max_chars);
+
+        let mut char_llr = vec![[0.0f32; 4]; n];
+        let mut char_hit = vec![[0.0f32; 4]; n];
+
+        let g9 = if n_g9 <= head_end {
+            let v9 = self.score_head_span_with_9d(chars, head_end, n_g9, &mut char_llr, &mut char_hit);
+            if n > max_eval {
+                let half = max_eval / 2;
+                let tail_keep = n - half;
+                let ctx_start = tail_keep.saturating_sub(3);
+                self.score_char_span(chars, ctx_start, n, tail_keep, &mut char_llr, &mut char_hit);
+            }
+            v9
+        } else {
+            let v9 = self.extract_9d_from_chars(chars);
+            let half = max_eval / 2;
+            self.score_char_span(chars, 0, half, 0, &mut char_llr, &mut char_hit);
+            let tail_keep = n - half;
+            let ctx_start = tail_keep.saturating_sub(3);
+            self.score_char_span(chars, ctx_start, n, tail_keep, &mut char_llr, &mut char_hit);
+            v9
+        };
+
+        let mut valid = vec![false; n];
+        for (i, &ch) in chars.iter().enumerate() {
+            if (ch as u32) >= 128 {
+                valid[i] = true;
+            }
+        }
+        if clean_text.contains('<') {
+            let bank = rx();
+            for m in bank.pii_placeholder.find_iter(clean_text) {
+                let cs = clean_text[..m.start()].chars().count();
+                let ce = cs + m.as_str().chars().count();
+                for v in valid.iter_mut().take(ce.min(n)).skip(cs) {
+                    *v = false;
+                }
+            }
+        }
+        for i in 0..n {
+            if !valid[i] {
+                char_llr[i] = [0.0; 4];
+                char_hit[i] = [0.0; 4];
+            }
+        }
+
+        let n_tok = offs.len();
+        let mut share = vec![0.0f32; n];
+        for &(a, b) in offs {
+            if a >= 0 && b > a && (b as usize) <= n {
+                for s in &mut share[(a as usize)..(b as usize)] {
+                    *s += 1.0;
+                }
+            }
+        }
+        for s in &mut share {
+            if *s < 1.0 {
+                *s = 1.0;
+            }
+        }
+
+        let max_tok = out_row.len() / LOCAL_CHARLM_DIM_V150;
+        let lim = n_tok.min(max_tok);
+        for ti in 0..lim {
+            let (a, b) = offs[ti];
+            if a < 0 || b <= a || (a as usize) >= n {
+                continue;
+            }
+            let au = a as usize;
+            let bu = (b as usize).min(n);
+            let mut w_sum = 0.0f32;
+            for ci in au..bu {
+                w_sum += 1.0 / share[ci];
+            }
+            if w_sum <= 1e-8 {
+                continue;
+            }
+            let inv_w = 1.0 / w_sum;
+            let base = ti * LOCAL_CHARLM_DIM_V150;
+            let mut acc_l = [0.0f32; 4];
+            let mut acc_h = [0.0f32; 4];
+            for ci in au..bu {
+                let wn = (1.0 / share[ci]) * inv_w;
+                for k in 0..4 {
+                    acc_l[k] += char_llr[ci][k] * wn;
+                    acc_h[k] += char_hit[ci][k] * wn;
+                }
+            }
+            for k in 0..4 {
+                out_row[base + k] = acc_l[k];
+                out_row[base + 4 + k] = acc_h[k];
+            }
+        }
+        g9
     }
 
     fn extract_local_8ch_one(
@@ -957,6 +1231,91 @@ impl CharLMCore {
             }
         }
     }
+
+    /// v1.6.2 TriSeam-R: 1-pass per-char order-4 LLR trajectory + fixed-width `win_chars` Kadane focal window
+    /// + exact O(L) log-domain Interval Mixture `E_lambda` (strictly zeroed on ASCII & PII placeholders).
+    fn kadane_focal_window_one(&self, clean_text: &str, win_chars: usize, lambda: f32) -> (usize, usize, f32, f32) {
+        let chars: Vec<char> = clean_text.chars().collect();
+        let n = chars.len();
+        if n == 0 {
+            return (0, 0, 0.0, 0.0);
+        }
+        let mut valid = vec![false; n];
+        for (i, &ch) in chars.iter().enumerate() {
+            if (ch as u32) >= 128 {
+                valid[i] = true;
+            }
+        }
+        if clean_text.contains('<') {
+            let bank = rx();
+            for m in bank.pii_placeholder.find_iter(clean_text) {
+                let cs = clean_text[..m.start()].chars().count();
+                let ce = cs + m.as_str().chars().count();
+                for v in valid.iter_mut().take(ce.min(n)).skip(cs) {
+                    *v = false;
+                }
+            }
+        }
+
+        let mut char_llr = vec![[0.0f32; 4]; n];
+        let mut char_hit = vec![[0.0f32; 4]; n];
+        self.score_char_span(&chars, 0, n, 0, &mut char_llr, &mut char_hit);
+
+        let mut r = vec![0.0f64; n];
+        for i in 0..n {
+            if valid[i] {
+                r[i] = char_llr[i][3] as f64;
+            }
+        }
+
+        // Fixed-width sliding max-sum window (exact length-constrained Kadane for Deep focal routing)
+        let w = win_chars.max(16).min(n);
+        let mut cur_sum = 0.0f64;
+        for &rv in r.iter().take(w) {
+            cur_sum += rv;
+        }
+        let mut best_sum = cur_sum;
+        let mut best_st = 0usize;
+        for st in 1..=(n - w) {
+            cur_sum += r[st + w - 1] - r[st - 1];
+            if cur_sum > best_sum {
+                best_sum = cur_sum;
+                best_st = st;
+            }
+        }
+        let peak_llr = (best_sum / (w as f64)) as f32;
+
+        // Exact O(L) log-domain Interval Mixture Likelihood `log E_lambda = v_L - log Z_lambda(L)`
+        let lam = (lambda as f64).clamp(1e-4, 0.9999);
+        let log_lam = lam.ln();
+        #[inline]
+        fn logaddexp(a: f64, b: f64) -> f64 {
+            let m = a.max(b);
+            if m.is_infinite() {
+                m
+            } else {
+                m + ((a - m).exp() + (b - m).exp()).ln()
+            }
+        }
+        let mut u = 0.0f64;
+        let mut v = f64::NEG_INFINITY;
+        for (t, &rt) in r.iter().enumerate() {
+            u = if t == 0 {
+                rt
+            } else {
+                rt + logaddexp(0.0, log_lam + u)
+            };
+            v = if t == 0 { u } else { logaddexp(v, u) };
+        }
+        let mut z_sum = 0.0f64;
+        let mut pow_l = 1.0f64;
+        for k in 1..=n {
+            z_sum += ((n - k + 1) as f64) * pow_l;
+            pow_l *= lam;
+        }
+        let log_e_lam = (v - z_sum.max(1.0).ln()) as f32;
+        (best_st, best_st + w, peak_llr, log_e_lam)
+    }
 }
 
 fn build_charlm_core_from_py(
@@ -990,19 +1349,19 @@ fn build_charlm_core_from_py(
     }
     let mut tables = Vec::with_capacity(table_keys.len());
     for oi in 0..table_keys.len() {
-        let ks = table_keys[oi].as_slice()?.to_vec();
+        let ks = table_keys[oi].as_slice()?;
         let cv = table_counts[oi].as_array();
-        let mut cts = Vec::with_capacity(cv.nrows());
-        for i in 0..cv.nrows() {
-            cts.push([cv[[i, 0]], cv[[i, 1]]]);
+        let mut joint_map: AHashMap<u64, [u32; 2]> = AHashMap::with_capacity(ks.len());
+        for i in 0..ks.len() {
+            joint_map.insert(ks[i], [cv[[i, 0]], cv[[i, 1]]]);
         }
-        let ctxs = table_contexts[oi].as_slice()?.to_vec();
+        let ctxs = table_contexts[oi].as_slice()?;
         let dv = table_den[oi].as_array();
-        let mut dens = Vec::with_capacity(dv.nrows());
-        for i in 0..dv.nrows() {
-            dens.push([dv[[i, 0]], dv[[i, 1]]]);
+        let mut den_map: AHashMap<u64, [u32; 2]> = AHashMap::with_capacity(ctxs.len());
+        for i in 0..ctxs.len() {
+            den_map.insert(ctxs[i], [dv[[i, 0]], dv[[i, 1]]]);
         }
-        tables.push(CharLMTable { keys: ks, counts: cts, contexts: ctxs, den: dens });
+        tables.push(CharLMTable { joint_map, den_map });
     }
     let fm_s = feat_mean.as_slice()?;
     let fs_s = feat_scale.as_slice()?;
@@ -1182,11 +1541,113 @@ impl RustOOFCharLMSet {
         });
         Ok(Array2::from_shape_vec((n, CHARLM_FEAT_DIM_V140), g9_flat).unwrap().into_pyarray(py))
     }
+
+    /// v1.6.2 TriSeam-R: 1-pass Rust Kadane focal window + O(L) Interval Mixture `log E_lambda` (<0.03ms).
+    #[pyo3(signature = (clean_text, win_chars=160, lambda=0.92))]
+    fn kadane_focal_window(
+        &self,
+        py: Python<'_>,
+        clean_text: &str,
+        win_chars: usize,
+        lambda: f32,
+    ) -> (usize, usize, f32, f32) {
+        py.allow_threads(|| self.full.kadane_focal_window_one(clean_text, win_chars, lambda))
+    }
 }
 
 // ---------------------------------------------------------------------------
 // 3. Quote Scope 4D Bounded-Stack FSM (bit-exact with v160_discourse_causal_ops!)
 // ---------------------------------------------------------------------------
+fn quote_scope_from_chars(chars: &[char], offs: &[(i32, i32)], out_row: &mut [f32]) {
+    let n_tok = offs.len();
+    let n = chars.len();
+    if n_tok == 0 || n == 0 {
+        return;
+    }
+    let mut states = vec![0u8; n];
+    let mut stack: Vec<(char, usize)> = Vec::with_capacity(4);
+    let mut unknown_flag = false;
+    let mut sym_dq_open = false;
+    let mut sym_sq_open = false;
+    let max_depth = 4usize;
+
+    for (i, &ch) in chars.iter().enumerate() {
+        let open_pair = match ch {
+            '「' => Some('」'),
+            '『' => Some('』'),
+            '“' => Some('”'),
+            '【' => Some('】'),
+            '《' => Some('》'),
+            _ => None,
+        };
+        if let Some(close_c) = open_pair {
+            states[i] = 3;
+            if stack.len() >= max_depth {
+                unknown_flag = true;
+            } else {
+                stack.push((close_c, i));
+            }
+        } else if matches!(ch, '」' | '』' | '”' | '】' | '》') {
+            states[i] = 3;
+            if stack.last().map(|x| x.0) == Some(ch) {
+                stack.pop();
+            } else {
+                unknown_flag = true;
+            }
+        } else if ch == '"' || ch == '\'' {
+            states[i] = 3;
+            let is_open = if ch == '"' { &mut sym_dq_open } else { &mut sym_sq_open };
+            if !*is_open {
+                if stack.len() >= max_depth {
+                    unknown_flag = true;
+                } else {
+                    *is_open = true;
+                    stack.push((ch, i));
+                }
+            } else if stack.last().map(|x| x.0) == Some(ch) {
+                stack.pop();
+                *is_open = false;
+            } else {
+                unknown_flag = true;
+            }
+        } else if unknown_flag {
+            states[i] = 2;
+        } else if !stack.is_empty() {
+            states[i] = 1;
+        } else {
+            states[i] = 0;
+        }
+    }
+
+    if !stack.is_empty() {
+        let first_unclosed = stack.iter().map(|x| x.1).min().unwrap_or(0);
+        for s in states.iter_mut().skip(first_unclosed + 1) {
+            if *s != 3 {
+                *s = 2;
+            }
+        }
+    }
+
+    let max_tok = out_row.len() / QUOTE_SCOPE_DIM_V161;
+    let lim = n_tok.min(max_tok);
+    for ti in 0..lim {
+        let (sa, sb) = offs[ti];
+        let a = sa.clamp(0, n as i32) as usize;
+        let b = sb.clamp(a as i32, n as i32) as usize;
+        let base = ti * QUOTE_SCOPE_DIM_V161;
+        if b <= a {
+            out_row[base] = 1.0;
+            continue;
+        }
+        let inv_len = 1.0f32 / ((b - a) as f32);
+        for &st in &states[a..b] {
+            if (st as usize) < QUOTE_SCOPE_DIM_V161 {
+                out_row[base + (st as usize)] += inv_len;
+            }
+        }
+    }
+}
+
 fn quote_scope_one(clean_text: &str, starts: &[i32], ends: &[i32], out_row: &mut [f32]) {
     let n_tok = starts.len();
     if n_tok == 0 || clean_text.is_empty() {
@@ -1538,7 +1999,7 @@ fn canonicalize_and_style56_batch_rs<'py>(
             .enumerate()
             .for_each(|(i, (cl_out, st_out))| {
                 let (cl, _) = canonicalize_v150_single(&raw_texts[i], max_chars_canon);
-                let feat = extract_style_56d_from_text(&cl, max_chars_style);
+                let feat = extract_style_56d_from_v150_clean(&cl, max_chars_style);
                 st_out.copy_from_slice(&feat);
                 *cl_out = cl;
             });
@@ -1549,6 +2010,26 @@ fn canonicalize_and_style56_batch_rs<'py>(
 }
 
 #[pyfunction]
+fn style56_from_clean_batch_rs<'py>(
+    py: Python<'py>,
+    clean_texts: Vec<String>,
+    max_chars_style: usize,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let n = clean_texts.len();
+    let f56_flat = py.allow_threads(|| {
+        let mut f56 = vec![0.0f32; n * STYLE_FEAT_DIM_V11];
+        f56.par_chunks_mut(STYLE_FEAT_DIM_V11)
+            .enumerate()
+            .for_each(|(i, st_out)| {
+                let feat = extract_style_56d_from_v150_clean(&clean_texts[i], max_chars_style);
+                st_out.copy_from_slice(&feat);
+            });
+        f56
+    });
+    Ok(Array2::from_shape_vec((n, STYLE_FEAT_DIM_V11), f56_flat).unwrap().into_pyarray(py))
+}
+
+#[pyfunction]
 fn canonicalize_v150_batch_rs(py: Python<'_>, raw_texts: Vec<String>, max_chars: usize) -> Vec<String> {
     py.allow_threads(|| {
         raw_texts
@@ -1556,6 +2037,30 @@ fn canonicalize_v150_batch_rs(py: Python<'_>, raw_texts: Vec<String>, max_chars:
             .map(|t| canonicalize_v150_single(t, max_chars).0)
             .collect()
     })
+}
+
+#[pyfunction]
+fn canonicalize_v150_with_spoof_batch_rs<'py>(
+    py: Python<'py>,
+    raw_texts: Vec<String>,
+    max_chars: usize,
+) -> PyResult<(Vec<String>, Bound<'py, PyArray1<f32>>)> {
+    let n = raw_texts.len();
+    let (cleans, spoofs) = py.allow_threads(|| {
+        let mut cleans = vec![String::new(); n];
+        let mut spoofs = vec![0.0f32; n];
+        cleans
+            .par_iter_mut()
+            .zip(spoofs.par_iter_mut())
+            .enumerate()
+            .for_each(|(i, (cl_out, sp_out))| {
+                let (cl, meta) = canonicalize_v150_single(&raw_texts[i], max_chars);
+                *cl_out = cl;
+                *sp_out = meta.spoof_any;
+            });
+        (cleans, spoofs)
+    });
+    Ok((cleans, Array1::from_vec(spoofs).into_pyarray(py)))
 }
 
 #[pyfunction]
@@ -1649,13 +2154,641 @@ fn build_bpe_engram_tensors_rs<'py>(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// 6. Turbo v3 Fused Single-Pass Post-BPE + R0 + Pure-Rust SHA16 Batch Engine
+// ---------------------------------------------------------------------------
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn fill_apex_char_row(
+    clean_text: &str,
+    cv: &[char],
+    g9: &[f32; CHARLM_FEAT_DIM_V140],
+    is_expanded: bool,
+    body_cap: usize,
+    h_cap: usize,
+    t_cap: usize,
+    b1_m: u32,
+    b2_m_v140: u32,
+    b3_m_v140: u32,
+    b2_m_exp: u64,
+    b3_m_exp: u64,
+    r1: &mut [i64],
+    r2: &mut [i64],
+    r3: &mut [i64],
+    rm: &mut [f32],
+    rf: &mut [f32],
+) -> f32 {
+    let sup = count_distinct_support_pairs(cv);
+    let l_body = cv.len().min(body_cap);
+    let l_tot = l_body + 2;
+    let mut codes = Vec::with_capacity(l_tot);
+    codes.push(2u32);
+    if cv.len() > body_cap {
+        for &ch in &cv[..h_cap] {
+            codes.push(ch as u32);
+        }
+        for &ch in &cv[cv.len() - t_cap..] {
+            codes.push(ch as u32);
+        }
+    } else {
+        for &ch in cv {
+            codes.push(ch as u32);
+        }
+    }
+    codes.push(3u32);
+
+    for j in 0..l_tot {
+        rm[j] = 1.0;
+        let u1 = ((codes[j].wrapping_mul(2654435761) >> 20) % b1_m) + 1;
+        r1[j] = u1 as i64;
+    }
+
+    if is_expanded {
+        for j in 0..l_tot {
+            let a = r1[j] as u64;
+            let b = if j + 1 < l_tot { r1[j + 1] as u64 } else { 0 };
+            let c = if j + 2 < l_tot { r1[j + 2] as u64 } else { 0 };
+            r2[j] = ((((a.wrapping_mul(1315423911) ^ b.wrapping_mul(2654435761)) & 0x7FFF_FFFF) % b2_m_exp) + 1) as i64;
+            r3[j] = ((((a.wrapping_mul(73856093) ^ b.wrapping_mul(19349663) ^ c.wrapping_mul(83492791)) & 0x7FFF_FFFF) % b3_m_exp) + 1) as i64;
+        }
+    } else {
+        if l_tot >= 2 {
+            let mut last_u2 = 1i64;
+            for j in 0..(l_tot - 1) {
+                let h2 = codes[j].wrapping_mul(1315423911) ^ codes[j + 1].wrapping_mul(2654435761);
+                let u2 = (((h2 >> 18) % b2_m_v140) + 1) as i64;
+                r2[j] = u2;
+                last_u2 = u2;
+            }
+            r2[l_tot - 1] = last_u2;
+        }
+        if l_tot >= 3 {
+            let mut last_u3 = 1i64;
+            for j in 0..(l_tot - 2) {
+                let h3 = codes[j].wrapping_mul(1315423911)
+                    ^ codes[j + 1].wrapping_mul(2654435761)
+                    ^ codes[j + 2].wrapping_mul(2246822519);
+                let u3 = (((h3 >> 19) % b3_m_v140) + 1) as i64;
+                r3[j] = u3;
+                last_u3 = u3;
+            }
+            r3[l_tot - 2] = last_u3;
+            r3[l_tot - 1] = last_u3;
+        } else {
+            for j in 0..l_tot {
+                r3[j] = r1[j];
+            }
+        }
+    }
+
+    let lf = cv.len().max(1) as f64;
+    let lb = cv.len().min(512).max(1);
+    let inv_l = 1.0 / (lb as f64);
+    let mut cjk = 0u32;
+    let mut alnum = 0u32;
+    let mut digits = 0u32;
+    let mut spaces = 0u32;
+    let mut newlines = 0u32;
+    let mut cn_comma = 0u32;
+    let mut cn_period = 0u32;
+    let mut cn_colon = 0u32;
+    let mut cn_semi = 0u32;
+    let mut emdash = 0u32;
+    let mut quote_cn = 0u32;
+    let mut bracket_emo = 0u32;
+    let mut qmark = 0u32;
+    let mut exclam = 0u32;
+    let mut uniq: AHashSet<u32> = AHashSet::with_capacity(lb.min(128));
+
+    if cv.is_empty() {
+        uniq.insert(0);
+    } else {
+        for &ch in cv.iter().take(512) {
+            let cp = ch as u32;
+            uniq.insert(cp);
+            if (0x4E00..=0x9FFF).contains(&cp) {
+                cjk += 1;
+            } else if (48..=57).contains(&cp) {
+                alnum += 1;
+                digits += 1;
+            } else if (65..=90).contains(&cp) || (97..=122).contains(&cp) {
+                alnum += 1;
+            } else {
+                match cp {
+                    32 | 9 => spaces += 1,
+                    10 => newlines += 1,
+                    0xFF0C | 44 => cn_comma += 1,
+                    0x3002 => cn_period += 1,
+                    0xFF1A | 58 => cn_colon += 1,
+                    0xFF1B | 59 => cn_semi += 1,
+                    0x2014 | 0x2015 => emdash += 1,
+                    0x300C | 0x300D | 0x201C | 0x201D => quote_cn += 1,
+                    91 => bracket_emo += 1,
+                    63 | 0xFF1F => qmark += 1,
+                    33 | 0xFF01 => exclam += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    let ends_per = if clean_text.trim().ends_with('。') { 1.0f32 } else { 0.0f32 };
+    rf[0] = (lf.ln_1p() / 6.0) as f32;
+    rf[1] = (cjk as f64 * inv_l) as f32;
+    rf[2] = (alnum as f64 * inv_l) as f32;
+    rf[3] = (digits as f64 * inv_l) as f32;
+    rf[4] = (spaces as f64 * inv_l) as f32;
+    rf[5] = ((newlines as f64) / 6.0).min(1.0) as f32;
+    rf[6] = ((cn_comma as f64) * inv_l * 10.0).min(1.0) as f32;
+    rf[7] = ((cn_period as f64) * inv_l * 10.0).min(1.0) as f32;
+    rf[8] = ((cn_colon as f64) * 0.25).min(1.0) as f32;
+    rf[9] = ((cn_semi as f64) * 0.25).min(1.0) as f32;
+    rf[10] = ((emdash as f64) * 0.25).min(1.0) as f32;
+    rf[11] = ((quote_cn as f64) * 0.25).min(1.0) as f32;
+    rf[12] = ((bracket_emo as f64) * 0.25).min(1.0) as f32;
+    rf[13] = (((qmark + exclam) as f64) * inv_l * 10.0).min(1.0) as f32;
+    rf[14] = ends_per;
+    rf[15] = (uniq.len() as f64 * inv_l) as f32;
+    rf[16] = ((sup as f64) / 32.0).min(3.0) as f32;
+    rf[R0_STRUCT_DIM_V140..R0_FEAT_DIM_V140].copy_from_slice(g9);
+    sup
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn extract_post_bpe_all_rs<'py>(
+    py: Python<'py>,
+    clean_texts: Vec<String>,
+    enc_ids: Vec<Vec<i64>>,
+    enc_offs: Vec<Vec<(i32, i32)>>,
+    bos_id: i64,
+    eos_id: i64,
+    pad_id: i64,
+    max_len: usize,
+    head_len: usize,
+    bucket_len: bool,
+    engram_buckets: usize,
+    trigram_buckets: usize,
+    charlm: Option<PyRef<'py, RustOOFCharLMSet>>,
+    fold_ids: Option<PyReadonlyArray1<'py, i32>>,
+    use_local_charlm: bool,
+    need_quote_scope: bool,
+    need_r0: bool,
+    r0_b2: usize,
+    r0_b3: usize,
+    r0_max_chars: usize,
+    r0_head_chars: usize,
+) -> PyResult<(
+    Bound<'py, PyArray2<i64>>,
+    Bound<'py, PyArray2<i64>>,
+    Bound<'py, PyArray2<i64>>,
+    Bound<'py, PyArray2<i64>>,
+    Bound<'py, PyArray3<f32>>,
+    Bound<'py, PyArray3<f32>>,
+    Bound<'py, PyArray2<i64>>,
+    Bound<'py, PyArray2<i64>>,
+    Bound<'py, PyArray2<i64>>,
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray1<f32>>,
+)> {
+    let n = clean_texts.len();
+    if n == 0 {
+        return Ok((
+            Array2::<i64>::zeros((0, 2)).into_pyarray(py),
+            Array2::<i64>::zeros((0, 2)).into_pyarray(py),
+            Array2::<i64>::zeros((0, 2)).into_pyarray(py),
+            Array2::<i64>::zeros((0, 2)).into_pyarray(py),
+            Array3::<f32>::zeros((0, 2, LOCAL_CHARLM_DIM_V150)).into_pyarray(py),
+            Array3::<f32>::zeros((0, 2, QUOTE_SCOPE_DIM_V161)).into_pyarray(py),
+            Array2::<i64>::zeros((0, 8)).into_pyarray(py),
+            Array2::<i64>::zeros((0, 8)).into_pyarray(py),
+            Array2::<i64>::zeros((0, 8)).into_pyarray(py),
+            Array2::<f32>::zeros((0, 8)).into_pyarray(py),
+            Array2::<f32>::zeros((0, R0_FEAT_DIM_V140)).into_pyarray(py),
+            Array1::<f32>::zeros(0).into_pyarray(py),
+        ));
+    }
+    let fids: Vec<i32> = match fold_ids {
+        Some(arr) => arr.as_slice()?.to_vec(),
+        None => vec![-1; n],
+    };
+    let charlm_ref: Option<&RustOOFCharLMSet> = charlm.as_deref();
+
+    let inner = max_len.saturating_sub(2).max(2);
+    let h_cap_bpe = head_len.min(inner.saturating_sub(8));
+    let t_cap_bpe = inner - h_cap_bpe;
+    let eg_m = engram_buckets.saturating_sub(1).max(1) as u64;
+    let tg_m = trigram_buckets.saturating_sub(1).max(1) as u64;
+
+    let is_expanded = r0_b2 != R0_B2_V130 || r0_b3 != R0_B3_V130;
+    let body_cap = r0_max_chars.saturating_sub(2).max(8);
+    let h_cap_r0 = r0_head_chars.min(body_cap.saturating_sub(4));
+    let t_cap_r0 = body_cap - h_cap_r0;
+    let b1_m = (R0_B1_V130 - 1) as u32;
+    let b2_m_v140 = (R0_B2_V130 - 1) as u32;
+    let b3_m_v140 = (R0_B3_V130 - 1) as u32;
+    let b2_m_exp = r0_b2.saturating_sub(1).max(2) as u64;
+    let b3_m_exp = r0_b3.saturating_sub(1).max(2) as u64;
+
+    let (ml, ml_r0, ids_v, msk_v, eg_v, tg_v, loc_v, qsc_v, c1_v, c2_v, c3_v, cm_v, cf_v, sup_v) = py.allow_threads(|| {
+        let ml_raw = enc_ids
+            .iter()
+            .map(|v| v.len().min(inner) + 2)
+            .max()
+            .unwrap_or(2)
+            .max(2);
+        let max_even = if max_len % 2 == 0 { max_len } else { max_len + 1 };
+        let ml = if bucket_len {
+            let b16 = ((ml_raw + 15) / 16) * 16;
+            b16.min(max_even).max(16)
+        } else {
+            ml_raw + (ml_raw & 1)
+        };
+
+        let char_vecs: Vec<Vec<char>> = clean_texts.par_iter().map(|s| s.chars().collect()).collect();
+        let ml_r0 = if need_r0 {
+            char_vecs
+                .par_iter()
+                .map(|cv| cv.len().min(body_cap) + 2)
+                .max()
+                .unwrap_or(8)
+                .max(8)
+        } else {
+            0
+        };
+
+        let mut ids_v = vec![pad_id; n * ml];
+        let mut msk_v = vec![0i64; n * ml];
+        let mut eg_v = vec![0i64; n * ml];
+        let mut tg_v = vec![0i64; n * ml];
+        let mut loc_v = vec![0.0f32; n * ml * LOCAL_CHARLM_DIM_V150];
+        let mut qsc_v = if need_quote_scope {
+            vec![0.0f32; n * ml * QUOTE_SCOPE_DIM_V161]
+        } else {
+            Vec::new()
+        };
+        let mut c1_v = if need_r0 { vec![0i64; n * ml_r0] } else { Vec::new() };
+        let mut c2_v = if need_r0 { vec![0i64; n * ml_r0] } else { Vec::new() };
+        let mut c3_v = if need_r0 { vec![0i64; n * ml_r0] } else { Vec::new() };
+        let mut cm_v = if need_r0 { vec![0.0f32; n * ml_r0] } else { Vec::new() };
+        let mut cf_v = if need_r0 { vec![0.0f32; n * R0_FEAT_DIM_V140] } else { Vec::new() };
+        let mut sup_v = if need_r0 { vec![0.0f32; n] } else { Vec::new() };
+
+        // Single parallel pass across all rows sharing `char_vecs[i]`!
+        let run_row = |i: usize,
+                       ri: &mut [i64],
+                       rm: &mut [i64],
+                       re: &mut [i64],
+                       rt: &mut [i64],
+                       rloc: &mut [f32],
+                       rqsc: Option<&mut [f32]>,
+                       r0_out: Option<(&mut [i64], &mut [i64], &mut [i64], &mut [f32], &mut [f32], &mut f32)>| {
+            let raw_ids = &enc_ids[i];
+            let raw_offs = &enc_offs[i];
+            let l_body = raw_ids.len().min(inner);
+            let ns = (l_body + 2).min(ml);
+            let mut full_offs: Vec<(i32, i32)> = Vec::with_capacity(ns);
+            full_offs.push((-1, -1));
+
+            let mut p2 = 0u64;
+            let mut p1 = 0u64;
+            let mut push_tok = |j: usize, tid: i64| {
+                let tu = tid as u64;
+                ri[j] = tid;
+                rm[j] = 1;
+                let h2 = ((p1.wrapping_mul(1315423911)) ^ (tu.wrapping_mul(2654435761))) & 0xFFFF_FFFF;
+                re[j] = ((h2 % eg_m) + 1) as i64;
+                let h3 = ((p2.wrapping_mul(2246822519)) ^ (p1.wrapping_mul(1315423911)) ^ (tu.wrapping_mul(2654435761))) & 0xFFFF_FFFF;
+                rt[j] = ((h3 % tg_m) + 1) as i64;
+                p2 = p1;
+                p1 = tu;
+            };
+
+            push_tok(0, bos_id);
+            let mut pos = 1usize;
+            if raw_ids.len() > inner {
+                for k in 0..h_cap_bpe {
+                    if pos + 1 >= ns { break; }
+                    push_tok(pos, raw_ids[k]);
+                    full_offs.push(raw_offs[k]);
+                    pos += 1;
+                }
+                let t_st = raw_ids.len() - t_cap_bpe;
+                for k in t_st..raw_ids.len() {
+                    if pos + 1 >= ns { break; }
+                    push_tok(pos, raw_ids[k]);
+                    full_offs.push(raw_offs[k]);
+                    pos += 1;
+                }
+            } else {
+                for k in 0..raw_ids.len() {
+                    if pos + 1 >= ns { break; }
+                    push_tok(pos, raw_ids[k]);
+                    full_offs.push(raw_offs[k]);
+                    pos += 1;
+                }
+            }
+            if pos < ns {
+                push_tok(pos, eos_id);
+                full_offs.push((-1, -1));
+            }
+
+            let cv = &char_vecs[i];
+            let g9 = if let Some(clm) = charlm_ref {
+                let fid = fids[i];
+                let lm = if fid >= 0 && (fid as usize) < clm.folds.len() {
+                    &clm.folds[fid as usize]
+                } else {
+                    &clm.full
+                };
+                lm.extract_9d_and_local_from_chars(&clean_texts[i], cv, &full_offs, rloc, use_local_charlm)
+            } else {
+                [0.0f32; CHARLM_FEAT_DIM_V140]
+            };
+
+            if let Some(q_row) = rqsc {
+                quote_scope_from_chars(cv, &full_offs, q_row);
+            }
+            if let Some((r1, r2, r3, rm_c, rf, rsup)) = r0_out {
+                *rsup = fill_apex_char_row(
+                    &clean_texts[i], cv, &g9, is_expanded, body_cap, h_cap_r0, t_cap_r0,
+                    b1_m, b2_m_v140, b3_m_v140, b2_m_exp, b3_m_exp, r1, r2, r3, rm_c, rf,
+                );
+            }
+        };
+
+        if need_quote_scope && need_r0 {
+            ids_v.par_chunks_mut(ml)
+                .zip(msk_v.par_chunks_mut(ml))
+                .zip(eg_v.par_chunks_mut(ml))
+                .zip(tg_v.par_chunks_mut(ml))
+                .zip(loc_v.par_chunks_mut(ml * LOCAL_CHARLM_DIM_V150))
+                .zip(qsc_v.par_chunks_mut(ml * QUOTE_SCOPE_DIM_V161))
+                .zip(c1_v.par_chunks_mut(ml_r0))
+                .zip(c2_v.par_chunks_mut(ml_r0))
+                .zip(c3_v.par_chunks_mut(ml_r0))
+                .zip(cm_v.par_chunks_mut(ml_r0))
+                .zip(cf_v.par_chunks_mut(R0_FEAT_DIM_V140))
+                .zip(sup_v.par_iter_mut())
+                .enumerate()
+                .for_each(|(i, (((((((((((ri, rm), re), rt), rloc), rqsc), r1), r2), r3), rmc), rf), rsup))| {
+                    run_row(i, ri, rm, re, rt, rloc, Some(rqsc), Some((r1, r2, r3, rmc, rf, rsup)));
+                });
+        } else if !need_quote_scope && need_r0 {
+            ids_v.par_chunks_mut(ml)
+                .zip(msk_v.par_chunks_mut(ml))
+                .zip(eg_v.par_chunks_mut(ml))
+                .zip(tg_v.par_chunks_mut(ml))
+                .zip(loc_v.par_chunks_mut(ml * LOCAL_CHARLM_DIM_V150))
+                .zip(c1_v.par_chunks_mut(ml_r0))
+                .zip(c2_v.par_chunks_mut(ml_r0))
+                .zip(c3_v.par_chunks_mut(ml_r0))
+                .zip(cm_v.par_chunks_mut(ml_r0))
+                .zip(cf_v.par_chunks_mut(R0_FEAT_DIM_V140))
+                .zip(sup_v.par_iter_mut())
+                .enumerate()
+                .for_each(|(i, ((((((((((ri, rm), re), rt), rloc), r1), r2), r3), rmc), rf), rsup))| {
+                    run_row(i, ri, rm, re, rt, rloc, None, Some((r1, r2, r3, rmc, rf, rsup)));
+                });
+        } else if need_quote_scope {
+            ids_v.par_chunks_mut(ml)
+                .zip(msk_v.par_chunks_mut(ml))
+                .zip(eg_v.par_chunks_mut(ml))
+                .zip(tg_v.par_chunks_mut(ml))
+                .zip(loc_v.par_chunks_mut(ml * LOCAL_CHARLM_DIM_V150))
+                .zip(qsc_v.par_chunks_mut(ml * QUOTE_SCOPE_DIM_V161))
+                .enumerate()
+                .for_each(|(i, (((((ri, rm), re), rt), rloc), rqsc))| {
+                    run_row(i, ri, rm, re, rt, rloc, Some(rqsc), None);
+                });
+        } else {
+            ids_v.par_chunks_mut(ml)
+                .zip(msk_v.par_chunks_mut(ml))
+                .zip(eg_v.par_chunks_mut(ml))
+                .zip(tg_v.par_chunks_mut(ml))
+                .zip(loc_v.par_chunks_mut(ml * LOCAL_CHARLM_DIM_V150))
+                .enumerate()
+                .for_each(|(i, ((((ri, rm), re), rt), rloc))| {
+                    run_row(i, ri, rm, re, rt, rloc, None, None);
+                });
+        }
+
+        (ml, ml_r0, ids_v, msk_v, eg_v, tg_v, loc_v, qsc_v, c1_v, c2_v, c3_v, cm_v, cf_v, sup_v)
+    });
+
+    Ok((
+        Array2::from_shape_vec((n, ml), ids_v).unwrap().into_pyarray(py),
+        Array2::from_shape_vec((n, ml), msk_v).unwrap().into_pyarray(py),
+        Array2::from_shape_vec((n, ml), eg_v).unwrap().into_pyarray(py),
+        Array2::from_shape_vec((n, ml), tg_v).unwrap().into_pyarray(py),
+        Array3::from_shape_vec((n, ml, LOCAL_CHARLM_DIM_V150), loc_v).unwrap().into_pyarray(py),
+        if need_quote_scope {
+            Array3::from_shape_vec((n, ml, QUOTE_SCOPE_DIM_V161), qsc_v).unwrap().into_pyarray(py)
+        } else {
+            Array3::<f32>::zeros((0, 0, QUOTE_SCOPE_DIM_V161)).into_pyarray(py)
+        },
+        if need_r0 { Array2::from_shape_vec((n, ml_r0), c1_v).unwrap().into_pyarray(py) } else { Array2::<i64>::zeros((0, 0)).into_pyarray(py) },
+        if need_r0 { Array2::from_shape_vec((n, ml_r0), c2_v).unwrap().into_pyarray(py) } else { Array2::<i64>::zeros((0, 0)).into_pyarray(py) },
+        if need_r0 { Array2::from_shape_vec((n, ml_r0), c3_v).unwrap().into_pyarray(py) } else { Array2::<i64>::zeros((0, 0)).into_pyarray(py) },
+        if need_r0 { Array2::from_shape_vec((n, ml_r0), cm_v).unwrap().into_pyarray(py) } else { Array2::<f32>::zeros((0, 0)).into_pyarray(py) },
+        if need_r0 { Array2::from_shape_vec((n, R0_FEAT_DIM_V140), cf_v).unwrap().into_pyarray(py) } else { Array2::<f32>::zeros((0, R0_FEAT_DIM_V140)).into_pyarray(py) },
+        if need_r0 { Array1::from_vec(sup_v).into_pyarray(py) } else { Array1::<f32>::zeros(0).into_pyarray(py) },
+    ))
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn extract_r0_only_batch_rs<'py>(
+    py: Python<'py>,
+    texts: Vec<String>,
+    already_canonical: bool,
+    max_chars_canon: usize,
+    charlm: Option<PyRef<'py, RustOOFCharLMSet>>,
+    fold_ids: Option<PyReadonlyArray1<'py, i32>>,
+    r0_b2: usize,
+    r0_b3: usize,
+    r0_max_chars: usize,
+    r0_head_chars: usize,
+) -> PyResult<(
+    Bound<'py, PyArray2<i64>>,
+    Bound<'py, PyArray2<i64>>,
+    Bound<'py, PyArray2<i64>>,
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray1<f32>>,
+)> {
+    let n = texts.len();
+    if n == 0 {
+        return Ok((
+            Array2::<i64>::zeros((0, 8)).into_pyarray(py),
+            Array2::<i64>::zeros((0, 8)).into_pyarray(py),
+            Array2::<i64>::zeros((0, 8)).into_pyarray(py),
+            Array2::<f32>::zeros((0, 8)).into_pyarray(py),
+            Array2::<f32>::zeros((0, R0_FEAT_DIM_V140)).into_pyarray(py),
+            Array1::<f32>::zeros(0).into_pyarray(py),
+        ));
+    }
+    let fids: Vec<i32> = match fold_ids {
+        Some(arr) => arr.as_slice()?.to_vec(),
+        None => vec![-1; n],
+    };
+    let charlm_ref: Option<&RustOOFCharLMSet> = charlm.as_deref();
+    let is_expanded = r0_b2 != R0_B2_V130 || r0_b3 != R0_B3_V130;
+    let body_cap = r0_max_chars.saturating_sub(2).max(8);
+    let h_cap_r0 = r0_head_chars.min(body_cap.saturating_sub(4));
+    let t_cap_r0 = body_cap - h_cap_r0;
+    let b1_m = (R0_B1_V130 - 1) as u32;
+    let b2_m_v140 = (R0_B2_V130 - 1) as u32;
+    let b3_m_v140 = (R0_B3_V130 - 1) as u32;
+    let b2_m_exp = r0_b2.saturating_sub(1).max(2) as u64;
+    let b3_m_exp = r0_b3.saturating_sub(1).max(2) as u64;
+
+    let (ml, c1_v, c2_v, c3_v, cm_v, cf_v, sup_v) = py.allow_threads(|| {
+        let cleans: Vec<String> = if already_canonical {
+            texts
+        } else {
+            texts.par_iter().map(|t| canonicalize_v150_single(t, max_chars_canon).0).collect()
+        };
+        let char_vecs: Vec<Vec<char>> = cleans.par_iter().map(|s| s.chars().collect()).collect();
+        let ml = char_vecs
+            .par_iter()
+            .map(|cv| cv.len().min(body_cap) + 2)
+            .max()
+            .unwrap_or(8)
+            .max(8);
+
+        let mut c1_v = vec![0i64; n * ml];
+        let mut c2_v = vec![0i64; n * ml];
+        let mut c3_v = vec![0i64; n * ml];
+        let mut cm_v = vec![0.0f32; n * ml];
+        let mut cf_v = vec![0.0f32; n * R0_FEAT_DIM_V140];
+        let mut sup_v = vec![0.0f32; n];
+
+        c1_v.par_chunks_mut(ml)
+            .zip(c2_v.par_chunks_mut(ml))
+            .zip(c3_v.par_chunks_mut(ml))
+            .zip(cm_v.par_chunks_mut(ml))
+            .zip(cf_v.par_chunks_mut(R0_FEAT_DIM_V140))
+            .zip(sup_v.par_iter_mut())
+            .enumerate()
+            .for_each(|(i, (((((r1, r2), r3), rm), rf), rsup))| {
+                let cv = &char_vecs[i];
+                let g9 = if let Some(clm) = charlm_ref {
+                    let fid = fids[i];
+                    let lm = if fid >= 0 && (fid as usize) < clm.folds.len() {
+                        &clm.folds[fid as usize]
+                    } else {
+                        &clm.full
+                    };
+                    lm.extract_9d_from_chars(cv)
+                } else {
+                    [0.0f32; CHARLM_FEAT_DIM_V140]
+                };
+                *rsup = fill_apex_char_row(
+                    &cleans[i], cv, &g9, is_expanded, body_cap, h_cap_r0, t_cap_r0,
+                    b1_m, b2_m_v140, b3_m_v140, b2_m_exp, b3_m_exp, r1, r2, r3, rm, rf,
+                );
+            });
+        (ml, c1_v, c2_v, c3_v, cm_v, cf_v, sup_v)
+    });
+
+    Ok((
+        Array2::from_shape_vec((n, ml), c1_v).unwrap().into_pyarray(py),
+        Array2::from_shape_vec((n, ml), c2_v).unwrap().into_pyarray(py),
+        Array2::from_shape_vec((n, ml), c3_v).unwrap().into_pyarray(py),
+        Array2::from_shape_vec((n, ml), cm_v).unwrap().into_pyarray(py),
+        Array2::from_shape_vec((n, R0_FEAT_DIM_V140), cf_v).unwrap().into_pyarray(py),
+        Array1::from_vec(sup_v).into_pyarray(py),
+    ))
+}
+
+// Pure-Rust RFC 3174 SHA-1 (zero extra crates!) for parallel `text_sha16_batch_rs`
+fn sha1_hex16(data: &[u8]) -> String {
+    let mut h0: u32 = 0x67452301;
+    let mut h1: u32 = 0xEFCDAB89;
+    let mut h2: u32 = 0x98BADCFE;
+    let mut h3: u32 = 0x10325476;
+    let mut h4: u32 = 0xC3D2E1F0;
+
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut buf = Vec::with_capacity(((data.len() + 9 + 63) / 64) * 64);
+    buf.extend_from_slice(data);
+    buf.push(0x80);
+    while (buf.len() % 64) != 56 {
+        buf.push(0);
+    }
+    buf.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut w = [0u32; 80];
+    for chunk in buf.chunks_exact(64) {
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([chunk[4 * i], chunk[4 * i + 1], chunk[4 * i + 2], chunk[4 * i + 3]]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
+        for (i, &wi) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),
+                20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDCu32),
+                _ => (b ^ c ^ d, 0xCA62C1D6u32),
+            };
+            let temp = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(wi);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        h0 = h0.wrapping_add(a);
+        h1 = h1.wrapping_add(b);
+        h2 = h2.wrapping_add(c);
+        h3 = h3.wrapping_add(d);
+        h4 = h4.wrapping_add(e);
+    }
+    let _ = h4;
+    format!("{:08x}{:08x}", h0, h1)
+}
+
+#[pyfunction]
+fn text_sha16_batch_rs(py: Python<'_>, texts: Vec<String>) -> Vec<String> {
+    py.allow_threads(|| {
+        texts
+            .par_iter()
+            .map(|t| {
+                let mut norm = String::with_capacity(t.len());
+                let mut first = true;
+                for tok in t.split_whitespace() {
+                    if !first {
+                        norm.push(' ');
+                    }
+                    first = false;
+                    for ch in tok.chars() {
+                        for lc in ch.to_lowercase() {
+                            norm.push(lc);
+                        }
+                    }
+                }
+                sha1_hex16(norm.as_bytes())
+            })
+            .collect()
+    })
+}
+
 #[pymodule]
 fn _meguviz_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustOOFCharLMSet>()?;
     m.add_function(wrap_pyfunction!(extract_apex_char_batch_rs, m)?)?;
     m.add_function(wrap_pyfunction!(canonicalize_and_style56_batch_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(style56_from_clean_batch_rs, m)?)?;
     m.add_function(wrap_pyfunction!(canonicalize_v150_batch_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(canonicalize_v150_with_spoof_batch_rs, m)?)?;
     m.add_function(wrap_pyfunction!(extract_quote_scope_4d_batch_rs, m)?)?;
     m.add_function(wrap_pyfunction!(build_bpe_engram_tensors_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_post_bpe_all_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_r0_only_batch_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(text_sha16_batch_rs, m)?)?;
     Ok(())
 }

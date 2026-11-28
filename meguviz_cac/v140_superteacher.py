@@ -193,7 +193,7 @@ def canonicalize_zero_pii_v140(text: str, max_chars: int = 8192) -> str:
 
 
 def text_sha16_v140(text: str) -> str:
-    norm = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    norm = " ".join(str(text or "").lower().split())
     return hashlib.sha1(norm.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
@@ -986,6 +986,11 @@ def _load_v04_multilingual_gold_v140(
         for line in f:
             if not line.strip():
                 continue
+            # Fast lossless raw-line pre-filter before expensive json.loads across 1.4M lines!
+            if "train" not in line:
+                continue
+            if ("inkling_wk" not in line) and ("v04_1m" not in line) and ("bili" not in line):
+                continue
             try:
                 r = json.loads(line)
             except Exception:
@@ -1041,6 +1046,7 @@ def build_v140_superteacher_corpus(
     extra_delta_dirs: list[Path] | None = None,
     smoke_test: bool = False,
     seed: int = 20261128,
+    build_distill_pool: bool = True,
 ) -> dict[str, Any]:
     """Assemble strictly purified, zero-leakage v1.4.0 train / val / test / CF-pair / 250K distill pools."""
     rng = random.Random(seed)
@@ -1128,6 +1134,8 @@ def build_v140_superteacher_corpus(
         gold_pr: float | None,
         is_ml: bool = False,
     ) -> None:
+        if not build_distill_pool:
+            return
         h = text_sha16_v140(txt)
         if h in blocked_hashes or h in distill_pool_by_hash:
             return
@@ -1414,7 +1422,7 @@ def build_v140_superteacher_corpus(
     train_hu_hard = [it for i, it in enumerate(train_hu_hard) if i not in old_val_idx]
 
     # 10. Real-wild unlabeled Bilibili comments from `v04` added STRICTLY to `distill_pool`
-    if v04_data_path and v04_data_path.is_file():
+    if build_distill_pool and v04_data_path and v04_data_path.is_file():
         max_v04_distill = 200 if smoke_test else 45000
         added_v04 = 0
         opener = gzip.open if v04_data_path.suffix == ".gz" else open

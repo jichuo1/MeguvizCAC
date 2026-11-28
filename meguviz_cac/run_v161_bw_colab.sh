@@ -32,6 +32,10 @@ P2_LR="${P2_LR:-5.5e-4}"
 SEED="${SEED:-20261215}"
 USE_COMPILE="${USE_COMPILE:-1}"
 COMPILE_MODE="${COMPILE_MODE:-default}"
+COMPILE_DYNAMIC="${COMPILE_DYNAMIC:-1}"
+AMP_BF16="${AMP_BF16:-1}"
+FUSE_AUX="${FUSE_AUX:-1}"
+EVAL_BS="${EVAL_BS:-512}"
 PREFETCH_WORKERS="${PREFETCH_WORKERS:-2}"
 
 mkdir -p "$WORK_ROOT" "$OUT_BW" "$V161_DRIVE_OUT/v1.6.1-BW" "$WHEEL_DIR"
@@ -41,27 +45,35 @@ export TOKENIZERS_PARALLELISM=true
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-# 1. Install or build-once-and-cache Rust `_meguviz_rs` wheel
-if ! python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet')" >/dev/null 2>&1; then
-  PY_TAG="$(python3 -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
-  CACHED_WHL="$(ls -1t "$WHEEL_DIR"/meguviz_native-*-"${PY_TAG}"-*x86_64.whl 2>/dev/null | head -n 1 || true)"
+# 1. Content-hash-keyed Rust `_meguviz_rs` wheel cache (Cargo.toml + src/lib.rs -> sha8)
+RUST_SHA8="$(cat "$REPO_DIR/meguviz_native/Cargo.toml" "$REPO_DIR/meguviz_native/src/lib.rs" | sha256sum | cut -c1-8)"
+PY_TAG="$(python3 -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
+RUST_CACHE_DIR="$WHEEL_DIR/$RUST_SHA8"
+CUR_RS_SHA="$(cat /tmp/.meguviz_rs_sha8 2>/dev/null || true)"
+if [ "$CUR_RS_SHA" != "$RUST_SHA8" ] || ! python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet') and hasattr(_meguviz_rs, 'extract_post_bpe_all_rs')" >/dev/null 2>&1; then
+  mkdir -p "$RUST_CACHE_DIR"
+  CACHED_WHL="$(ls -1t "$RUST_CACHE_DIR"/meguviz_native-*-"${PY_TAG}"-*x86_64.whl 2>/dev/null | head -n 1 || true)"
   if [ -n "$CACHED_WHL" ]; then
-    echo "[$(date +%H:%M:%S)] Installing cached Rust wheel: $CACHED_WHL"
-    pip install -q --force-reinstall "$CACHED_WHL" || true
-  fi
-  if ! python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet')" >/dev/null 2>&1; then
-    echo "[$(date +%H:%M:%S)] Building Rust _meguviz_rs wheel once & caching to $WHEEL_DIR..."
+    echo "[$(date +%H:%M:%S)] Installing cached Rust wheel (sha8=$RUST_SHA8): $CACHED_WHL"
+    pip install -q --no-deps --force-reinstall "$CACHED_WHL"
+  else
+    echo "[$(date +%H:%M:%S)] Building Rust _meguviz_rs wheel (sha8=$RUST_SHA8) & caching to $RUST_CACHE_DIR..."
     if ! command -v cargo >/dev/null 2>&1; then
       curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       export PATH="$HOME/.cargo/bin:$PATH"
     fi
     pip install -q maturin
-    maturin build --release --manifest-path "$REPO_DIR/meguviz_native/Cargo.toml" -i "$(which python3)" -o "$WHEEL_DIR"
-    CACHED_WHL="$(ls -1t "$WHEEL_DIR"/meguviz_native-*-"${PY_TAG}"-*x86_64.whl | head -n 1)"
-    pip install -q --force-reinstall "$CACHED_WHL"
+    TMP_WHL_DIR="$(mktemp -d)"
+    maturin build --release --manifest-path "$REPO_DIR/meguviz_native/Cargo.toml" -i "$(which python3)" -o "$TMP_WHL_DIR"
+    BUILT_WHL="$(ls -1t "$TMP_WHL_DIR"/meguviz_native-*-"${PY_TAG}"-*x86_64.whl | head -n 1)"
+    cp -f "$BUILT_WHL" "$RUST_CACHE_DIR/"
+    rm -rf "$TMP_WHL_DIR"
+    CACHED_WHL="$(ls -1t "$RUST_CACHE_DIR"/meguviz_native-*-"${PY_TAG}"-*x86_64.whl | head -n 1)"
+    pip install -q --no-deps --force-reinstall "$CACHED_WHL"
   fi
+  echo "$RUST_SHA8" > /tmp/.meguviz_rs_sha8
 fi
-python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet'); print('[Rust-OK]', _meguviz_rs.__file__)"
+python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet') and hasattr(_meguviz_rs, 'extract_post_bpe_all_rs'); print('[Rust-OK sha8=$RUST_SHA8]', _meguviz_rs.__file__)"
 
 # 2. Ensure local fast SSD copies of corpus & rescored pack
 FRESH_V123_ZIP="$V161_DATA_DIR/v123_all_gold_sibling_and_delta_bundle.zip"
@@ -84,8 +96,8 @@ V07_TOKENIZER="$V07_DRIVE_DIR/v0.7.0-r2-omniveritas-b4_bili_picky_bpe_12k.json"
 [ ! -f "$V04_DATA" ] && [ -f "$DRIVE_ROOT/shared_v04_data/v04-merged-1m4-r3.jsonl.gz" ] && V04_DATA="$DRIVE_ROOT/shared_v04_data/v04-merged-1m4-r3.jsonl.gz"
 CAL_CERT_PACK="$V161_DATA_DIR/v161_duckdb2_cal_cert.jsonl.gz"
 
-echo "[$(date +%H:%M:%S)] === Launching v1.6.1-BW (Warm Ultimate + Contractive-D + Discourse Ops + Turbo v2 Rust!) ==="
-echo "  WARM_MASTER=$WARM_MASTER | SHARED_R0=$SHARED_R0 | BS=$BS | P2_STEPS=$P2_STEPS | P2_LR=$P2_LR | COMPILE=$USE_COMPILE"
+echo "[$(date +%H:%M:%S)] === Launching v1.6.1-BW (Warm Ultimate + Contractive-D + Discourse Ops + Turbo v3 Rust!) ==="
+echo "  WARM_MASTER=$WARM_MASTER | SHARED_R0=$SHARED_R0 | BS=$BS | EVAL_BS=$EVAL_BS | P2_STEPS=$P2_STEPS | P2_LR=$P2_LR | COMPILE=$USE_COMPILE (dyn=$COMPILE_DYNAMIC) | AMP_BF16=$AMP_BF16 | FUSE_AUX=$FUSE_AUX"
 
 ARGS=(
   --distill-pool "$DISTILL_POOL"
@@ -136,6 +148,10 @@ ARGS=(
 [ -f "$RESCORED_LOCAL" ] && ARGS+=(--extra-gold-pack "$RESCORED_LOCAL")
 [ -f "$CAL_CERT_PACK" ] && ARGS+=(--extra-cal-cert-pack "$CAL_CERT_PACK")
 [ "$USE_COMPILE" = "1" ] && ARGS+=(--compile --compile-mode "$COMPILE_MODE")
+[ "$COMPILE_DYNAMIC" = "1" ] && ARGS+=(--compile-dynamic) || ARGS+=(--no-compile-dynamic)
+[ "$AMP_BF16" = "1" ] && ARGS+=(--amp-bf16) || ARGS+=(--no-amp-bf16)
+[ "$FUSE_AUX" = "1" ] && ARGS+=(--fuse-aux) || ARGS+=(--no-fuse-aux)
+ARGS+=(--eval-batch-size "$EVAL_BS")
 
 python3 -u -m meguviz_cac.train_v160_stratosphere_loop "${ARGS[@]}" 2>&1 | tee "$OUT_BW/log_v1.6.1-BW.txt"
 

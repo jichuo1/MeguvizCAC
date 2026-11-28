@@ -186,27 +186,80 @@ class RustTurboFrontend:
         use_oof_charlm: bool = True,
         need_quote_scope: bool = False,
         already_canonical: bool = False,
+        need_r0: bool = True,
     ) -> dict[str, np.ndarray]:
         n = len(raw_texts)
+        if use_oof_charlm and self.rust_charlm is not None and self.text_to_fold:
+            parents = parent_raw_texts if parent_raw_texts is not None else raw_texts
+            t2f = self.text_to_fold
+            fold_ids = np.fromiter((t2f.get(p, -1) for p in parents), dtype=np.int32, count=n)
+        else:
+            fold_ids = None
+
+        out: dict[str, np.ndarray] = {}
+        # Turbo v3 fused single-pass R0-only path (eliminates extra PyO3 copies & duplicate UTF-8 scans!)
+        if (not need_bpe) and hasattr(_mn, "extract_r0_only_batch_rs"):
+            c1, c2, c3, cm, cf, sups = _mn.extract_r0_only_batch_rs(
+                raw_texts, bool(already_canonical), 2048,
+                self.rust_charlm, fold_ids,
+                self.r0_b2, self.r0_b3, R0_MAX_CHARS_V130, R0_HEAD_CHARS_V130,
+            )
+            out["c1"] = c1
+            out["c2"] = c2
+            out["c3"] = c3
+            out["cm"] = cm
+            out["cf"] = cf
+            out["sup"] = sups
+            return out
+
         if already_canonical:
             cleans = raw_texts
             st56 = None
             if need_bpe:
-                _, st56 = _mn.canonicalize_and_style56_batch_rs(raw_texts, 2048, 8192)
+                if hasattr(_mn, "style56_from_clean_batch_rs"):
+                    st56 = _mn.style56_from_clean_batch_rs(raw_texts, 8192)
+                else:
+                    _, st56 = _mn.canonicalize_and_style56_batch_rs(raw_texts, 2048, 8192)
         elif need_bpe:
             cleans, st56 = _mn.canonicalize_and_style56_batch_rs(raw_texts, 2048, 8192)
         else:
             cleans = _mn.canonicalize_v150_batch_rs(raw_texts, 2048)
             st56 = None
 
-        if use_oof_charlm and self.rust_charlm is not None and self.text_to_fold:
-            parents = parent_raw_texts if parent_raw_texts is not None else raw_texts
-            t2f = self.text_to_fold
-            fold_ids = np.fromiter((t2f.get(p, -1) for p in parents), dtype=np.int32, count=n)
-        else:
+        # Turbo v3 fused single-pass Post-BPE + CharLM(9d+8ch) + QuoteScope + R0 ApexChar!
+        if need_bpe and hasattr(_mn, "extract_post_bpe_all_rs"):
+            encs = self.tok._tok.encode_batch(cleans, add_special_tokens=False)
+            enc_ids = [e.ids for e in encs]
+            enc_offs = [e.offsets for e in encs]
+            ids_a, msk_a, eg_a, tg_a, loc_a, qsc_a, c1, c2, c3, cm, cf, sups = _mn.extract_post_bpe_all_rs(
+                cleans, enc_ids, enc_offs,
+                int(self.tok.bos_id), int(self.tok.eos_id), int(self.tok.pad_id),
+                self.max_len, self.head_len, self.bucket_seq_len,
+                self.engram_buckets, self.trigram_buckets,
+                self.rust_charlm, fold_ids,
+                self.use_local_charlm, bool(need_quote_scope), bool(need_r0),
+                self.r0_b2, self.r0_b3, R0_MAX_CHARS_V130, R0_HEAD_CHARS_V130,
+            )
+            out["ids"] = ids_a
+            out["msk"] = msk_a
+            out["eg"] = eg_a
+            out["tg"] = tg_a
+            out["loc"] = loc_a
+            out["st"] = st56
+            if need_quote_scope:
+                out["qsc"] = qsc_a
+            if need_r0:
+                out["c1"] = c1
+                out["c2"] = c2
+                out["c3"] = c3
+                out["cm"] = cm
+                out["cf"] = cf
+                out["sup"] = sups
+            return out
+
+        if fold_ids is None:
             fold_ids = np.full((n,), -1, dtype=np.int32)
 
-        out: dict[str, np.ndarray] = {}
         if need_bpe:
             flat_ids, flat_st, flat_en, splits, ml = encode_bpe_head_tail_batch_flat(
                 self.tok, cleans, max_len=self.max_len, head_len=self.head_len, bucket_len=self.bucket_seq_len
@@ -238,13 +291,27 @@ class RustTurboFrontend:
             else:
                 g9 = np.zeros((n, CHARLM_FEAT_DIM_V140), dtype=np.float32)
 
-        c1, c2, c3, cm, cf, sups = _mn.extract_apex_char_batch_rs(
-            cleans, self.r0_b2, self.r0_b3, R0_MAX_CHARS_V130, R0_HEAD_CHARS_V130, g9
-        )
-        out["c1"] = c1
-        out["c2"] = c2
-        out["c3"] = c3
-        out["cm"] = cm
-        out["cf"] = cf
-        out["sup"] = sups
+        if need_r0:
+            c1, c2, c3, cm, cf, sups = _mn.extract_apex_char_batch_rs(
+                cleans, self.r0_b2, self.r0_b3, R0_MAX_CHARS_V130, R0_HEAD_CHARS_V130, g9
+            )
+            out["c1"] = c1
+            out["c2"] = c2
+            out["c3"] = c3
+            out["cm"] = cm
+            out["cf"] = cf
+            out["sup"] = sups
         return out
+
+    def canonicalize_with_spoof_batch(self, raw_texts: list[str], max_chars: int = 2048) -> tuple[list[str], np.ndarray]:
+        if hasattr(_mn, "canonicalize_v150_with_spoof_batch_rs"):
+            return _mn.canonicalize_v150_with_spoof_batch_rs(raw_texts, int(max_chars))
+        cleans = _mn.canonicalize_v150_batch_rs(raw_texts, int(max_chars))
+        return cleans, np.zeros((len(cleans),), dtype=np.float32)
+
+    def kadane_focal_window(
+        self, clean_text: str, win_chars: int = 160, lam: float = 0.92
+    ) -> tuple[int, int, float, float] | None:
+        if self.rust_charlm is not None and hasattr(self.rust_charlm, "kadane_focal_window"):
+            return self.rust_charlm.kadane_focal_window(clean_text, int(win_chars), float(lam))
+        return None

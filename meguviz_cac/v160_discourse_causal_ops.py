@@ -494,17 +494,19 @@ class SelectiveOrder3CumSum(nn.Module):
         h_clean = torch.where(m_bool, h, torch.zeros_like(h))
         # Bounded non-negative events in [0, 1] via sigmoid -> safe from L^3 overflow at L <= 512
         ev = torch.where(m_bool, torch.sigmoid(self.ev_proj(h_clean)), torch.zeros((h.shape[0], h.shape[1], 3 * self.n_triples), device=h.device, dtype=h.dtype))
-        e1, e2, e3 = torch.chunk(ev, 3, dim=-1)  # each (B, L, K)
+        e1, e2, e3 = torch.chunk(ev.float(), 3, dim=-1)  # each (B, L, K), FP32 for exact P1!
 
-        # Exclusive prefix sum `P(t) = sum_{s < t}` and exclusive suffix sum `R(t) = sum_{s > t}`
+        # Exclusive prefix sum `P(t) = sum_{s < t}` and exclusive suffix sum `R(t) = sum_{s > t}` (single cumsum per stream!)
         c1_tot = e1.sum(dim=1, keepdim=True)  # (B, 1, K)
         c2_tot = e2.sum(dim=1, keepdim=True)
         c3_tot = e3.sum(dim=1, keepdim=True)
 
-        p1 = torch.cumsum(e1, dim=1) - e1  # exclusive prefix of E1
+        cs1 = torch.cumsum(e1, dim=1)
+        cs3 = torch.cumsum(e3, dim=1)
+        p1 = cs1 - e1  # exclusive prefix of E1
         # Exclusive suffix of E1 (for symmetric E1 -> E2 -> E1) & E3 (for asymmetric E1 -> E2 -> E3)
-        r1 = (c1_tot - torch.cumsum(e1, dim=1)).clamp_min(0.0)
-        r3 = (c3_tot - torch.cumsum(e3, dim=1)).clamp_min(0.0)
+        r1 = (c1_tot - cs1).clamp_min(0.0)
+        r3 = (c3_tot - cs3).clamp_min(0.0)
 
         u_sym = (e2 * p1 * r1).sum(dim=1)  # (B, K)
         j_sym = (4.0 * u_sym) / (self.eps + c2_tot.squeeze(1) * c1_tot.squeeze(1).pow(2))
@@ -513,7 +515,7 @@ class SelectiveOrder3CumSum(nn.Module):
         j_asym = u_asym / (self.eps + c1_tot.squeeze(1) * c2_tot.squeeze(1) * c3_tot.squeeze(1))
 
         # Include log total masses so zero-activity noise cannot masquerade as strong evidence
-        return torch.cat([j_sym, j_asym, torch.log1p(c1_tot.squeeze(1)), torch.log1p(c2_tot.squeeze(1)), torch.log1p(c3_tot.squeeze(1))], dim=-1)
+        return torch.cat([j_sym, j_asym, torch.log1p(c1_tot.squeeze(1)), torch.log1p(c2_tot.squeeze(1)), torch.log1p(c3_tot.squeeze(1))], dim=-1).to(h.dtype)
 
 
 def softplus_cvar_tail_loss(
@@ -629,6 +631,7 @@ def class_conditional_vrex_unbiased(
 ) -> dict[str, torch.Tensor]:
     """Class-Conditional V-REx with EXACT unbiased variance correction (Review 04 Sec 7.1-7.2).
 
+    Turbo v3 zero-sync vectorized GPU implementation (ZERO `.item()` / boolean-indexing CUDA syncs!):
     For each class `y in {0, 1}` over supported environments with `n_e >= 2`:
         `V_corr = sum_e w_e (R_hat_e - R_bar)^2 - sum_e w_e (1 - w_e) s_e^2 / n_e`
     where `s_e^2` uses denominator `n_e - 1` and NO ReLU clipping (negative values are legal and
@@ -636,42 +639,40 @@ def class_conditional_vrex_unbiased(
     """
     device = per_sample_loss.device
     dtype = per_sample_loss.dtype
-    v_by_class: dict[int, torch.Tensor] = {}
+    e_cnt = int(n_envs)
+    if e_cnt < 2 or per_sample_loss.numel() == 0:
+        z0 = torch.zeros((), device=device, dtype=dtype)
+        return {"v0_unbiased": z0, "v1_unbiased": z0, "vrex_penalty": z0}
 
-    for cls_val in (0, 1):
-        cls_mask = (y_bin == cls_val)
-        r_hats: list[torch.Tensor] = []
-        s2_over_n: list[torch.Tensor] = []
-        ws: list[float] = []
-        for e in range(n_envs):
-            em = cls_mask & (env_ids == e)
-            ne = int(em.sum().item())
-            if ne < 2:
-                continue  # unsupported cell NEVER filled with 0 risk!
-            le = per_sample_loss[em]
-            re = le.mean()
-            se2 = ((le - re) ** 2).sum() / float(ne - 1)
-            r_hats.append(re)
-            s2_over_n.append(se2 / float(ne))
-            ws.append(1.0 if env_weights is None else float(env_weights[e].item()))
+    cls_grid = torch.arange(2, device=device, dtype=y_bin.dtype).view(2, 1, 1)
+    env_grid = torch.arange(e_cnt, device=device, dtype=env_ids.dtype).view(1, e_cnt, 1)
+    m_ceb = ((y_bin.view(1, 1, -1) == cls_grid) & (env_ids.view(1, 1, -1) == env_grid)).to(dtype)
+    n_ce = m_ceb.sum(dim=-1)  # (2, E)
+    supp = (n_ce >= 2.0).to(dtype)
 
-        if len(r_hats) < 2:
-            v_by_class[cls_val] = torch.zeros((), device=device, dtype=dtype)
-            continue
+    loss_row = per_sample_loss.view(1, 1, -1)
+    r_ce = (m_ceb * loss_row).sum(dim=-1) / n_ce.clamp_min(1.0)
+    diff = loss_row - r_ce.unsqueeze(-1)
+    se2_ce = (m_ceb * diff * diff).sum(dim=-1) / (n_ce - 1.0).clamp_min(1.0)
+    s2_over_n = se2_ce / n_ce.clamp_min(1.0)
 
-        w_t = torch.tensor(ws, device=device, dtype=dtype)
-        w_t = w_t / w_t.sum().clamp_min(1e-12)
-        r_vec = torch.stack(r_hats)
-        s2n_vec = torch.stack(s2_over_n)
-        r_bar = (w_t * r_vec).sum()
-        v_naive = (w_t * ((r_vec - r_bar) ** 2)).sum()
-        bias_corr = (w_t * (1.0 - w_t) * s2n_vec).sum()
-        v_by_class[cls_val] = v_naive - bias_corr  # NO ReLU!
+    if env_weights is None:
+        w_raw = supp
+    else:
+        w_raw = env_weights.to(device=device, dtype=dtype).view(1, e_cnt) * supp
+    w_norm = w_raw / w_raw.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    r_bar = (w_norm * r_ce).sum(dim=-1, keepdim=True)
+    v_naive = (w_norm * (r_ce - r_bar).pow(2)).sum(dim=-1)
+    bias_corr = (w_norm * (1.0 - w_norm) * s2_over_n).sum(dim=-1)
+    has_2 = (supp.sum(dim=-1) >= 2.0).to(dtype)
+    v_cls = (v_naive - bias_corr) * has_2  # NO ReLU!
 
-    total_pen = float(beta_0) * v_by_class[0] + float(beta_1) * v_by_class[1]
+    v0 = v_cls[0]
+    v1 = v_cls[1]
+    total_pen = float(beta_0) * v0 + float(beta_1) * v1
     return {
-        "v0_unbiased": v_by_class[0],
-        "v1_unbiased": v_by_class[1],
+        "v0_unbiased": v0,
+        "v1_unbiased": v1,
         "vrex_penalty": total_pen,
     }
 

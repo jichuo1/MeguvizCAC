@@ -36,6 +36,10 @@ RUN_TRACK_A="${RUN_TRACK_A:-1}"
 RUN_TRACK_B="${RUN_TRACK_B:-1}"
 USE_COMPILE="${USE_COMPILE:-1}"
 COMPILE_MODE="${COMPILE_MODE:-default}"
+COMPILE_DYNAMIC="${COMPILE_DYNAMIC:-1}"
+AMP_BF16="${AMP_BF16:-1}"
+FUSE_AUX="${FUSE_AUX:-1}"
+EVAL_BS="${EVAL_BS:-512}"
 PREFETCH_WORKERS="${PREFETCH_WORKERS:-2}"
 
 mkdir -p "$WORK_ROOT" "$OUT_A" "$OUT_B" "$V161_DATA_DIR" "$V161_DRIVE_OUT/v1.6.1-A" "$V161_DRIVE_OUT/v1.6.1-B" "$WHEEL_DIR"
@@ -45,25 +49,34 @@ export TOKENIZERS_PARALLELISM=true
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-# Auto-install (or build once & cache to Drive) Rust `_meguviz_rs` wheel for 35x-200x frontend speedup!
-if ! python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet')" >/dev/null 2>&1; then
+# Content-hash-keyed Rust `_meguviz_rs` wheel cache (Cargo.toml + src/lib.rs -> sha8)
+if [ -f "$REPO_DIR/meguviz_native/Cargo.toml" ] && [ -f "$REPO_DIR/meguviz_native/src/lib.rs" ]; then
+  RUST_SHA8="$(cat "$REPO_DIR/meguviz_native/Cargo.toml" "$REPO_DIR/meguviz_native/src/lib.rs" | sha256sum | cut -c1-8)"
   PY_TAG="$(python3 -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
-  CACHED_WHL="$(ls -1t "$WHEEL_DIR"/meguviz_native-*-"${PY_TAG}"-*x86_64.whl 2>/dev/null | head -n 1 || true)"
-  if [ -n "$CACHED_WHL" ]; then
-    echo "[$(date +%H:%M:%S)] Installing cached Rust wheel: $CACHED_WHL" | tee -a "$LOG_DRIVER"
-    pip install -q --force-reinstall "$CACHED_WHL" || true
-  fi
-  if ! python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet')" >/dev/null 2>&1 && [ -f "$REPO_DIR/meguviz_native/Cargo.toml" ]; then
-    echo "[$(date +%H:%M:%S)] Building Rust _meguviz_rs wheel once & caching to $WHEEL_DIR..." | tee -a "$LOG_DRIVER"
-    if ! command -v cargo >/dev/null 2>&1; then
-      curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null 2>&1 || true
-      export PATH="$HOME/.cargo/bin:$PATH"
+  RUST_CACHE_DIR="$WHEEL_DIR/$RUST_SHA8"
+  CUR_RS_SHA="$(cat /tmp/.meguviz_rs_sha8 2>/dev/null || true)"
+  if [ "$CUR_RS_SHA" != "$RUST_SHA8" ] || ! python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet') and hasattr(_meguviz_rs, 'extract_post_bpe_all_rs')" >/dev/null 2>&1; then
+    mkdir -p "$RUST_CACHE_DIR"
+    CACHED_WHL="$(ls -1t "$RUST_CACHE_DIR"/meguviz_native-*-"${PY_TAG}"-*x86_64.whl 2>/dev/null | head -n 1 || true)"
+    if [ -n "$CACHED_WHL" ]; then
+      echo "[$(date +%H:%M:%S)] Installing cached Rust wheel (sha8=$RUST_SHA8): $CACHED_WHL" | tee -a "$LOG_DRIVER"
+      pip install -q --no-deps --force-reinstall "$CACHED_WHL"
+    else
+      echo "[$(date +%H:%M:%S)] Building Rust _meguviz_rs wheel (sha8=$RUST_SHA8) & caching to $RUST_CACHE_DIR..." | tee -a "$LOG_DRIVER"
+      if ! command -v cargo >/dev/null 2>&1; then
+        curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null 2>&1
+        export PATH="$HOME/.cargo/bin:$PATH"
+      fi
+      pip install -q maturin >/dev/null 2>&1
+      TMP_WHL_DIR="$(mktemp -d)"
+      maturin build --release --manifest-path "$REPO_DIR/meguviz_native/Cargo.toml" -i "$(which python3)" -o "$TMP_WHL_DIR"
+      BUILT_WHL="$(ls -1t "$TMP_WHL_DIR"/meguviz_native-*-"${PY_TAG}"-*x86_64.whl | head -n 1)"
+      cp -f "$BUILT_WHL" "$RUST_CACHE_DIR/"
+      rm -rf "$TMP_WHL_DIR"
+      CACHED_WHL="$(ls -1t "$RUST_CACHE_DIR"/meguviz_native-*-"${PY_TAG}"-*x86_64.whl | head -n 1)"
+      pip install -q --no-deps --force-reinstall "$CACHED_WHL"
     fi
-    if command -v cargo >/dev/null 2>&1; then
-      pip install -q maturin >/dev/null 2>&1 || true
-      maturin build --release --manifest-path "$REPO_DIR/meguviz_native/Cargo.toml" -i "$(which python3)" -o "$WHEEL_DIR" && \
-        pip install -q --force-reinstall "$WHEEL_DIR"/meguviz_native-*-"${PY_TAG}"-*x86_64.whl || true
-    fi
+    echo "$RUST_SHA8" > /tmp/.meguviz_rs_sha8
   fi
 fi
 
@@ -156,6 +169,10 @@ BASE_DATA_ARGS=(
   --prefetch-workers "$PREFETCH_WORKERS"
 )
 [ "$USE_COMPILE" = "1" ] && BASE_DATA_ARGS+=(--compile --compile-mode "$COMPILE_MODE")
+[ "$COMPILE_DYNAMIC" = "1" ] && BASE_DATA_ARGS+=(--compile-dynamic) || BASE_DATA_ARGS+=(--no-compile-dynamic)
+[ "$AMP_BF16" = "1" ] && BASE_DATA_ARGS+=(--amp-bf16) || BASE_DATA_ARGS+=(--no-amp-bf16)
+[ "$FUSE_AUX" = "1" ] && BASE_DATA_ARGS+=(--fuse-aux) || BASE_DATA_ARGS+=(--no-fuse-aux)
+BASE_DATA_ARGS+=(--eval-batch-size "$EVAL_BS")
 [ -d "$V123_BUNDLE_DIR/delta" ] && BASE_DATA_ARGS+=(--delta-dir "$V123_BUNDLE_DIR/delta")
 [ -f "$V04_DATA" ] && BASE_DATA_ARGS+=(--v04-data "$V04_DATA")
 [ -f "$EXTRA_PACK_USE" ] && BASE_DATA_ARGS+=(--extra-gold-pack "$EXTRA_PACK_USE")
