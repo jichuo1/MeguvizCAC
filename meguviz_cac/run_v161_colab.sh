@@ -25,7 +25,7 @@ V161_DRIVE_OUT="${V161_DRIVE_OUT:-$DRIVE_ROOT/v161_production}"
 WORK_ROOT="${WORK_ROOT:-/content/out_v161}"
 OUT_A="$WORK_ROOT/v1.6.1-A"
 OUT_B="$WORK_ROOT/v1.6.1-B"
-SHARED_R0="$WORK_ROOT/shared_r0_v161_frozen.pt"
+SHARED_R0="${SHARED_R0:-$V161_DRIVE_OUT/shared_r0_v161_frozen.pt}"
 LOG_DRIVER="${LOG_DRIVER:-/content/log_v161_driver.txt}"
 BS="${BS:-128}"
 SEED="${SEED:-20261215}"
@@ -154,21 +154,22 @@ _sync_release() {
 # ===========================================================================
 # STAGE 2: Track A (`v1.6.1-A`) — Zero-Overhead Full-Blooded Warm-Start + Shared 4000-Step R0++
 # ===========================================================================
-if [ "$RUN_TRACK_A" = "1" ] && [ ! -f "$OUT_A/metrics-v1.6.1-A.json" ]; then
+if [ "$RUN_TRACK_A" = "1" ] && [ ! -f "$OUT_A/metrics-v1.6.1-A.json" ] && [ ! -f "$V161_DRIVE_OUT/v1.6.1-A/metrics-v1.6.1-A.json" ]; then
   echo "[$(date +%H:%M:%S)] === STAGE 2: Launching Track A (v1.6.1-A Zero-Overhead Warm-Start) ===" | tee -a "$LOG_DRIVER"
   WARM_ARGS=()
   V160_MASTER="$V160_PROD_DIR/v1.6.0-r1_fp16_master.pt"
   if [ -f "$V160_MASTER" ]; then
     WARM_ARGS+=(--init-from-fp16 "$V160_MASTER" --wise-anchor-fp16 "$V160_MASTER")
   fi
+  R0_A_ARGS=(--p1-steps 4000 --p1-use-cf --save-r0-ckpt "$SHARED_R0" --freeze-r0)
+  if [ -f "$SHARED_R0" ]; then
+    R0_A_ARGS=(--init-r0-ckpt "$SHARED_R0" --freeze-r0)
+  fi
   python3 -u -m meguviz_cac.train_v160_stratosphere_loop \
     "${BASE_DATA_ARGS[@]}" \
     "${WARM_ARGS[@]}" \
+    "${R0_A_ARGS[@]}" \
     --dynamics stratosphere \
-    --p1-steps 4000 \
-    --p1-use-cf \
-    --save-r0-ckpt "$SHARED_R0" \
-    --freeze-r0 \
     --p2-steps 4200 \
     --p2-lr 5e-4 \
     --p3-qat-steps 300 \
@@ -176,14 +177,13 @@ if [ "$RUN_TRACK_A" = "1" ] && [ ! -f "$OUT_A/metrics-v1.6.1-A.json" ]; then
     --out "$OUT_A" \
     --checkpoint-dir "$V161_DRIVE_OUT/v1.6.1-A" \
     --version "v1.6.1-A" 2>&1 | tee "$OUT_A/log_v1.6.1-A.txt"
-  cp -f "$SHARED_R0" "$V161_DRIVE_OUT/shared_r0_v161_frozen.pt" || true
   _sync_release "v1.6.1-A" "$OUT_A" "$V161_DRIVE_OUT/v1.6.1-A"
 fi
 
 # ===========================================================================
 # STAGE 3: Track B (`v1.6.1-B`) — True Metamorphosis (Contractive Kernel D + 0.33ms Discourse Ops!)
 # ===========================================================================
-if [ "$RUN_TRACK_B" = "1" ] && [ ! -f "$OUT_B/metrics-v1.6.1-B.json" ]; then
+if [ "$RUN_TRACK_B" = "1" ] && [ ! -f "$OUT_B/metrics-v1.6.1-B.json" ] && [ ! -f "$V161_DRIVE_OUT/v1.6.1-B/metrics-v1.6.1-B.json" ]; then
   echo "[$(date +%H:%M:%S)] === STAGE 3: Launching Track B (v1.6.1-B Contractive-D + Discourse Ops) ===" | tee -a "$LOG_DRIVER"
   R0_ARGS=()
   if [ -f "$SHARED_R0" ]; then

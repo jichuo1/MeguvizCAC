@@ -819,6 +819,9 @@ def main() -> None:
     charlm_rows = gold_pos + gold_hd + gold_nat
     if args.smoke_test:
         charlm_rows = charlm_rows[:240]
+    elif len(charlm_rows) > 80000:
+        # Stratified deterministic cap for fast <30s OOF CharLM fit (24K top-k n-grams saturate well before 80K rows!)
+        charlm_rows = rng.sample(charlm_rows, 80000)
     lm_txts = [r["text"] for r in charlm_rows]
     lm_y = np.array([1 if float(r.get("y_ai", 0.0)) >= 0.5 else 0 for r in charlm_rows], dtype=np.int32)
     lm_grps = [str(r["cf_group_id"]) if r.get("cf_group_id") else None for r in charlm_rows]
