@@ -17,9 +17,11 @@ from typing import Any
 import numpy as np
 
 try:
-    import meguviz_native as _mn
+    import _meguviz_rs as _mn
 
-    HAS_RUST_FRONTEND = True
+    HAS_RUST_FRONTEND = hasattr(_mn, "RustOOFCharLMSet") and hasattr(_mn, "extract_apex_char_batch_rs")
+    if not HAS_RUST_FRONTEND:
+        _mn = None
 except Exception:  # pragma: no cover
     _mn = None
     HAS_RUST_FRONTEND = False

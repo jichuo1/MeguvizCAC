@@ -5,7 +5,7 @@ edition = "2021"
 description = "High-speed Rust/PyO3/Rayon Zero-PII & CharLM frontend for MeguvizCAC v1.6.x+"
 
 [lib]
-name = "meguviz_native"
+name = "_meguviz_rs"
 crate-type = ["cdylib"]
 
 [dependencies]

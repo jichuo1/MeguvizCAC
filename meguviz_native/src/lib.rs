@@ -1650,7 +1650,7 @@ fn build_bpe_engram_tensors_rs<'py>(
 }
 
 #[pymodule]
-fn meguviz_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _meguviz_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustOOFCharLMSet>()?;
     m.add_function(wrap_pyfunction!(extract_apex_char_batch_rs, m)?)?;
     m.add_function(wrap_pyfunction!(canonicalize_and_style56_batch_rs, m)?)?;

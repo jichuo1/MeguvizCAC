@@ -45,15 +45,16 @@ export TOKENIZERS_PARALLELISM=true
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-# Auto-install (or build once & cache to Drive) Rust `meguviz_native` wheel for 35x-200x frontend speedup!
-if ! python3 -c "import meguviz_native" >/dev/null 2>&1; then
+# Auto-install (or build once & cache to Drive) Rust `_meguviz_rs` wheel for 35x-200x frontend speedup!
+if ! python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet')" >/dev/null 2>&1; then
   PY_TAG="$(python3 -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
   CACHED_WHL="$(ls -1t "$WHEEL_DIR"/meguviz_native-*-"${PY_TAG}"-*linux_x86_64.whl 2>/dev/null | head -n 1 || true)"
   if [ -n "$CACHED_WHL" ]; then
     echo "[$(date +%H:%M:%S)] Installing cached Rust wheel: $CACHED_WHL" | tee -a "$LOG_DRIVER"
     pip install -q --force-reinstall "$CACHED_WHL" || true
-  elif [ -f "$REPO_DIR/meguviz_native/Cargo.toml" ]; then
-    echo "[$(date +%H:%M:%S)] Building Rust meguviz_native wheel once & caching to $WHEEL_DIR..." | tee -a "$LOG_DRIVER"
+  fi
+  if ! python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet')" >/dev/null 2>&1 && [ -f "$REPO_DIR/meguviz_native/Cargo.toml" ]; then
+    echo "[$(date +%H:%M:%S)] Building Rust _meguviz_rs wheel once & caching to $WHEEL_DIR..." | tee -a "$LOG_DRIVER"
     if ! command -v cargo >/dev/null 2>&1; then
       curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null 2>&1 || true
       export PATH="$HOME/.cargo/bin:$PATH"

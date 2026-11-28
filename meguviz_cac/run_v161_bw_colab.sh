@@ -41,15 +41,16 @@ export TOKENIZERS_PARALLELISM=true
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-# 1. Install or build-once-and-cache Rust `meguviz_native` wheel
-if ! python3 -c "import meguviz_native" >/dev/null 2>&1; then
+# 1. Install or build-once-and-cache Rust `_meguviz_rs` wheel
+if ! python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet')" >/dev/null 2>&1; then
   PY_TAG="$(python3 -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
   CACHED_WHL="$(ls -1t "$WHEEL_DIR"/meguviz_native-*-"${PY_TAG}"-*linux_x86_64.whl 2>/dev/null | head -n 1 || true)"
   if [ -n "$CACHED_WHL" ]; then
     echo "[$(date +%H:%M:%S)] Installing cached Rust wheel: $CACHED_WHL"
-    pip install -q --force-reinstall "$CACHED_WHL"
-  else
-    echo "[$(date +%H:%M:%S)] Building Rust meguviz_native wheel once & caching to $WHEEL_DIR..."
+    pip install -q --force-reinstall "$CACHED_WHL" || true
+  fi
+  if ! python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet')" >/dev/null 2>&1; then
+    echo "[$(date +%H:%M:%S)] Building Rust _meguviz_rs wheel once & caching to $WHEEL_DIR..."
     if ! command -v cargo >/dev/null 2>&1; then
       curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       export PATH="$HOME/.cargo/bin:$PATH"
@@ -60,7 +61,7 @@ if ! python3 -c "import meguviz_native" >/dev/null 2>&1; then
     pip install -q --force-reinstall "$CACHED_WHL"
   fi
 fi
-python3 -c "import meguviz_native; print('[Rust-OK]', meguviz_native.__file__)"
+python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet'); print('[Rust-OK]', _meguviz_rs.__file__)"
 
 # 2. Ensure local fast SSD copies of corpus & rescored pack
 FRESH_V123_ZIP="$V161_DATA_DIR/v123_all_gold_sibling_and_delta_bundle.zip"
