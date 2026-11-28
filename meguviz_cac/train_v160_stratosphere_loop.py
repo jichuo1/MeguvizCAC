@@ -1183,7 +1183,7 @@ def main() -> None:
                     per_bce, y_bin_ai[era_ok].long(), bk["era5"][era_ok], n_envs=NUM_ERAS_V122, beta_0=1.0, beta_1=0.5,
                 )
                 # Keep unbiased estimator (can be slightly negative), clamp lower only at -0.15 for optimizer safety
-                loss = loss + float(args.cc_vrex_weight) * vrex_d["penalty"].clamp(min=-0.15, max=2.0)
+                loss = loss + float(args.cc_vrex_weight) * vrex_d["vrex_penalty"].clamp(min=-0.15, max=2.0)
 
         # 9. v1.6.1-B Inner-Ball Smooth Saturation Regularizer for Direct Contractive Kernel D
         if float(args.sat_reg_weight) > 0.0 and od.get("slot_steps"):
