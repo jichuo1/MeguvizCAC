@@ -962,6 +962,128 @@ impl CharLMCore {
         self.raw33_to_9d(&raw33)
     }
 
+    fn extract_v170_ph16_one(&self, clean_text: &str) -> [f32; 16] {
+        let mut out = [0.0f32; 16];
+        out[3] = 1.0; // Q default
+        out[14] = 1.0; // R42 default
+        let chars: Vec<char> = clean_text.chars().take(self.max_chars).collect();
+        let l = chars.len();
+        if l == 0 {
+            return out;
+        }
+        let ids: Vec<u64> = chars.iter().map(|&c| self.char_id(c)).collect();
+        let mut p0: Vec<f64> = ids.iter().map(|&id| self.unigrams[id as usize][0]).collect();
+        let mut keys_prev: Vec<u64> = ids.clone();
+        let mut mean_h = [0.0f64; 4];
+        let mut h4 = vec![0.0f64; l];
+        let cov_voc_cnt = ids.iter().filter(|&&id| id >= 2).count();
+        let mut cov_ge3_cnt = 0usize;
+
+        for order in 0..CHARLM_ORDER_V140 {
+            if order == 0 {
+                let mut s = 0.0f64;
+                for &pv in &p0 {
+                    let hv = (-pv.max(1e-12).ln()).clamp(0.05, 18.0);
+                    s += hv;
+                }
+                mean_h[0] = s / (l as f64);
+            } else {
+                let tb = &self.tables[order - 1];
+                let sm = CHARLM_SMOOTH_V140[order];
+                let shift = CHARLM_BITS_V140 * (order as u64);
+                let mut s = 0.0f64;
+                for i in 0..l {
+                    let lag_id = if i >= order { ids[i - order] } else { 0 };
+                    let k = keys_prev[i] | (lag_id << shift);
+                    keys_prev[i] = k;
+                    let joint = tb.lookup_joint(k);
+                    let den = tb.lookup_den(k >> CHARLM_BITS_V140);
+                    p0[i] = (joint[0] + sm * p0[i]) / (den[0] + sm);
+                    let hv = (-p0[i].max(1e-12).ln()).clamp(0.05, 18.0);
+                    s += hv;
+                    if order == 2 && joint[0] > 0.0 {
+                        cov_ge3_cnt += 1;
+                    } else if order == 3 {
+                        h4[i] = hv;
+                    }
+                }
+                mean_h[order] = s / (l as f64);
+            }
+        }
+
+        // Welford FP64 mean & variance on h4
+        let mut w_mean = 0.0f64;
+        let mut w_m2 = 0.0f64;
+        let mut j_tail_sum = 0.0f64;
+        for (idx, &x) in h4.iter().enumerate() {
+            let k = (idx + 1) as f64;
+            let delta = x - w_mean;
+            w_mean += delta / k;
+            w_m2 += delta * (x - w_mean);
+            if x > 14.0 {
+                j_tail_sum += x - 14.0;
+            }
+        }
+        let var = w_m2 / (l as f64);
+
+        let mut d_sum = 0.0f64;
+        for i in 0..(l.saturating_sub(1)) {
+            let diff = h4[i + 1] - h4[i];
+            d_sum += diff * diff;
+        }
+        let d_val = if l >= 2 { d_sum / ((l - 1) as f64) } else { 0.0 };
+
+        let valid_q = if l >= 6 && var > 1e-6 { 1.0f64 } else { 0.0f64 };
+        let q_val = if valid_q > 0.5 { d_val / (var + 1e-6) } else { 1.0 };
+
+        let mut ps = vec![0.0f64; l + 1];
+        for i in 0..l {
+            ps[i + 1] = ps[i] + h4[i];
+        }
+        let n2 = l / 2;
+        let e2 = if n2 >= 3 {
+            let mut s2 = 0.0f64;
+            for j in 0..n2 {
+                let d2 = ((ps[2 * j + 2] - ps[2 * j + 1]) - (ps[2 * j + 1] - ps[2 * j])) * 0.5;
+                s2 += d2 * d2;
+            }
+            s2 / (n2 as f64)
+        } else {
+            0.0
+        };
+        let n4 = l / 4;
+        let e4 = if n4 >= 3 {
+            let mut s4 = 0.0f64;
+            for j in 0..n4 {
+                let d4 = ((ps[4 * j + 4] - ps[4 * j + 2]) - (ps[4 * j + 2] - ps[4 * j])) * 0.25;
+                s4 += d4 * d4;
+            }
+            s4 / (n4 as f64)
+        } else {
+            0.0
+        };
+        let valid_haar = if n4 >= 3 { 1.0f64 } else { 0.0f64 };
+        let r42 = if valid_haar > 0.5 { e4 / (e2 + 1e-4) } else { 1.0 };
+
+        out[0] = w_mean as f32;
+        out[1] = (var + 1e-4).ln() as f32;
+        out[2] = (d_val + 1e-4).ln() as f32;
+        out[3] = q_val as f32;
+        out[4] = valid_q as f32;
+        out[5] = (mean_h[0] - mean_h[3]) as f32;
+        out[6] = (mean_h[1] - mean_h[2]) as f32;
+        out[7] = (mean_h[2] - mean_h[3]) as f32;
+        out[8] = (cov_ge3_cnt as f64 / l as f64) as f32;
+        out[9] = (cov_voc_cnt as f64 / l as f64) as f32;
+        out[10] = (l as f64).ln_1p() as f32;
+        out[11] = (j_tail_sum / l as f64) as f32;
+        out[12] = (e2 + 1e-4).ln() as f32;
+        out[13] = (e4 + 1e-4).ln() as f32;
+        out[14] = r42 as f32;
+        out[15] = valid_haar as f32;
+        out
+    }
+
     fn score_char_span(
         &self,
         chars: &[char],
@@ -1552,6 +1674,35 @@ impl RustOOFCharLMSet {
         lambda: f32,
     ) -> (usize, usize, f32, f32) {
         py.allow_threads(|| self.full.kadane_focal_window_one(clean_text, win_chars, lambda))
+    }
+
+    /// v1.7.0 M6: Pure P_H^(1..4) 16-d features (0B extra prior, zero P_A, Rayon-parallel).
+    #[pyo3(signature = (clean_texts, fold_ids=None))]
+    fn extract_v170_ph16_batch<'py>(
+        &self,
+        py: Python<'py>,
+        clean_texts: Vec<String>,
+        fold_ids: Option<PyReadonlyArray1<'py, i32>>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let n = clean_texts.len();
+        let fids: Vec<i32> = match fold_ids {
+            Some(arr) => arr.as_slice()?.to_vec(),
+            None => vec![-1; n],
+        };
+        let ph_flat = py.allow_threads(|| {
+            let mut ph = vec![0.0f32; n * 16];
+            ph.par_chunks_mut(16).enumerate().for_each(|(i, row)| {
+                let fid = fids[i];
+                let lm = if fid >= 0 && (fid as usize) < self.folds.len() {
+                    &self.folds[fid as usize]
+                } else {
+                    &self.full
+                };
+                row.copy_from_slice(&lm.extract_v170_ph16_one(&clean_texts[i]));
+            });
+            ph
+        });
+        Ok(Array2::from_shape_vec((n, 16), ph_flat).unwrap().into_pyarray(py))
     }
 }
 
@@ -2777,6 +2928,232 @@ fn text_sha16_batch_rs(py: Python<'_>, texts: Vec<String>) -> Vec<String> {
     })
 }
 
+#[inline]
+fn v170_script_bucket(ch: char) -> usize {
+    let cp = ch as u32;
+    if (0x4E00..=0x9FFF).contains(&cp) || (0x3400..=0x4DBF).contains(&cp) || (0x20000..=0x2A6DF).contains(&cp) {
+        return 0;
+    }
+    if (0x41..=0x5A).contains(&cp) || (0x61..=0x7A).contains(&cp) || (0x00C0..=0x024F).contains(&cp) {
+        return 1;
+    }
+    if (0x3040..=0x30FF).contains(&cp) || (0x31F0..=0x31FF).contains(&cp) {
+        return 2;
+    }
+    3
+}
+
+fn v170_uisr_and_surf_one(text: &str, bpe_len: f32, surf: &mut [f32], uisr: &mut [f32]) {
+    let chars: Vec<char> = text.chars().take(2048).collect();
+    let n = chars.len();
+    if n == 0 {
+        return;
+    }
+    let inv_n = 1.0f64 / (n as f64);
+    let mut counts = [0usize; 4];
+    let mut first_pos = [1.0f64; 4];
+    let mut last_pos = [0.0f64; 4];
+    let mut head_c = [0usize; 4];
+    let mut mid_c = [0usize; 4];
+    let mut tail_c = [0usize; 4];
+    let mut sum_runs = [0usize; 4];
+    let mut cnt_runs = [0usize; 4];
+    let mut max_runs = [0usize; 4];
+    let mut trans_out = [0usize; 4];
+
+    let mut n_digit = 0usize;
+    let mut n_space = 0usize;
+    let mut n_punct = 0usize;
+    let mut n_upper = 0usize;
+    let mut n_latin_ascii = 0usize;
+    let mut n_nl = 0usize;
+    let mut punct_runs = 0usize;
+    let mut in_punct_run = false;
+    let mut uniq_mod64 = 0u64;
+
+    let mut prev_b: i32 = -1;
+    let mut cur_run = 0usize;
+    let mut n_switches = 0usize;
+    let mut all_sum_runs = 0usize;
+    let mut all_cnt_runs = 0usize;
+    let mut all_max_run = 0usize;
+    let t1 = n / 3;
+    let t2 = (2 * n) / 3;
+
+    let mut n_bytes = 0usize;
+    for (i, &ch) in chars.iter().enumerate() {
+        n_bytes += ch.len_utf8();
+        let b = v170_script_bucket(ch);
+        counts[b] += 1;
+        let pos_f = (i as f64) * inv_n;
+        if pos_f < first_pos[b] {
+            first_pos[b] = pos_f;
+        }
+        if pos_f > last_pos[b] {
+            last_pos[b] = pos_f;
+        }
+        if i < t1 {
+            head_c[b] += 1;
+        } else if i < t2 {
+            mid_c[b] += 1;
+        } else {
+            tail_c[b] += 1;
+        }
+
+        if (b as i32) == prev_b {
+            cur_run += 1;
+        } else {
+            if prev_b >= 0 {
+                let pb = prev_b as usize;
+                sum_runs[pb] += cur_run;
+                cnt_runs[pb] += 1;
+                if cur_run > max_runs[pb] {
+                    max_runs[pb] = cur_run;
+                }
+                all_sum_runs += cur_run;
+                all_cnt_runs += 1;
+                if cur_run > all_max_run {
+                    all_max_run = cur_run;
+                }
+                trans_out[pb] += 1;
+                n_switches += 1;
+            }
+            prev_b = b as i32;
+            cur_run = 1;
+        }
+
+        let cp = ch as u32;
+        uniq_mod64 |= 1u64 << (cp & 63);
+        if (0x30..=0x39).contains(&cp) {
+            n_digit += 1;
+            in_punct_run = false;
+        } else if ch.is_whitespace() {
+            n_space += 1;
+            if ch == '\n' {
+                n_nl += 1;
+            }
+            in_punct_run = false;
+        } else if (0x41..=0x5A).contains(&cp) || (0x61..=0x7A).contains(&cp) {
+            n_latin_ascii += 1;
+            if (0x41..=0x5A).contains(&cp) {
+                n_upper += 1;
+            }
+            in_punct_run = false;
+        } else if b == 3 {
+            n_punct += 1;
+            if !in_punct_run {
+                punct_runs += 1;
+                in_punct_run = true;
+            }
+        } else {
+            in_punct_run = false;
+        }
+    }
+    if prev_b >= 0 {
+        let pb = prev_b as usize;
+        sum_runs[pb] += cur_run;
+        cnt_runs[pb] += 1;
+        if cur_run > max_runs[pb] {
+            max_runs[pb] = cur_run;
+        }
+        all_sum_runs += cur_run;
+        all_cnt_runs += 1;
+        if cur_run > all_max_run {
+            all_max_run = cur_run;
+        }
+    }
+
+    let r_h = (counts[0] as f64) * inv_n;
+    let r_l = (counts[1] as f64) * inv_n;
+    let r_k = (counts[2] as f64) * inv_n;
+    let r_o = (counts[3] as f64) * inv_n;
+    let log_l = (n as f64).ln_1p() / 6.0;
+    let fert = (bpe_len as f64) / (n.max(1) as f64);
+
+    surf[0] = r_h as f32;
+    surf[1] = r_l as f32;
+    surf[2] = r_k as f32;
+    surf[3] = r_o as f32;
+    surf[4] = log_l as f32;
+    surf[5] = fert.clamp(0.0, 4.0) as f32;
+
+    let mean_run = ((all_sum_runs as f64) / (all_cnt_runs.max(1) as f64)) * inv_n;
+    let max_run = (all_max_run as f64) * inv_n;
+
+    uisr[0] = r_h as f32;
+    uisr[1] = r_l as f32;
+    uisr[2] = r_k as f32;
+    uisr[3] = r_o as f32;
+    uisr[4] = ((n_digit as f64) * inv_n) as f32;
+    uisr[5] = ((n_space as f64) * inv_n) as f32;
+    uisr[6] = ((n_punct as f64) * inv_n) as f32;
+    uisr[7] = ((n_upper as f64) / (n_latin_ascii.max(1) as f64)) as f32;
+    uisr[8] = (((n_bytes as f64) * inv_n) / 4.0).min(1.5) as f32;
+    uisr[9] = ((uniq_mod64.count_ones() as f64) / 64.0) as f32;
+    uisr[10] = log_l as f32;
+    uisr[11] = mean_run.min(1.0) as f32;
+    uisr[12] = max_run.min(1.0) as f32;
+    uisr[13] = ((n_switches as f64) / ((n.saturating_sub(1)).max(1) as f64)) as f32;
+    uisr[14] = ((punct_runs as f64) * inv_n) as f32;
+    uisr[15] = ((n_nl as f64) * inv_n) as f32;
+
+    let n_h = t1.max(1) as f64;
+    let n_m = (t2 - t1).max(1) as f64;
+    let n_t = (n - t2).max(1) as f64;
+    for b in 0..4 {
+        let off = 16 + b * 12;
+        let cnt = counts[b];
+        if cnt == 0 {
+            continue;
+        }
+        let mean_r = ((sum_runs[b] as f64) / (cnt_runs[b].max(1) as f64)) * inv_n;
+        let max_r = (max_runs[b] as f64) * inv_n;
+        let hf = (head_c[b] as f64) / n_h;
+        let mf = (mid_c[b] as f64) / n_m;
+        let tf = (tail_c[b] as f64) / n_t;
+        let mu3 = (hf + mf + tf) / 3.0;
+        let var3 = ((hf - mu3).powi(2) + (mf - mu3).powi(2) + (tf - mu3).powi(2)) / 3.0;
+
+        uisr[off] = ((cnt as f64) * inv_n) as f32;
+        uisr[off + 1] = ((cnt as f64).ln_1p() / 6.0) as f32;
+        uisr[off + 2] = mean_r.min(1.0) as f32;
+        uisr[off + 3] = max_r.min(1.0) as f32;
+        uisr[off + 4] = first_pos[b] as f32;
+        uisr[off + 5] = last_pos[b] as f32;
+        uisr[off + 6] = (last_pos[b] - first_pos[b]).max(0.0) as f32;
+        uisr[off + 7] = ((trans_out[b] as f64) / (cnt.max(1) as f64)) as f32;
+        uisr[off + 8] = hf as f32;
+        uisr[off + 9] = mf as f32;
+        uisr[off + 10] = tf as f32;
+        uisr[off + 11] = var3 as f32;
+    }
+}
+
+#[pyfunction]
+fn extract_v170_uisr_and_surf_batch_rs<'py>(
+    py: Python<'py>,
+    clean_texts: Vec<String>,
+    bpe_lens: PyReadonlyArray1<'py, f32>,
+) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>)> {
+    let n = clean_texts.len();
+    let bl = bpe_lens.as_slice()?.to_vec();
+    let (surf_flat, uisr_flat) = py.allow_threads(|| {
+        let mut surf = vec![0.0f32; n * 8];
+        let mut uisr = vec![0.0f32; n * 64];
+        surf.par_chunks_mut(8)
+            .zip(uisr.par_chunks_mut(64))
+            .enumerate()
+            .for_each(|(i, (s_row, u_row))| {
+                v170_uisr_and_surf_one(&clean_texts[i], bl[i], s_row, u_row);
+            });
+        (surf, uisr)
+    });
+    Ok((
+        Array2::from_shape_vec((n, 8), surf_flat).unwrap().into_pyarray(py),
+        Array2::from_shape_vec((n, 64), uisr_flat).unwrap().into_pyarray(py),
+    ))
+}
+
 #[pymodule]
 fn _meguviz_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustOOFCharLMSet>()?;
@@ -2790,5 +3167,6 @@ fn _meguviz_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_post_bpe_all_rs, m)?)?;
     m.add_function(wrap_pyfunction!(extract_r0_only_batch_rs, m)?)?;
     m.add_function(wrap_pyfunction!(text_sha16_batch_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_v170_uisr_and_surf_batch_rs, m)?)?;
     Ok(())
 }

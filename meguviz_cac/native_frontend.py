@@ -315,3 +315,23 @@ class RustTurboFrontend:
         if self.rust_charlm is not None and hasattr(self.rust_charlm, "kadane_focal_window"):
             return self.rust_charlm.kadane_focal_window(clean_text, int(win_chars), float(lam))
         return None
+
+    def extract_v170_sidecar(
+        self,
+        clean_texts: list[str],
+        bpe_lens: np.ndarray,
+        parent_raw_texts: list[str] | None = None,
+        use_oof_charlm: bool = True,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        from .v170_features import extract_v170_sidecar_batch
+
+        n = len(clean_texts)
+        if use_oof_charlm and self.rust_charlm is not None and self.text_to_fold:
+            parents = parent_raw_texts if parent_raw_texts is not None else clean_texts
+            t2f = self.text_to_fold
+            fold_ids = np.fromiter((t2f.get(p, -1) for p in parents), dtype=np.int32, count=n)
+        else:
+            fold_ids = None
+        return extract_v170_sidecar_batch(
+            clean_texts, bpe_lens, charlm=None, rust_charlm=self.rust_charlm, fold_ids=fold_ids
+        )
