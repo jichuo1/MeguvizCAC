@@ -895,6 +895,7 @@ def main() -> None:
         lardo_w8_core=bool(args.lardo_w8_core),
     )
     model = MeguvizV160StratosphereLoopModel(**model_kwargs).to(device)
+    warm_loaded_keys: set[str] = set()
     if args.init_from_fp16 is not None and args.init_from_fp16.is_file():
         ck_init = torch.load(args.init_from_fp16, map_location="cpu", weights_only=False)
         sd_init = ck_init.get("state_dict", ck_init.get("model_state_dict", ck_init))
@@ -903,11 +904,13 @@ def main() -> None:
         for k, v in sd_init.items():
             if k in cur_sd and cur_sd[k].shape == v.shape:
                 cur_sd[k].copy_(v.to(cur_sd[k].dtype))
+                warm_loaded_keys.add(k)
                 loaded_k += 1
             else:
                 skipped_k += 1
         model.load_state_dict(cur_sd)
-        print(f"[v1.6.1-WarmStart] Loaded {loaded_k}/{len(cur_sd)} matching tensors (skipped={skipped_k}) from {args.init_from_fp16}", flush=True)
+        n_new_t = len(cur_sd) - loaded_k
+        print(f"[v1.6.1-WarmStart] Loaded {loaded_k}/{len(cur_sd)} matching tensors (new_modules={n_new_t}, skipped={skipped_k}) from {args.init_from_fp16}", flush=True)
     era_grl = OfflineEraGRLHead(emb_dim=AI_END_V130, num_eras=NUM_ERAS_V122).to(device)
 
     use_rust_fe = (not bool(args.no_rust_frontend)) and HAS_RUST_FRONTEND
@@ -951,6 +954,26 @@ def main() -> None:
     compiled_ok = False
     if args.compile and device.type == "cuda" and (not args.smoke_test):
         compiled_ok = model.enable_torch_compile(mode=str(args.compile_mode))
+        if compiled_ok:
+            # Verify Triton/Inductor actually compiles a tiny step cleanly on this GPU arch; auto-fallback if unsupported!
+            try:
+                with torch.no_grad(), torch.amp.autocast("cuda", dtype=amp_dtype):
+                    _dm_ids = torch.ones((2, 32), dtype=torch.long, device=device)
+                    _dm_msk = torch.ones((2, 32), dtype=torch.long, device=device)
+                    _dm_st = torch.zeros((2, STYLE_FEAT_DIM_V11), device=device)
+                    _dm_loc = torch.zeros((2, 32, LOCAL_CHARLM_DIM_V150), device=device)
+                    _dm_c1 = torch.ones((2, 16), dtype=torch.long, device=device)
+                    _dm_cm = torch.ones((2, 16), device=device)
+                    _dm_cf = torch.zeros((2, 26), device=device)
+                    _dm_sup = torch.full((2,), 16.0, device=device)
+                    _dm_qsc = torch.zeros((2, 32, QUOTE_SCOPE_DIM_V161), device=device) if model.use_discourse_ops else None
+                    model(_dm_ids, _dm_msk, _dm_st, _dm_ids, _dm_ids, _dm_loc, _dm_c1, _dm_c1, _dm_c1, _dm_cm, _dm_cf, _dm_sup, outer_steps=2, quote_scope=_dm_qsc)
+                torch.cuda.synchronize()
+            except Exception as _ce:
+                print(f"[Turbo-Compile] Runtime fallback to eager (safe): {_ce}", flush=True)
+                model._compiled_prelude_t1 = None
+                model._compiled_loop_step = None
+                compiled_ok = False
 
     tot_p = sum(p.numel() for p in model.parameters())
     core_p = sum(p.numel() for p in model.core.parameters())
@@ -1321,7 +1344,20 @@ def main() -> None:
     # -----------------------------------------------------------------------
     r0_ids = {id(p) for p in model.rung0.parameters()}
     p2_lr_val = float(args.p2_lr)
-    opt2_groups = [{"params": [p for p in model.parameters() if id(p) not in r0_ids] + list(era_grl.parameters()), "lr": p2_lr_val, "base_lr": p2_lr_val, "weight_decay": 0.01}]
+    if warm_loaded_keys:
+        warm_backbone_p = [p for n, p in model.named_parameters() if id(p) not in r0_ids and n in warm_loaded_keys]
+        fresh_new_p = [p for n, p in model.named_parameters() if id(p) not in r0_ids and n not in warm_loaded_keys]
+        opt2_groups = []
+        if warm_backbone_p:
+            opt2_groups.append({"params": warm_backbone_p + list(era_grl.parameters()), "lr": p2_lr_val, "base_lr": p2_lr_val, "weight_decay": 0.01})
+        if fresh_new_p:
+            new_lr = min(2.0e-3, p2_lr_val * 2.5)
+            opt2_groups.append({"params": fresh_new_p, "lr": new_lr, "base_lr": new_lr, "weight_decay": 0.01})
+            print(f"  [v1.6.1-DiffLR] warm_backbone={len(warm_backbone_p)} tensors (lr={p2_lr_val:.2e}) | fresh_new_modules={len(fresh_new_p)} tensors (lr={new_lr:.2e})", flush=True)
+        if not opt2_groups:
+            opt2_groups = [{"params": [p for p in model.parameters() if id(p) not in r0_ids] + list(era_grl.parameters()), "lr": p2_lr_val, "base_lr": p2_lr_val, "weight_decay": 0.01}]
+    else:
+        opt2_groups = [{"params": [p for p in model.parameters() if id(p) not in r0_ids] + list(era_grl.parameters()), "lr": p2_lr_val, "base_lr": p2_lr_val, "weight_decay": 0.01}]
     if not args.freeze_r0:
         opt2_groups.insert(0, {"params": list(model.rung0.parameters()), "lr": min(2.0e-4, p2_lr_val * 0.25), "base_lr": min(2.0e-4, p2_lr_val * 0.25), "weight_decay": 0.01})
     opt2 = _make_adamw(opt2_groups, device)
