@@ -209,12 +209,13 @@ _sync_release() {
   local src="$2"
   local dst="$3"
   mkdir -p "$dst"
+  [ ! -f "$src/bili_picky_bpe_12k.json" ] && [ -f "$src/v0.7.0-r2-omniveritas-b4_bili_picky_bpe_12k.json" ] && cp -f "$src/v0.7.0-r2-omniveritas-b4_bili_picky_bpe_12k.json" "$src/bili_picky_bpe_12k.json"
   cp -f "$src/metrics-${ver}.json" "$dst/"
   [ -f "$src/${ver}_eval_cache.npz" ] && cp -f "$src/${ver}_eval_cache.npz" "$dst/"
   [ -f "$src/log_${ver}.txt" ] && cp -f "$src/log_${ver}.txt" "$dst/"
   cp -f "$src/meguvizcac-${ver}-bootable-v10-mesosphere.zip" "$dst/" 2>/dev/null || true
   (cd "$src" && zip -r -6 "$dst/meguvizcac-${ver}-full.zip" \
-    bundle_v10_mesosphere_v170.mgvz charlm_v160.bin bili_picky_bpe_12k.json manifest.json \
+    bundle_v10_mesosphere_v170.mgvz charlm_v170.bin bili_picky_bpe_12k.json manifest.json \
     v170_r0_apexchar_fp32.onnx v170_prelude_t1_fp32.onnx v170_loop_step_fp32.onnx v170_dynaseam_fp32.onnx \
     v170_r0_apexchar_fp32.skel.onnx v170_prelude_t1_fp32.skel.onnx v170_loop_step_fp32.skel.onnx v170_dynaseam_fp32.skel.onnx \
     "metrics-${ver}.json" \
@@ -222,6 +223,83 @@ _sync_release() {
     "meguvizcac-${ver}-4stage-onnx-fp32exact.zip")
   (cd "$dst" && sha256sum "meguvizcac-${ver}"-*.zip "metrics-${ver}.json" > SHA256SUMS.txt && cat SHA256SUMS.txt) || true
   touch "$dst/.synced_ok" && sync
+}
+
+_finalize_existing_export() {
+  local ver="$1"
+  local src="$2"
+  local dst="$3"
+  echo "[$(date +%H:%M:%S)] === Fast-Finalizing already-exported $ver (26/26 CI + Drive Sync, skipping redundant training) ===" | tee -a "$LOG_DRIVER"
+  python3 - "$ver" "$src" "$V07_TOKENIZER" <<'PY' 2>&1 | tee -a "$src/log_${ver}.txt"
+import json, sys, time
+from pathlib import Path
+import torch
+from meguviz_cac.v07_features import BiliPickyBPETokenizer
+from meguviz_cac.v150_heaven_loop import CompactCharLMV150
+from meguviz_cac.v170_mesosphere_loop import (
+    MeguvizV170CascadeEngine,
+    MeguvizV170MesosphereLoopModel,
+    export_v170_bootable_and_onnx,
+    load_bundle_v10_v170_into_model,
+    run_v170_ci_gates,
+)
+
+t0 = time.time()
+ver, out_dir, tok_src = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])
+manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+tok_dst = out_dir / "bili_picky_bpe_12k.json"
+if not tok_dst.is_file():
+    tok_dst.write_bytes(tok_src.read_bytes())
+tokenizer = BiliPickyBPETokenizer(tok_dst)
+charlm_p = out_dir / "charlm_v170.bin"
+charlm = None
+if charlm_p.is_file():
+    charlm = CompactCharLMV150.load(charlm_p)
+    charlm.__class__ = CompactCharLMV150
+
+model = MeguvizV170MesosphereLoopModel(
+    arch=str(manifest.get("arch", "v170_a0")),
+    vocab_size=tokenizer.vocab_size,
+    max_len=int(manifest.get("max_len", 288)),
+    use_discourse_ops=bool(manifest.get("use_discourse_ops", True)),
+    use_ar_uloop=bool(manifest.get("use_ar_uloop", False)),
+    use_step_lora=bool(manifest.get("use_step_lora", False)),
+    step_lora_r=int(manifest.get("step_lora_r", 0)),
+    use_delta_rule=bool(manifest.get("use_delta_rule", False)),
+    use_dual_hopfield=bool(manifest.get("use_dual_hopfield", False)),
+    use_m6_ph=bool(manifest.get("use_m6_ph", True)),
+    use_m7_cnma_uisr=bool(manifest.get("use_m7_cnma_uisr", True)),
+    lardo_w8_core=bool(manifest.get("lardo_w8_core", True)),
+    use_local_charlm_inject=bool(manifest.get("use_local_charlm_inject", True)),
+)
+load_bundle_v10_v170_into_model(model, out_dir / "bundle_v10_mesosphere_v170.mgvz")
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(dev).eval()
+export_rep = export_v170_bootable_and_onnx(model, tok_dst, manifest, out_dir, ver, charlm=charlm)
+eng = MeguvizV170CascadeEngine(out_dir, threads=4, r0_threads=2)
+ci_gates = run_v170_ci_gates(model, tokenizer, export_rep, out_dir, dev, charlm=charlm, engine=eng)
+report = {
+    "version": ver,
+    "arch": model.arch,
+    "finalized_from_existing_export": True,
+    "export": export_rep,
+    "v170_ci_gates": ci_gates,
+    "release_gates": {
+        "bootable_le_5p00_mib": bool(export_rep["bootable_le_5p00_mib"]),
+        "onnx_4stage_exact": bool(export_rep["onnx_exact_pass"]),
+        "v170_ci_passed": bool(ci_gates["all_ci_passed"]),
+    },
+    "finalize_elapsed_seconds": round(time.time() - t0, 2),
+}
+(out_dir / f"metrics-{ver}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+print(f"[v1.7.0 Fast-Finalize Done] ver={ver} | bootable={export_rep['bootable_mib']} MiB | CI={ci_gates['passed_count']}/{ci_gates['total_count']} PASS={ci_gates['all_ci_passed']} | Forb={export_rep['forbidden_ops_total']}", flush=True)
+if not report["release_gates"]["v170_ci_passed"] or not report["release_gates"]["bootable_le_5p00_mib"]:
+    raise SystemExit(1)
+PY
+  _sync_release "$ver" "$src" "$dst"
 }
 
 _r0_args() {
@@ -232,20 +310,36 @@ _r0_args() {
   fi
 }
 
+# Auto-finalize any already-exported v1.7.0-A0 (atomic lock so parallel MPS children never race)
+if [ -f "$OUT_A0/bundle_v10_mesosphere_v170.mgvz" ] && [ -f "$OUT_A0/manifest.json" ] && [ ! -f "$V170_DRIVE_OUT/v1.7.0-A0/metrics-v1.7.0-A0.json" ]; then
+  if mkdir /tmp/.meguviz_v170_a0_finalize_lock 2>/dev/null; then
+    trap 'rmdir /tmp/.meguviz_v170_a0_finalize_lock 2>/dev/null || true' EXIT
+    _finalize_existing_export "v1.7.0-A0" "$OUT_A0" "$V170_DRIVE_OUT/v1.7.0-A0"
+    rmdir /tmp/.meguviz_v170_a0_finalize_lock 2>/dev/null || true
+    trap - EXIT
+  fi
+fi
+
 # ===========================================================================
 # TRACK 1: v1.7.0-A0 (Natural R0++ + H=256 Baseline)
 # ===========================================================================
-if [ "$RUN_TRACK_A0" = "1" ] && [ ! -f "$OUT_A0/metrics-v1.7.0-A0.json" ] && [ ! -f "$V170_DRIVE_OUT/v1.7.0-A0/metrics-v1.7.0-A0.json" ]; then
-  echo "[$(date +%H:%M:%S)] === Launching v1.7.0-A0 (Natural R0++ + H=256 Baseline) ===" | tee -a "$LOG_DRIVER"
-  read -r -a R0_A0 <<< "$(_r0_args)"
-  python3 -u -m meguviz_cac.train_v170_mesosphere \
-    "${BASE_V170_ARGS[@]}" \
-    "${R0_A0[@]}" \
-    --arch v170_a0 \
-    --out "$OUT_A0" \
-    --checkpoint-dir "$V170_DRIVE_OUT/v1.7.0-A0" \
-    --version "v1.7.0-A0" 2>&1 | tee "$OUT_A0/log_v1.7.0-A0.txt"
-  _sync_release "v1.7.0-A0" "$OUT_A0" "$V170_DRIVE_OUT/v1.7.0-A0"
+if [ "$RUN_TRACK_A0" = "1" ] && [ ! -f "$V170_DRIVE_OUT/v1.7.0-A0/metrics-v1.7.0-A0.json" ]; then
+  if [ -f "$OUT_A0/bundle_v10_mesosphere_v170.mgvz" ] && [ -f "$OUT_A0/manifest.json" ] && [ ! -f "$OUT_A0/metrics-v1.7.0-A0.json" ]; then
+    _finalize_existing_export "v1.7.0-A0" "$OUT_A0" "$V170_DRIVE_OUT/v1.7.0-A0"
+  elif [ ! -f "$OUT_A0/metrics-v1.7.0-A0.json" ]; then
+    echo "[$(date +%H:%M:%S)] === Launching v1.7.0-A0 (Natural R0++ + H=256 Baseline) ===" | tee -a "$LOG_DRIVER"
+    read -r -a R0_A0 <<< "$(_r0_args)"
+    python3 -u -m meguviz_cac.train_v170_mesosphere \
+      "${BASE_V170_ARGS[@]}" \
+      "${R0_A0[@]}" \
+      --arch v170_a0 \
+      --out "$OUT_A0" \
+      --checkpoint-dir "$V170_DRIVE_OUT/v1.7.0-A0" \
+      --version "v1.7.0-A0" 2>&1 | tee "$OUT_A0/log_v1.7.0-A0.txt"
+    _sync_release "v1.7.0-A0" "$OUT_A0" "$V170_DRIVE_OUT/v1.7.0-A0"
+  else
+    _sync_release "v1.7.0-A0" "$OUT_A0" "$V170_DRIVE_OUT/v1.7.0-A0"
+  fi
 fi
 
 # ===========================================================================
@@ -300,14 +394,14 @@ for tag in ("v1.7.0-A0", "v1.7.0-DreamCore", "v1.7.0-M1"):
         board[tag] = {
             "arch": d.get("arch"),
             "bootable_mib": d.get("export", {}).get("bootable_mib"),
-            "ci_passed": d.get("release_gates", {}).get("v170_ci_passed", d.get("release_gates", {}).get("v160_ci_passed")),
-            "auto_ship_winner": d.get("quant_drift_3ckpt_audit", {}).get("auto_ship_gate", {}).get("winner"),
-            "gold_v2_test_cond": d.get("test_bili_gold_v2_onnx_cond"),
-            "val_multilingual": d.get("val_multilingual_onnx"),
-            "diag_god500": d.get("diag_god500_onnx"),
-            "ort_4t_b1_ms": d.get("ort_4t_b1_latency_ms"),
-            "elapsed_s": d.get("elapsed_seconds"),
-            "phase_timings_sec": d.get("phase_timings_sec"),
+            "ci_passed": d.get("release_gates", {}).get("v170_ci_passed"),
+            "ci_count": f"{d.get('v170_ci_gates', {}).get('passed_count')}/{d.get('v170_ci_gates', {}).get('total_count')}",
+            "auto_ship_winner": d.get("v170_config", {}).get("auto_ship_winner"),
+            "phase2_best_val": d.get("phase2_best_val"),
+            "pnbr_B_cert": d.get("pnbr_B_cert_holdout"),
+            "hopfield_pr": d.get("dual_hopfield_witness_pr"),
+            "b1_r0_t1_ms": d.get("v170_ci_gates", {}).get("V170_B1_ORT_LATENCY_AUDIT", {}).get("b1_r0_plus_t1_ms"),
+            "elapsed_s": d.get("elapsed_seconds", d.get("finalize_elapsed_seconds")),
         }
 txt = json.dumps(board, ensure_ascii=False, indent=2)
 (work / "v170_comparison.json").write_text(txt, encoding="utf-8")

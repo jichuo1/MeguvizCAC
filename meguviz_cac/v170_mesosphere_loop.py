@@ -1945,7 +1945,7 @@ def export_v170_bootable_and_onnx(
 
     r0_p = out_dir / "v170_r0_apexchar_fp32.onnx"
     torch.onnx.export(
-        _V170R0Export(m_cpu), (d_c1, d_c2, d_c3, d_cm, d_cf, d_surf), str(r0_p),
+        _V170R0Export(m_cpu).eval(), (d_c1, d_c2, d_c3, d_cm, d_cf, d_surf), str(r0_p),
         input_names=["c1", "c2", "c3", "mask", "feats", "m7_surf"],
         output_names=["logit_ai_r0", "logit_promo_r0", "p_defer_ai_r0", "p_defer_pr_r0", "p_apd_safe", "z_char"],
         dynamic_axes={k: {0: "B", 1: "Lr"} for k in ("c1", "c2", "c3", "mask")} | {"feats": {0: "B"}, "m7_surf": {0: "B"}},
@@ -1959,13 +1959,14 @@ def export_v170_bootable_and_onnx(
     d_loc = torch.randn((B, L, LOCAL_CHARLM_DIM_V150), dtype=torch.float32) * 0.1
     d_qsc = torch.zeros((B, L, QUOTE_SCOPE_DIM_V161), dtype=torch.float32)
     d_sup = torch.full((B,), 32.0, dtype=torch.float32)
+    m_cpu.eval()
     with torch.no_grad():
         r0_pt = m_cpu.forward_r0(d_c1, d_c2, d_c3, d_cm, d_cf, d_surf)
         d_zc = r0_pt["z_char"]
 
     t1_p = out_dir / "v170_prelude_t1_fp32.onnx"
     torch.onnx.export(
-        _V170PreludeT1Export(m_cpu),
+        _V170PreludeT1Export(m_cpu).eval(),
         (d_ids, d_msk, d_st, d_eg, d_loc, d_zc, d_sup, d_qsc, d_m6, d_surf, d_uisr), str(t1_p),
         input_names=["input_ids", "attention_mask", "style_feats", "engram_ids", "local_charlm", "z_char", "support_pairs", "quote_scope", "m6_ph", "m7_surf", "m7_uisr"],
         output_names=_T1_OUT_NAMES_V170,
@@ -1978,6 +1979,7 @@ def export_v170_bootable_and_onnx(
         opset_version=17, do_constant_folding=True, dynamo=False,
     )
 
+    m_cpu.eval()
     with torch.no_grad():
         s1_pt = m_cpu.forward_prelude_and_t1(d_ids, d_msk, d_st, d_eg, d_loc, d_zc, d_sup, d_qsc, d_m6, d_surf, d_uisr)
 
@@ -1985,7 +1987,7 @@ def export_v170_bootable_and_onnx(
     d_tval = torch.ones((B,), dtype=torch.float32)
     d_dt = torch.zeros((B,), dtype=torch.float32)
     torch.onnx.export(
-        _V170LoopStepExport(m_cpu),
+        _V170LoopStepExport(m_cpu).eval(),
         (
             s1_pt["s_ai"], s1_pt["s_pr"], s1_pt["M_psd"], s1_pt["D_val"], s1_pt["W_fast"],
             s1_pt["k_ev_norm"], s1_pt["v_ev_0"], s1_pt["e_sketch"], d_msk,
@@ -2018,12 +2020,13 @@ def export_v170_bootable_and_onnx(
     d_cmeta = torch.rand((B, 5, CHUNK_META_DIM_V11), dtype=torch.float32) * 0.5
     d_cval = torch.ones((B, 5), dtype=torch.float32)
     torch.onnx.export(
-        _V170LongExport(m_cpu), (d_cea, d_cep, d_cla, d_clp, d_cmeta, d_cval), str(long_p),
+        _V170LongExport(m_cpu).eval(), (d_cea, d_cep, d_cla, d_clp, d_cmeta, d_cval), str(long_p),
         input_names=["chunk_emb_ai", "chunk_emb_pr", "chunk_lg_ai", "chunk_lg_pr", "chunk_meta", "chunk_valid"],
         output_names=["doc_logit_ai", "doc_logit_promo", "titan_surprise_max"],
         dynamic_axes={k: {0: "B", 1: "C"} for k in ("chunk_emb_ai", "chunk_emb_pr", "chunk_lg_ai", "chunk_lg_pr", "chunk_meta", "chunk_valid")},
         opset_version=17, do_constant_folding=True, dynamo=False,
     )
+    m_cpu.eval()
 
     # Verify Forbidden Ops === 0 across ALL 4 stages + exact FP32 PyTorch vs ORT parity!
     forb_all = {p.name: _count_forbidden_ops(p) for p in (r0_p, t1_p, step_p, long_p)}
@@ -2093,7 +2096,7 @@ def export_v170_bootable_and_onnx(
         skel_raw_total += _strip_onnx_initializers_to_skeleton(p, sp)
         skel_paths.append(sp)
 
-    tok_out = out_dir / tokenizer_path.name
+    tok_out = out_dir / "bili_picky_bpe_12k.json"
     if tok_out.resolve() != tokenizer_path.resolve():
         tok_out.write_bytes(tokenizer_path.read_bytes())
 
@@ -2167,7 +2170,12 @@ class MeguvizV170CascadeEngine:
         self.release_dir = Path(release_dir)
         self.manifest = json.loads((self.release_dir / "manifest.json").read_text(encoding="utf-8"))
         self.arch_cfg = dict(self.manifest.get("arch_cfg") or ARCH_PRESETS_V170[self.manifest.get("arch", "v170_m1")])
-        self.tokenizer = BiliPickyBPETokenizer(self.release_dir / "bili_picky_bpe_12k.json")
+        tok_p = self.release_dir / "bili_picky_bpe_12k.json"
+        if not tok_p.is_file():
+            alt_toks = sorted(self.release_dir.glob("*bpe*.json"))
+            if alt_toks:
+                tok_p = alt_toks[0]
+        self.tokenizer = BiliPickyBPETokenizer(tok_p)
         charlm_p = self.release_dir / "charlm_v170.bin"
         if not charlm_p.is_file():
             charlm_p = self.release_dir / "charlm_v160.bin"
