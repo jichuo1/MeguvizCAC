@@ -70,8 +70,9 @@ def main() -> None:
             "--gold-v2-dir", str(args.gold_v2_dir),
             "--wave3-dir", str(args.wave3_dir),
             "--v11-data-dir", str(args.v11_data_dir),
-            "--out-dir", str(ing_dir),
-            "--watermark-file", str(wm_file),
+            "--max-master-db-t0", "300000",
+            "--out", str(ing_dir),
+            "--watermark", str(wm_file),
         ]
         if args.delta_dir and args.delta_dir.is_dir():
             cmd.extend(["--delta-dir", str(args.delta_dir)])

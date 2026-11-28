@@ -40,6 +40,20 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
+# Auto-refresh /content/v123_bundle if the latest post-c408 v123_all_gold_sibling_and_delta_bundle.zip is uploaded in v161_data!
+FRESH_V123_ZIP="$V161_DATA_DIR/v123_all_gold_sibling_and_delta_bundle.zip"
+if [ -f "$FRESH_V123_ZIP" ]; then
+  ZIP_SHA="$(sha256sum "$FRESH_V123_ZIP" | awk '{print $1}')"
+  CUR_SHA="$(cat "$V123_BUNDLE_DIR/.bundle_sha256" 2>/dev/null || true)"
+  if [ "$ZIP_SHA" != "$CUR_SHA" ]; then
+    echo "[$(date +%H:%M:%S)] Extracting FRESH v123 bundle ($FRESH_V123_ZIP, sha=${ZIP_SHA:0:12}) -> $V123_BUNDLE_DIR" | tee -a "$LOG_DRIVER"
+    rm -rf "$V123_BUNDLE_DIR"
+    mkdir -p "$V123_BUNDLE_DIR"
+    unzip -q -o "$FRESH_V123_ZIP" -d "$V123_BUNDLE_DIR"
+    echo "$ZIP_SHA" > "$V123_BUNDLE_DIR/.bundle_sha256"
+  fi
+fi
+
 # Locate base 251K Super-Teacher soft pool, tokenizer & v04 corpus
 DISTILL_POOL="/content/out_v140_superteacher/v140_superteacher_soft_distill_pool.jsonl.gz"
 [ ! -f "$DISTILL_POOL" ] && [ -f "/content/v140_superteacher_soft_distill_pool.jsonl.gz" ] && DISTILL_POOL="/content/v140_superteacher_soft_distill_pool.jsonl.gz"
