@@ -48,7 +48,7 @@ export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 # Auto-install (or build once & cache to Drive) Rust `_meguviz_rs` wheel for 35x-200x frontend speedup!
 if ! python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMSet')" >/dev/null 2>&1; then
   PY_TAG="$(python3 -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
-  CACHED_WHL="$(ls -1t "$WHEEL_DIR"/meguviz_native-*-"${PY_TAG}"-*linux_x86_64.whl 2>/dev/null | head -n 1 || true)"
+  CACHED_WHL="$(ls -1t "$WHEEL_DIR"/meguviz_native-*-"${PY_TAG}"-*x86_64.whl 2>/dev/null | head -n 1 || true)"
   if [ -n "$CACHED_WHL" ]; then
     echo "[$(date +%H:%M:%S)] Installing cached Rust wheel: $CACHED_WHL" | tee -a "$LOG_DRIVER"
     pip install -q --force-reinstall "$CACHED_WHL" || true
@@ -62,7 +62,7 @@ if ! python3 -c "import _meguviz_rs; assert hasattr(_meguviz_rs, 'RustOOFCharLMS
     if command -v cargo >/dev/null 2>&1; then
       pip install -q maturin >/dev/null 2>&1 || true
       maturin build --release --manifest-path "$REPO_DIR/meguviz_native/Cargo.toml" -i "$(which python3)" -o "$WHEEL_DIR" && \
-        pip install -q --force-reinstall "$WHEEL_DIR"/meguviz_native-*-"${PY_TAG}"-*linux_x86_64.whl || true
+        pip install -q --force-reinstall "$WHEEL_DIR"/meguviz_native-*-"${PY_TAG}"-*x86_64.whl || true
     fi
   fi
 fi
