@@ -345,33 +345,41 @@ fi
 # ===========================================================================
 # TRACK 2: v1.7.0-DreamCore (DreamCore + M6/M7/M8, no DualHopfield)
 # ===========================================================================
-if [ "$RUN_TRACK_DREAM" = "1" ] && [ ! -f "$OUT_DC/metrics-v1.7.0-DreamCore.json" ] && [ ! -f "$V170_DRIVE_OUT/v1.7.0-DreamCore/metrics-v1.7.0-DreamCore.json" ]; then
-  echo "[$(date +%H:%M:%S)] === Launching v1.7.0-DreamCore (MesosphereLoop DreamCore + M6/M7/M8) ===" | tee -a "$LOG_DRIVER"
-  read -r -a R0_DC <<< "$(_r0_args)"
-  python3 -u -m meguviz_cac.train_v170_mesosphere \
-    "${BASE_V170_ARGS[@]}" \
-    "${R0_DC[@]}" \
-    --arch v170_m1 \
-    --no-use-dual-hopfield \
-    --out "$OUT_DC" \
-    --checkpoint-dir "$V170_DRIVE_OUT/v1.7.0-DreamCore" \
-    --version "v1.7.0-DreamCore" 2>&1 | tee "$OUT_DC/log_v1.7.0-DreamCore.txt"
+if [ "$RUN_TRACK_DREAM" = "1" ] && [ ! -f "$V170_DRIVE_OUT/v1.7.0-DreamCore/.synced_ok" ]; then
+  if [ ! -f "$OUT_DC/metrics-v1.7.0-DreamCore.json" ]; then
+    echo "[$(date +%H:%M:%S)] === Launching v1.7.0-DreamCore (MesosphereLoop DreamCore + M6/M7/M8) ===" | tee -a "$LOG_DRIVER"
+    read -r -a R0_DC <<< "$(_r0_args)"
+    python3 -u -m meguviz_cac.train_v170_mesosphere \
+      "${BASE_V170_ARGS[@]}" \
+      "${R0_DC[@]}" \
+      --arch v170_m1 \
+      --no-use-dual-hopfield \
+      --out "$OUT_DC" \
+      --checkpoint-dir "$V170_DRIVE_OUT/v1.7.0-DreamCore" \
+      --version "v1.7.0-DreamCore" 2>&1 | tee "$OUT_DC/log_v1.7.0-DreamCore.txt"
+  else
+    echo "[$(date +%H:%M:%S)] === Syncing already-completed v1.7.0-DreamCore release to Drive ===" | tee -a "$LOG_DRIVER"
+  fi
   _sync_release "v1.7.0-DreamCore" "$OUT_DC" "$V170_DRIVE_OUT/v1.7.0-DreamCore"
 fi
 
 # ===========================================================================
 # TRACK 3: v1.7.0-M1 (Full DreamCore + Once-at-T1 DualHopfield B2a)
 # ===========================================================================
-if [ "$RUN_TRACK_M1" = "1" ] && [ ! -f "$OUT_M1/metrics-v1.7.0-M1.json" ] && [ ! -f "$V170_DRIVE_OUT/v1.7.0-M1/metrics-v1.7.0-M1.json" ]; then
-  echo "[$(date +%H:%M:%S)] === Launching v1.7.0-M1 (Full DreamCore + DualHopfield B2a + M6/M7/M8) ===" | tee -a "$LOG_DRIVER"
-  read -r -a R0_M1 <<< "$(_r0_args)"
-  python3 -u -m meguviz_cac.train_v170_mesosphere \
-    "${BASE_V170_ARGS[@]}" \
-    "${R0_M1[@]}" \
-    --arch v170_m1 \
-    --out "$OUT_M1" \
-    --checkpoint-dir "$V170_DRIVE_OUT/v1.7.0-M1" \
-    --version "v1.7.0-M1" 2>&1 | tee "$OUT_M1/log_v1.7.0-M1.txt"
+if [ "$RUN_TRACK_M1" = "1" ] && [ ! -f "$V170_DRIVE_OUT/v1.7.0-M1/.synced_ok" ]; then
+  if [ ! -f "$OUT_M1/metrics-v1.7.0-M1.json" ]; then
+    echo "[$(date +%H:%M:%S)] === Launching v1.7.0-M1 (Full DreamCore + DualHopfield B2a + M6/M7/M8) ===" | tee -a "$LOG_DRIVER"
+    read -r -a R0_M1 <<< "$(_r0_args)"
+    python3 -u -m meguviz_cac.train_v170_mesosphere \
+      "${BASE_V170_ARGS[@]}" \
+      "${R0_M1[@]}" \
+      --arch v170_m1 \
+      --out "$OUT_M1" \
+      --checkpoint-dir "$V170_DRIVE_OUT/v1.7.0-M1" \
+      --version "v1.7.0-M1" 2>&1 | tee "$OUT_M1/log_v1.7.0-M1.txt"
+  else
+    echo "[$(date +%H:%M:%S)] === Syncing already-completed v1.7.0-M1 release to Drive ===" | tee -a "$LOG_DRIVER"
+  fi
   _sync_release "v1.7.0-M1" "$OUT_M1" "$V170_DRIVE_OUT/v1.7.0-M1"
 fi
 

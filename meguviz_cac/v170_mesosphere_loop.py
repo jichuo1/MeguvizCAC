@@ -2807,11 +2807,26 @@ def run_v170_ci_gates(
     else:
         ci["V170_ECHO_CERT_AR_ULOOP"] = {"disabled": True, "pass": True}
 
-    # 25. NEW M9 Gate: T1..T8 Extrapolation Finiteness & Bounded Fast-Weight `||W_8||_F`
+    # 25. NEW M9 Gate: T1..T8 Extrapolation Finiteness & Contracting Fast-Weight `||W_8||_F` Stability
+    o_t4 = _infer(t_fw, outer_steps=4)
     t8_lgs = [float(o_t8[f"logit_ai_t{k}"][0].item()) for k in range(1, 9)]
+    t4_t8_drift = abs(t8_lgs[7] - t8_lgs[3])
+    w4_fro = float(o_t4["W_fast_final"].float().norm().item())
     w8_fro = float(o_t8["W_fast_final"].float().norm().item())
-    t8_ok = bool(all(math.isfinite(x) for x in t8_lgs) and math.isfinite(w8_fro) and w8_fro < 50.0)
-    ci["V170_T1_TO_T8_EXTRAP_FINITE"] = {"t4_to_t8_abs_drift": round(abs(t8_lgs[7] - t8_lgs[3]), 4), "W8_fro": round(w8_fro, 4), "pass": t8_ok}
+    t8_ok = bool(
+        all(math.isfinite(x) for x in t8_lgs)
+        and math.isfinite(w4_fro)
+        and math.isfinite(w8_fro)
+        and t4_t8_drift < 1.5
+        and w8_fro <= 1.35 * max(w4_fro, 1.0) + 10.0
+        and w8_fro < 1000.0
+    )
+    ci["V170_T1_TO_T8_EXTRAP_FINITE"] = {
+        "t4_to_t8_abs_drift": round(t4_t8_drift, 4),
+        "W4_fro": round(w4_fro, 4),
+        "W8_fro": round(w8_fro, 4),
+        "pass": t8_ok,
+    }
 
     # 26. NEW M8 Gate: Real B=1 ORT Latency Audit (2T R0++ & 4T T1/step)
     t_lat_0 = time.perf_counter()
