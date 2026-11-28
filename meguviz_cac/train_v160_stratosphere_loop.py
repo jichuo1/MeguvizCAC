@@ -564,6 +564,12 @@ def main() -> None:
     ap.add_argument("--mono-eps", type=float, default=0.05)
     ap.add_argument("--use-ncl", action="store_true", help="Enable NCL falsification arm (Arm A3 ONLY)")
     ap.add_argument("--ncl-gamma", type=float, default=0.12)
+    ap.add_argument("--use-softplus-cvar", action="store_true", help="Rev.2 zero-inference-cost negative-class softplus CVaR tail penalty")
+    ap.add_argument("--cvar-alpha", type=float, default=0.08)
+    ap.add_argument("--cvar-weight", type=float, default=0.14)
+    ap.add_argument("--use-fmt-cf", action="store_true", help="Rev.2 zero-inference-cost rule-based human format counterfactual consistency L_inv")
+    ap.add_argument("--fmt-cf-weight", type=float, default=0.12)
+    ap.add_argument("--extra-gold-pack", type=Path, default=None, help="Optional extra zero-leakage clean gold pack (e.g. DuckDB 2.0 stream pack)")
     ap.add_argument("--use-cascade-weight", action="store_true", help="Optional survival reweighting (OFF in locked A0-A5)")
     ap.add_argument("--no-crossview-fusion", action="store_true", help="Disable monotone OOF cross-view late fusion")
     ap.add_argument("--two-sided-r0-exit", action="store_true", help="Test exact Clopper-Pearson high-side R0 exit certification")
@@ -624,6 +630,35 @@ def main() -> None:
     d_promo = [r for r in distill_pool if r.get("t_pr_lg", -5.0) >= 0.5]
     d_all = distill_pool
     gold_pos, gold_hd, gold_nat, gold_pr = corpus["train_ai_pos"], corpus["train_hu_hard"], corpus["train_hu_natural"], corpus["train_promo_extra"]
+    if args.extra_gold_pack is not None and args.extra_gold_pack.is_file():
+        extra_rows = read_jsonl_any_v140(args.extra_gold_pack)
+        n_ex_add = 0
+        for er in extra_rows:
+            et = str(er.get("text", "") or "").strip()
+            if not et or text_sha16_v140(et) in blocked:
+                continue
+            ya = float(er.get("y_ai", er.get("label_ai", -1.0)))
+            yp = float(er.get("y_pr", er.get("label_promo", -1.0)))
+            has_a = 1.0 if ya in (0.0, 1.0) else 0.0
+            has_p = 1.0 if yp in (0.0, 1.0) else 0.0
+            if has_a < 0.5 and has_p < 0.5:
+                continue
+            item = {
+                "text": et, "y_ai": max(0.0, ya), "y_pr": max(0.0, yp),
+                "has_ai": has_a, "has_pr": has_p, "has_t": 0.0,
+                "t_ai_lg": 0.0, "t_ai_r0": 0.0, "t_ai_t2": 0.0, "t_ai_t3": 0.0, "t_pr_lg": 0.0,
+                "era5": int(er.get("era5", -1)), "sub4": int(er.get("sub4", -1)),
+            }
+            if has_a > 0.5 and ya >= 0.5:
+                gold_pos.append(item)
+            elif has_a > 0.5 and (str(er.get("bucket", "")).endswith("hard_fp") or bool(er.get("is_hard_fp", False))):
+                gold_hd.append(item)
+            elif has_a > 0.5:
+                gold_nat.append(item)
+            if has_p > 0.5 and yp >= 0.5:
+                gold_pr.append(item)
+            n_ex_add += 1
+        print(f"[v1.6.0-ExtraGold] Admitted {n_ex_add:,} zero-leakage rows from {args.extra_gold_pack}", flush=True)
     longform_train = read_jsonl_any_v140(args.v11_data_dir / "v11_wave2_longform_gold_1200.jsonl.gz")[: (24 if args.smoke_test else 1200)]
 
     # 2. Model + Group-Clustered 3-Fold OOF CharLM
@@ -902,7 +937,36 @@ def main() -> None:
         era_v = hu_m & (bk["era5"] >= 0) & (bk["era5"] < NUM_ERAS_V122)
         if int(era_v.sum().item()) >= 8:
             loss = loss + 0.12 * era_grl(od["emb_ai"], bk["era5"], era_v, lam=0.50)
+
+        # 6. Rev.2 Zero-Inference-Cost Shift-Safe Negative-Class Softplus-CVaR Tail Loss (opt-in for v1.6.0-r1!)
+        if args.use_softplus_cvar and float(args.cvar_weight) > 0.0 and int(hu_m.sum().item()) >= 8:
+            z_hu = ai_steps[-1].float()[hu_m]
+            l0 = F.softplus(z_hu)
+            a_cv = max(0.02, min(0.5, float(args.cvar_alpha)))
+            q_idx = max(0, min(l0.numel() - 1, int(math.floor((1.0 - a_cv) * l0.numel()))))
+            tau_cv = torch.sort(l0).values[q_idx].detach()
+            cvar_hu = tau_cv + F.relu(l0 - tau_cv).mean() / a_cv
+            loss = loss + float(args.cvar_weight) * cvar_hu
         return loss
+
+    def _minimal_rule_format_edit(txt: str) -> str:
+        """Rev.2 P1 deterministic rule-based label-preserving human format edit (NEVER LLM text rewrite!)."""
+        s = str(txt).strip()
+        if len(s) < 12:
+            return s
+        mode = rng.randint(0, 2)
+        if mode == 0:
+            # Split by Chinese/English sentence punctuation into numbered bullet points (kedaibiao style)
+            parts = [p.strip() for p in s.replace("。", "。\n").replace("！", "！\n").replace("？", "？\n").split("\n") if p.strip()]
+            if len(parts) >= 2:
+                return "\n".join(f"{idx + 1}. {p}" for idx, p in enumerate(parts[:5]))
+            return f"1. {s}"
+        if mode == 1:
+            # Strip existing newlines / numbering into casual single-paragraph prose
+            lines = [ln.strip().lstrip("0123456789.、-•* ") for ln in s.splitlines() if ln.strip()]
+            return " ".join(lines) if lines else s
+        # Mode 2: Add compact neutral structural header + newline
+        return f"【要点】\n{s}"
 
     # -----------------------------------------------------------------------
     # Phase 2: Full StratosphereLoop Training (`T ~ U{1..6}` + CF Mirrors + Symmetric DynaSeam)
@@ -954,6 +1018,19 @@ def main() -> None:
                         + 0.50 * (F.softplus(1.6 - (oa["logit_ai_t1"].float() - oh["logit_ai_t1"].float())) * pw).mean()
                     )
                     loss = loss + 0.25 * l_cf
+
+            if args.use_fmt_cf and float(args.fmt_cf_weight) > 0.0 and (step % 4 == 2) and (gold_hd or gold_nat):
+                hu_pool = gold_hd + gold_nat
+                n_fc = 4 if args.smoke_test else 12
+                fc_rows = rng.sample(hu_pool, min(n_fc, len(hu_pool)))
+                orig_txts = [str(r["text"]) for r in fc_rows]
+                edit_txts = [_minimal_rule_format_edit(t) for t in orig_txts]
+                b_o = _collate_v160_batch([{"text": t} for t in orig_txts], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True)
+                b_e = _collate_v160_batch([{"text": t} for t in edit_txts], fcache, model.r0_b2, model.r0_b3, device, rng=None, punct_jitter_prob=0.0, need_bpe=True)
+                oo = model(b_o["ids"], b_o["msk"], b_o["st"], b_o["eg"], b_o["tg"], b_o["loc"], b_o["c1"], b_o["c2"], b_o["c3"], b_o["cm"], b_o["cf"], b_o["sup"], outer_steps=4, r0_drop_p=0.50, charlm_drop_p=0.30, use_crossview_dt=bool(args.use_slot9_dt))
+                oe = model(b_e["ids"], b_e["msk"], b_e["st"], b_e["eg"], b_e["tg"], b_e["loc"], b_e["c1"], b_e["c2"], b_e["c3"], b_e["cm"], b_e["cf"], b_e["sup"], outer_steps=4, r0_drop_p=0.50, charlm_drop_p=0.30, use_crossview_dt=bool(args.use_slot9_dt))
+                l_inv = ((oo["logit_ai_t4"].float() - oe["logit_ai_t4"].float()) ** 2).mean() + 0.5 * ((oo["logit_ai_t2"].float() - oe["logit_ai_t2"].float()) ** 2).mean()
+                loss = loss + float(args.fmt_cf_weight) * l_inv.clamp_max(8.0)
 
             if longform_train and (step % 6 == 0):
                 docs = rng.sample(longform_train, min(2 if args.smoke_test else 5, len(longform_train)))

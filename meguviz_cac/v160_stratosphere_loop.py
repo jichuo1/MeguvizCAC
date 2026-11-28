@@ -801,6 +801,8 @@ class StratosphereLoopCoreV160(nn.Module):
         at = torch.softmax(sc.float(), dim=-1).to(h_tok.dtype)
         ctx = torch.matmul(at, vh).transpose(1, 2).reshape(B, self.n_slots, self.d_kv)
         init_slots = q + blk0.ca_o(ctx)
+        if self.dynamics_mode != "v150_anchor":
+            init_slots, _ = self._per_slot_project(init_slots)
         return {"k_ev": k_ev, "v_ev": v_ev, "init_slots": init_slots}
 
     def compute_step_phi(self, t_val: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -901,8 +903,8 @@ class StratosphereLoopCoreV160(nn.Module):
         s_ai_cand = s_cand[:, : self.n_ai_slots, :]
         s_pr_next = s_cand[:, self.n_ai_slots :, :]
 
-        m_log = self.mhc_base_log.unsqueeze(0) + 0.35 * torch.tanh(self.mhc_step_delta(step_phi)).view(B, 3, 3)
-        m3 = sinkhorn_nxn_v150(m_log, iters=MHC_SINKHORN_ITERS_V150).to(s_ai_cand.dtype)
+        m_log = self.mhc_base_log.clamp(-3.0, 3.0).unsqueeze(0) + 0.35 * torch.tanh(self.mhc_step_delta(step_phi)).view(B, 3, 3)
+        m3 = sinkhorn_nxn_v150(m_log, iters=max(12, MHC_SINKHORN_ITERS_V150)).to(s_ai_cand.dtype)
         ai_stack = torch.stack([s_ai_cand, ai_streams[:, 1], ai_streams[:, 2]], dim=1)  # (B, 3, n_ai, D)
         ai_streams_next = torch.einsum("bij,bjnd->bind", m3, ai_stack)
 
@@ -2386,8 +2388,8 @@ def run_v160_ci_gates(
     with torch.no_grad():
         t_all = torch.arange(6, dtype=torch.float32, device=device)
         phi_all = model.core.compute_step_phi(t_all, torch.float32)
-        m_log = model.core.mhc_base_log.unsqueeze(0) + 0.35 * torch.tanh(model.core.mhc_step_delta(phi_all)).view(6, 3, 3)
-        m3 = sinkhorn_nxn_v150(m_log, iters=MHC_SINKHORN_ITERS_V150)
+        m_log = model.core.mhc_base_log.clamp(-3.0, 3.0).unsqueeze(0) + 0.35 * torch.tanh(model.core.mhc_step_delta(phi_all)).view(6, 3, 3)
+        m3 = sinkhorn_nxn_v150(m_log, iters=max(12, MHC_SINKHORN_ITERS_V150))
         r_err = float((m3.sum(dim=-1) - 1.0).abs().max().item())
         c_err = float((m3.sum(dim=-2) - 1.0).abs().max().item())
     ci["V160_S2_mhc_3x3_doubly_stochastic"] = {"row_err": round(r_err, 8), "col_err": round(c_err, 8), "pass": bool(r_err < 1e-4 and c_err < 1e-4)}
